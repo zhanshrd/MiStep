@@ -64,15 +64,15 @@ public final class MiStepHost {
 
     private static volatile MiStepHost sInstance;
 
-    private final Context ctx;
+    final Context ctx;
     private final Executor executor;
     private final Object factory;
     private final Object transitions;
-    private final Handler main = new Handler(Looper.getMainLooper());
+    final Handler main = new Handler(Looper.getMainLooper());
 
     private final Slot[] slots = new Slot[SLOT_COUNT];
 
-    private volatile MiStepLayout layout;
+    volatile MiStepLayout layout;
     private FrameLayout root;
     private WindowManager wm;
     private WindowManager.LayoutParams lp;
@@ -83,8 +83,7 @@ public final class MiStepHost {
     private int geometryRefreshDeferrals;
     private boolean geometryRefreshAfterLive;
     private int lpY = 0;
-    private boolean zoomed;
-    private String lastBroadcastZoom;
+    boolean zoomed;
     private volatile int screenW = 1080;
     private volatile int screenH = 2460;
     private final Object taskUsersLock = new Object();
@@ -100,6 +99,7 @@ public final class MiStepHost {
     private SwapPreview swapPreview;
     private Object swapPreviewStatusOwner;
     private final MiStepStatusBar statusBar;
+    private final ZoomTransport zoomTransport;
     private volatile HomeTaskReturn coveredHome;
     private CellMovePreview cellMovePreview;
     private Bitmap mainBackdrop;
@@ -436,6 +436,7 @@ public final class MiStepHost {
         this.factory = factory;
         this.transitions = transitions;
         statusBar = new MiStepStatusBar(main, MiStepHost::log);
+        zoomTransport = new ZoomTransport(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
         installRetainedSurfaces(ctx.getClassLoader());
         for (int i = 0; i < SLOT_COUNT; i++) {
@@ -2664,7 +2665,7 @@ public final class MiStepHost {
      * 呼出/退出为 300ms 整屏缩放动画（system_server 侧 2.2.4+ 的 anim 命令）；
      * 动画结束后再写一次稳态续租，避免 4 秒租约把进行中的动画取消。
      */
-    private static final long ZOOM_ANIM_MS = 300L;
+    static final long ZOOM_ANIM_MS = 300L;
     private android.animation.ValueAnimator workspaceAnimator;
     private long workspaceGeneration;
     private float workspaceAlpha = 1f;
@@ -2748,99 +2749,18 @@ public final class MiStepHost {
         animator.start();
     }
     /** 动画期间宿主不得写普通稳态（会取消动画）；心跳按此时间窗跳过。 */
-    private volatile long zoomAnimUntil;
-    private long zoomCommandGeneration;
+    volatile long zoomAnimUntil;
+    long zoomCommandGeneration;
 
-    private String zoomOnCommand() {
-        return layout.mainScale + " " + layout.mainOffsetY + " " + layout.mainOffsetX;
-    }
+    private String zoomOnCommand() { return zoomTransport.zoomOnCommand(); }
 
-    private void writeZoomAnimated(boolean on) {
-        final long generation = ++zoomCommandGeneration;
-        final String steady = on ? zoomOnCommand() : "1 0 0";
-        zoomAnimUntil = android.os.SystemClock.uptimeMillis() + ZOOM_ANIM_MS + 250L;
-        writeZoomLine("anim " + steady + " " + ZOOM_ANIM_MS);
-        main.postDelayed(() -> {
-            if (!ZoomLifecyclePolicy.shouldApplyDelayedWrite(generation,
-                    zoomCommandGeneration, on, zoomed)) {
-                log("stale zoom animation completion ignored generation=" + generation);
-                return;
-            }
-            writeZoomLine(steady);
-        }, ZOOM_ANIM_MS + 150L);
-    }
+    private void writeZoomAnimated(boolean on) { zoomTransport.writeZoomAnimated(on); }
 
-    private void writeZoom(boolean on) {
-        zoomCommandGeneration++;
-        writeZoomLine(on ? zoomOnCommand() : "1 0 0");
-    }
+    private void writeZoom(boolean on) { zoomTransport.writeZoom(on); }
 
-    private void writeZoomLine(String command) {
-        writeZoomLine(command, System.currentTimeMillis());
-    }
+    private void writeZoomLine(String command) { zoomTransport.writeZoomLine(command); }
 
-    private void writeZoomLine(String command, long issuedAt) {
-        // Independent transport: a failed private-file write must not suppress zoom/restore.
-        broadcastZoom(command, issuedAt);
-        try {
-            java.io.File f = new java.io.File(ctx.getFilesDir(), "mistep-zoom");
-            android.util.AtomicFile file = new android.util.AtomicFile(f);
-            java.io.FileOutputStream stream = null;
-            try {
-                stream = file.startWrite();
-                stream.write(command.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                file.finishWrite(stream);
-                // system_server 需要读这个文件来应用单手模式缩放；AtomicFile 默认 0600，必须放开读权限。
-                if (!f.setReadable(true, false)) {
-                    log("writeZoom: setReadable(false) returned false");
-                }
-            } catch (java.io.IOException failure) {
-                if (stream != null) file.failWrite(stream);
-                throw failure;
-            }
-            log("zoom trigger written: " + command);
-        } catch (Throwable t) {
-            log("writeZoom failed: " + t);
-        }
-    }
-
-
-    /** 广播直投：绕过 system_server 读 SystemUI 私有文件的权限/SELinux 限制。 */
-    private void broadcastZoom(String command, long issuedAt) {
-        try {
-            String encoded = ZoomChannelState.encode(command, issuedAt);
-            String steady = command.trim();
-            if (steady.startsWith("anim")) {
-                String[] parts = steady.split("\\s+");
-                if (parts.length < 4) return;
-                steady = parts[1] + " " + parts[2] + " " + parts[3];
-            }
-            boolean changed = !command.equals(lastBroadcastZoom);
-            try {
-                // A heartbeat renews the timestamp too; rereading Settings must not renew it.
-                if (!android.provider.Settings.Global.putString(ctx.getContentResolver(), "mistep_zoom", encoded)) {
-                    log("zoom settings write returned false");
-                }
-            } catch (Throwable settingsError) {
-                log("zoom settings write failed: " + settingsError);
-            }
-            String[] parts = steady.split("\\s+");
-            float scale = Float.parseFloat(parts[0]);
-            float offsetY = Float.parseFloat(parts[1]);
-            float offsetX = Float.parseFloat(parts[2]);
-            android.content.Intent intent = new android.content.Intent("com.jiusis.mistep.ZOOM");
-            intent.putExtra("request", encoded);
-            intent.putExtra("scale", scale);
-            intent.putExtra("offsetY", offsetY);
-            intent.putExtra("offsetX", offsetX);
-            intent.addFlags(android.content.Intent.FLAG_RECEIVER_REGISTERED_ONLY);
-            ctx.sendBroadcast(intent);
-            if (changed) log("zoom broadcast sent: " + command);
-            lastBroadcastZoom = command;
-        } catch (Throwable error) {
-            log("zoom broadcast failed: " + error);
-        }
-    }
+    private void writeZoomLine(String command, long issuedAt) { zoomTransport.writeZoomLine(command, issuedAt); }
     private void startInternal() {
         main.post(() -> {
             if (!MiStepEntryGuard.canOpen(ctx)) {
@@ -4460,17 +4380,7 @@ public final class MiStepHost {
         }
     }
 
-    private int uidOf(String pkg) {
-        if (pkg == null) {
-            return 0;
-        }
-        try {
-            return ctx.getPackageManager().getApplicationInfo(pkg, 0).uid;
-        } catch (Throwable t) {
-            log("uidOf " + pkg + " failed: " + t);
-            return 0;
-        }
-    }
+    private int uidOf(String pkg) { return HostStaticUtil.uidOf(ctx, pkg); }
 
     // ---------------------------------------------------------------- 点击 / 交换
 
@@ -6045,32 +5955,11 @@ public final class MiStepHost {
         retained.recoveryController = slot.controller;
     }
 
-    private static int windowModeOf(Object info) {
-        try {
-            Object config = XposedHelpers.getObjectField(info, "configuration");
-            Object winConfig = XposedHelpers.getObjectField(config, "windowConfiguration");
-            return (Integer) XposedHelpers.callMethod(winConfig, "getWindowingMode");
-        } catch (Throwable ignored) {
-            return -1;
-        }
-    }
+    private static int windowModeOf(Object info) { return HostStaticUtil.windowModeOf(info); }
 
-    private static int configurationOrientationOf(Object info) {
-        try {
-            Object config = XposedHelpers.getObjectField(info, "configuration");
-            return XposedHelpers.getIntField(config, "orientation");
-        } catch (Throwable ignored) {
-            return TaskWindowState.UNKNOWN_ORIENTATION;
-        }
-    }
+    private static int configurationOrientationOf(Object info) { return HostStaticUtil.configurationOrientationOf(info); }
 
-    private static int requestedOrientationOf(Object info) {
-        try {
-            return XposedHelpers.getIntField(info, "requestedOrientation");
-        } catch (Throwable ignored) {
-            return -1;
-        }
-    }
+    private static int requestedOrientationOf(Object info) { return HostStaticUtil.requestedOrientationOf(info); }
 
     private void updateTaskWindowState(int slotIndex, Object info, int taskId, boolean active) {
         if (info == null || taskId < 0) return;
@@ -6358,25 +6247,9 @@ public final class MiStepHost {
         }
     }
 
-    private static void callHidden(Object target, String name, Object... args) {
-        try {
-            XposedHelpers.callMethod(target, name, args);
-        } catch (Throwable t) {
-            log("hidden " + name + " failed: " + t);
-        }
-    }
+    private static void callHidden(Object target, String name, Object... args) { HostStaticUtil.callHidden(target, name, args); }
 
-    private static Method findStartActivity(Class<?> cls) {
-        for (Class<?> c = cls; c != null; c = c.getSuperclass()) {
-            try {
-                return c.getDeclaredMethod("startActivity",
-                        PendingIntent.class, Intent.class, ActivityOptions.class, Rect.class);
-            } catch (NoSuchMethodException ignored) {
-                // 继续往父类找
-            }
-        }
-        return null;
-    }
+    private static Method findStartActivity(Class<?> cls) { return HostStaticUtil.findStartActivity(cls); }
 
     // ---------------------------------------------------------------- 任务状态 / 密度 / 可见性
 
@@ -6729,9 +6602,7 @@ public final class MiStepHost {
         return changed == null;
     }
 
-    private static int compactionHintMask(int initialEmptySlots, int occupiedSlots) {
-        return (initialEmptySlots | ~occupiedSlots) & ((1 << SLOT_COUNT) - 2);
-    }
+    private static int compactionHintMask(int initialEmptySlots, int occupiedSlots) { return HostStaticUtil.compactionHintMask(initialEmptySlots, occupiedSlots); }
 
     private void animateCellMoves(java.util.List<CellMovePlan> plans, int initialEmptySlots) {
         final FrameLayout movingRoot = root;
@@ -6806,18 +6677,7 @@ public final class MiStepHost {
     }
 
     /** 诊断用：从 RunningTaskInfo 里取 appCompatTaskInfo.topActivityAppBounds（px）。 */
-    private static String appBoundsOf(Object info) {
-        try {
-            Object compat = XposedHelpers.getObjectField(info, "appCompatTaskInfo");
-            if (compat == null) {
-                return "null";
-            }
-            Object bounds = XposedHelpers.getObjectField(compat, "topActivityAppBounds");
-            return String.valueOf(bounds);
-        } catch (Throwable t) {
-            return "unreadable(" + t + ")";
-        }
-    }
+    private static String appBoundsOf(Object info) { return HostStaticUtil.appBoundsOf(info); }
 
     /** An external fullscreen task can be reordered above our roots without killing them. */
     private void scheduleSideVisibilityRepair(Slot slot) {
@@ -7097,28 +6957,7 @@ public final class MiStepHost {
     }
 
     /** 按字段名取 SurfaceControl（先本类后父类；取不到返回 null）。 */
-    private static Object getSurfaceField(Object target, String name) {
-        if (target == null) {
-            return null;
-        }
-        for (Class<?> c = target.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
-            try {
-                Field f = c.getDeclaredField(name);
-                if (!"android.view.SurfaceControl".equals(f.getType().getName())) {
-                    continue;
-                }
-                f.setAccessible(true);
-                Object surface = f.get(target);
-                return surface != null && Boolean.TRUE.equals(
-                        XposedHelpers.callMethod(surface, "isValid")) ? surface : null;
-            } catch (NoSuchFieldException ignored) {
-                // 继续往父类找
-            } catch (Throwable t) {
-                return null;
-            }
-        }
-        return null;
-    }
+    private static Object getSurfaceField(Object target, String name) { return HostStaticUtil.getSurfaceField(target, name); }
 
     private boolean applyWct(String what, Object wct) {
         Throwable first = null;
@@ -7184,14 +7023,7 @@ public final class MiStepHost {
         return null;
     }
 
-    private static void log(String msg) {
-        android.util.Log.i(TAG, msg);
-        try {
-            XposedBridge.log(TAG + ": " + msg);
-        } catch (Throwable ignored) {
-            // 至少保留 logcat
-        }
-    }
+    static void log(String msg) { HostStaticUtil.log(msg); }
 }
 
 
