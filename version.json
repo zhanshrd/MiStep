@@ -1,6 +1,6 @@
 {
-  "name": "1.0.0",
-  "code": 1000000,
-  "runtimeMarker": "build=1.0.0 release",
+  "name": "1.1.0",
+  "code": 1001000,
+  "runtimeMarker": "build=1.1.0 release",
   "developmentBaseline": "2.9.204"
 }

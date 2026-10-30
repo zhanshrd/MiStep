@@ -98,7 +98,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             return;
         }
         final ClassLoader cl = lpparam.classLoader;
-        log("=== attached to " + SYSTEMUI + " build=1.0.0 release ===");
+        log("=== attached to " + SYSTEMUI + " build=1.1.0 release ===");
         try {
             NativeMultiWindowUnlock.install(cl, false);
             MiStepSystemActions.install(cl);
@@ -130,7 +130,7 @@ public class HostEntry implements IXposedHookLoadPackage {
      * by the keyboard itself.
      */
     private static void hookMiTypeAutoFloating(ClassLoader cl) {
-        log("=== attached to com.xiaomi.type build=1.0.0 release ===");
+        log("=== attached to com.xiaomi.type build=1.1.0 release ===");
         try {
             Class<?> service = XposedHelpers.findClass("com.mi.ime.MiInputMethodService", cl);
             XposedHelpers.findAndHookMethod(service, "handleSpacePressureAutoFloating",
@@ -256,7 +256,7 @@ public class HostEntry implements IXposedHookLoadPackage {
      * 与锤子Mi Step的 MagnificationSpecSmt / applyZoomedMatrixSmt 是同一机制的官方版本。
      */
     private void hookSystemServer(ClassLoader cl) {
-        log("=== attached to system_server (android) build=1.0.0 release ===");
+        log("=== attached to system_server (android) build=1.1.0 release ===");
         MiStepRecents.install(cl);
         NativeRawInputBridge.install();
         try {
