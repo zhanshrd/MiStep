@@ -56,3 +56,25 @@ pwsh -File tools\mstep_deploy.ps1 -Light    # 快速档：仅 su 强杀 SystemUI
 - [ ] 视用户反馈决定是否做 byron 触摸指纹（`raw_dispatch_policy.h` 加 ROM profile）
 - [x] version.json / manifest 版本号 fork 化（1.1.0 / 1001000）
 - [ ] 已知怪癖（疑似上游既有）：DEBUG 定向启动「设置」到副格偶发 `launch watchdog fired`（Settings 冷启动 vs TaskView 绑定竞速）；普通手势启动不受影响
+
+## 7. R1 全量评审台账（两路独立审查 + 交叉质证，134 文件 / 25054 行）
+
+**确认为 bug 并已修复**（R1 修复提交）：
+
+| 项 | 根因 | 修法 |
+|---|---|---|
+| 看门狗强制语义失效（A4≡B2, P2） | `failPromotion` 对 nativeSwap 票据委托 `requestLiveSwapCancellation` 后直接 return，而后者被 `cancelRequested`/`nativeCompleting` 闩死时静默 no-op——>8s 起全部强制路径为空转 | 取消路径改返回 boolean；失效时落入新的 `forceAbandonLivePromotion`（零 WM 写入的保守拆除：释放 promotion/input-blocker/suspend 闩，按未确认惯例冻结格子至会话退出自愈） |
+| 陈旧完成泄漏加固（B1 加固） | 三个 live finisher 的 stale 早退分支不清 `h.promotion`（交叉质证证明常规不可达：`sceneEpoch++` 仅两处且被 promotion 门挡、taskEpoch 被 promoting 门挡；作为闩释放簇的廉价加固收编） | stale 分支统一走 `forceAbandonLivePromotion`（binding 已易主则不冻结格子） |
+| TOGGLE 在 RESUMING 被吞（A5, P3） | `toggleVisibility` 只处理 SUSPENDED/ACTIVE，入场动画 ~0.7s 内的关闭请求静默丢弃 | RESUMING → `suspendSession("exit")`（其 972-978 行本就实现 RESUMING 挂起闩）；SUSPENDING → 记日志 |
+| 拖拽收集无投放高亮（A6, P3） | `setDropHighlight` 的 `active` 参数被无视（两分支写同值） | active 时 hint scale 1.06 |
+| 缩放退出失败路径旋转锁不对称（A7, P3） | exit 路径先放 rotation hold 再 apply spec，apply 抛异常时 catch 不回补 hold | catch 对称 re-arm（`!sFullscreenRotationActive` 守卫，begin/end 均幂等） |
+| liveZoomReceiver 永不注销（B3, P3） | 首次 live flip 注册后进程生命周期常驻（无运行时危害，但注册/注销不对称） | `restoreLiveSwapVisual` 尾部在 `pendingLiveZoom == null` 时注销（下次 flip 惰性重挂） |
+| OwnedTask.userId 跨线程（B4, P3） | Shell 线程写 / 主线程读无同步（结构竞争最坏自愈：suspend 停止并恢复 ACTIVE，1095-1102） | `volatile`；台账保留「shell-get vs main-remove 结构竞争」为已知自愈项 |
+
+**裁决为非 bug 的评审记录**（后续轮次按已知项对待）：
+
+- A1/A2/A3（拒绝路径冻结全家桶）：**误报**——3 参 `MiStepLiveSwap.Result` 硬编码 `rolesConfirmed=true`（MiStepLiveSwap.java:41-43），预检拒绝走 restore/clearSlot 分支；peer 抛点（HostSwapController:643-645）在 `nativeSwap=true`（:659）之前，`failPromotion` 走非 native 汇总不冻结。**残留设计限制**：存在 parked/frozen 格时 tap-swap 整体被拒（仅日志），属既有守卫语义，改动需真机验证。
+- B5：`swapPreview`/`swapPreviewStatusOwner` 永为 null，swap-preview 租约状态机退役（四处理由守卫全部冗余，statusBar.finish 仍生效，无用户可见损失）——保留不删（删除=重构风险）。
+- B6：live 家族 promote 方向 WCT 用 mode 0 与 BUG-1 教训「不一致」——**语境不同**：Shell transition + 同事务 reparent，成功以观察到的解析模式为门（`info(...,1)` 失败→FAILED→recover），误解析表现为交换失败+角色还原而非钉死。**禁止未经真机测试改成显式 1**。
+- B7：`HomeTransitionMagnification.appendPendingGeometry`、`HomeSurfaceTrace.install`、`NativeReturnTrace.install` 为孤儿安装（属性门控 no-op）——接线前勿假设已生效。
+- A8：`setPendingMainSide` 的 ACTIVE 守卫不可达（HotZoneGesture 源头丢弃）——注释已改为真实契约；「无手势关闭」为有意设计（关闭走顶栏 ✕ / TOGGLE / Home / 息屏）。
