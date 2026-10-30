@@ -101,7 +101,7 @@ public final class MiStepHost {
     final MiStepStatusBar statusBar;
     private final ZoomTransport zoomTransport;
     private final HostMirrorController mirrorController;
-    private final HostSwapController swapController;
+    final HostSwapController swapController;
     private final HostPromotionController promotionController;
     volatile HomeTaskReturn coveredHome;
     CellMovePreview cellMovePreview;
@@ -244,7 +244,7 @@ public final class MiStepHost {
         final Object token;
         Object surface;
         Object recoveryController;
-        int userId = -1;
+        volatile int userId = -1;
         boolean recoveryCandidate;
         OwnedTask(int id, Object token) { this.id = id; this.token = token; }
     }
@@ -660,7 +660,8 @@ public final class MiStepHost {
 
     public static void setPendingMainSide(boolean mainOnRight) {
         MiStepHost host = sInstance;
-        // 已经打开时的滑动是“关闭”，不改变下一次打开的方向。
+        // ACTIVE 期间热区手势在 HotZoneGesture 源头即被丢弃，本守卫为防御性冗余；
+        // 关闭工作区走顶栏 ✕ / TOGGLE 广播 / Home、Recents / 息屏，没有“再滑一次关闭”。
         if (host != null && host.scene == ACTIVE) return;
         pendingMainSide = mainOnRight ? 1 : 0;
     }
@@ -960,6 +961,8 @@ public final class MiStepHost {
         main.post(() -> {
             if (scene == SUSPENDED) resumeSession();
             else if (scene == ACTIVE) suspendSession("exit");
+            else if (scene == RESUMING) suspendSession("exit"); // suspendSession latches suspendRequested during RESUMING.
+            else log("toggle ignored while SUSPENDING; exit already in progress");
         });
     }
 
@@ -3502,8 +3505,9 @@ public final class MiStepHost {
 
     private void setDropHighlight(Slot slot, boolean active) {
         if (slot == null || slot.hint == null) return;
-        slot.hint.setScaleX(1f);
-        slot.hint.setScaleY(1f);
+        float scale = active ? 1.06f : 1f;
+        slot.hint.setScaleX(scale);
+        slot.hint.setScaleY(scale);
         LiveSwapVisualLease.writeAlpha(slot.hint, 1f);
     }
 

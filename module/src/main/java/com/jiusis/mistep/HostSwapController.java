@@ -410,7 +410,12 @@ final class HostSwapController {
     }
 
     void finishLiveCollect(MiStepHost.Promotion ticket, MiStepLiveSwap.Result result) {
-        if (!livePromotionBound(ticket) || ticket.nativeCompleting) return;
+        if (ticket.nativeCompleting) return;
+        if (!livePromotionBound(ticket)) {
+            if (h.promotion == ticket && !ticket.cancelled)
+                forceAbandonLivePromotion(ticket, "stale live collect completion", bindingIntact(ticket));
+            return;
+        }
         ticket.nativeCompleting = true;
         MiStepHost.Slot slot = ticket.slot;
         if (result.sideOwned && result.rolesConfirmed) {
@@ -1069,6 +1074,7 @@ final class HostSwapController {
         if (h.sceneEpoch != ticket.sceneEpoch || ticket.slot.taskEpoch != ticket.bindingEpoch
                 || ticket.slot.taskId != ticket.taskId || !ticket.token.equals(ticket.slot.taskToken)) {
             MiStepHost.log("stale native completion rejected; scene or original slot binding changed");
+            forceAbandonLivePromotion(ticket, "stale native completion", bindingIntact(ticket));
             return;
         }
         ticket.nativeCompleting = true;
@@ -1133,7 +1139,12 @@ final class HostSwapController {
     }
 
     void finishLiveHome(MiStepHost.Promotion ticket, MiStepLiveSwap.Result result) {
-        if (!livePromotionBound(ticket) || ticket.nativeCompleting) return;
+        if (ticket.nativeCompleting) return;
+        if (!livePromotionBound(ticket)) {
+            if (h.promotion == ticket && !ticket.cancelled)
+                forceAbandonLivePromotion(ticket, "stale live home completion", bindingIntact(ticket));
+            return;
+        }
         ticket.nativeCompleting = true;
         MiStepHost.Slot slot = ticket.slot;
         if (result.succeeded && !result.sideOwned && result.rolesConfirmed) {
@@ -1164,6 +1175,30 @@ final class HostSwapController {
         }
     }
 
+    /** Last-resort teardown when the native cancellation path is proven inert (watchdog
+     *  force, stale completions): releases every global latch with NO WM write — the
+     *  native outcome is unknown. The cell is frozen per the unconfirmed-completion
+     *  convention (heals at session exit) unless the slot binding already moved on. */
+    void forceAbandonLivePromotion(MiStepHost.Promotion ticket, String reason, boolean keepCellUnfrozen) {
+        if (h.promotion != ticket || ticket.cancelled) return;
+        ticket.cancelled = true;
+        h.promotion = null;
+        MiStepHost.Slot slot = ticket.slot;
+        slot.promoting = !keepCellUnfrozen;
+        slot.frozen = !keepCellUnfrozen;
+        restoreLiveSwapVisual(ticket);
+        h.statusBar.finish(ticket);
+        h.publishDesktopSideTasks();
+        MiStepHost.log("native promotion force-abandoned; cell frozen=" + !keepCellUnfrozen + ": " + reason);
+        h.finishPendingSuspend();
+    }
+
+    /** True when the ticket slot still carries exactly the ticket's binding. */
+    private static boolean bindingIntact(MiStepHost.Promotion ticket) {
+        return ticket.slot.taskEpoch == ticket.bindingEpoch && ticket.slot.taskId == ticket.taskId
+                && java.util.Objects.equals(ticket.token, ticket.slot.taskToken);
+    }
+
     void restoreLiveSwapVisual(MiStepHost.Promotion ticket) {
         MiStepHost.LiveSwapVisualLease visual = ticket.liveVisual;
         ticket.liveVisual = null;
@@ -1185,5 +1220,12 @@ final class HostSwapController {
         // A gesture begun while the real tasks were borrowed remains consumed to UP.
         setLiveSwapInputBlocked(false);
         h.resumeNotificationLaunch(ticket);
+        // The WMS ACK receiver outlived its consumer once the ticket is done; park it.
+        // registerLiveZoomReceiver lazily re-arms it on the next flip.
+        if (pendingLiveZoom == null && liveZoomReceiver != null) {
+            try { h.ctx.unregisterReceiver(liveZoomReceiver); }
+            catch (Throwable error) { MiStepHost.log("live zoom receiver unregister failed: " + error); }
+            liveZoomReceiver = null;
+        }
     }
 }

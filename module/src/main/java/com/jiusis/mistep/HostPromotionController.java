@@ -443,7 +443,11 @@ final class HostPromotionController {
         h.traceSwapEvent("promotion-failure");
         if (h.promotion != ticket || ticket.cancelled) return;
         if (ticket.nativeSwap) {
-            requestLiveSwapCancellation(ticket, reason);
+            if (requestLiveSwapCancellation(ticket, reason)) return;
+            // 兜底（看门狗 20s 强制的实际执行体）：取消路径已证明失效（cancelRequested/
+            // nativeCompleting 闩死）。不做任何 WM 写入（native 事务结局未知），按未确认
+            // 惯例冻结格子并释放全局闩，避免 promotion/input-blocker 永久卡死。
+            h.swapController.forceAbandonLivePromotion(ticket, "cancellation inert: " + reason, false);
             return;
         }
         ticket.cancelled = true;
@@ -513,8 +517,9 @@ final class HostPromotionController {
         h.main.post(h::finishPendingSuspend);
     }
 
-    void requestLiveSwapCancellation(MiStepHost.Promotion ticket, String reason) {
-        if (h.promotion != ticket || ticket.cancelled || ticket.cancelRequested || ticket.nativeCompleting) return;
+    boolean requestLiveSwapCancellation(MiStepHost.Promotion ticket, String reason) {
+        if (h.promotion != ticket || ticket.cancelled || ticket.cancelRequested || ticket.nativeCompleting)
+            return false;
         // WCT may already be applied while Shell still waits for onTransitionReady.
         // Keep this binding/ticket until the facade's unique recovery completion.
         ticket.cancelRequested = true;
@@ -540,6 +545,7 @@ final class HostPromotionController {
                 else h.finishLiveSwap(ticket, result);
             }
         }
+        return true;
     }
 
     void bindTask(MiStepHost.Slot slot, int taskId, Object token) {

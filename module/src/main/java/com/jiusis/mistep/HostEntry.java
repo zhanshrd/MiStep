@@ -2485,6 +2485,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             sZoomed = previous;
             sNativeLandscapeState = previousLandscapeState;
             if (!rotationWasActive) endFixedMainRotationLocked(dc);
+            else if (!sFullscreenRotationActive) beginFixedMainRotationLocked(dc); // exit threw: re-arm the hold to match sZoomed=true
             throw error;
         }
         sZoomScale = scale;
