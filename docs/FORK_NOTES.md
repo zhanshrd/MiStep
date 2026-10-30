@@ -64,7 +64,7 @@ pwsh -File tools\mstep_deploy.ps1 -Light    # 快速档：仅 su 强杀 SystemUI
 | 项 | 根因 | 修法 |
 |---|---|---|
 | 看门狗强制语义失效（A4≡B2, P2） | `failPromotion` 对 nativeSwap 票据委托 `requestLiveSwapCancellation` 后直接 return，而后者被 `cancelRequested`/`nativeCompleting` 闩死时静默 no-op——>8s 起全部强制路径为空转 | 取消路径改返回 boolean；失效时落入新的 `forceAbandonLivePromotion`（零 WM 写入的保守拆除：释放 promotion/input-blocker/suspend 闩，按未确认惯例冻结格子至会话退出自愈） |
-| 陈旧完成泄漏加固（B1 加固） | 三个 live finisher 的 stale 早退分支不清 `h.promotion`（交叉质证证明常规不可达：`sceneEpoch++` 仅两处且被 promotion 门挡、taskEpoch 被 promoting 门挡；作为闩释放簇的廉价加固收编） | stale 分支统一走 `forceAbandonLivePromotion`（binding 已易主则不冻结格子） |
+| 陈旧完成泄漏加固（B1 加固） | 三个 live finisher 的 stale 早退分支不清 `h.promotion`（交叉质证证明常规不可达：`sceneEpoch++` 仅两处且被 promotion 门挡、taskEpoch 被 promoting 门挡；作为闩释放簇的廉价加固收编） | stale 分支统一走 `forceAbandonLivePromotion`（R3 勘误：见 §10，stale 路由一律不冻结） |
 | TOGGLE 在 RESUMING 被吞（A5, P3） | `toggleVisibility` 只处理 SUSPENDED/ACTIVE，入场动画 ~0.7s 内的关闭请求静默丢弃 | RESUMING → `suspendSession("exit")`（其 972-978 行本就实现 RESUMING 挂起闩）；SUSPENDING → 记日志 |
 | 拖拽收集无投放高亮（A6, P3） | `setDropHighlight` 的 `active` 参数被无视（两分支写同值） | active 时 hint scale 1.06 |
 | 缩放退出失败路径旋转锁不对称（A7, P3） | exit 路径先放 rotation hold 再 apply spec，apply 抛异常时 catch 不回补 hold | catch 对称 re-arm（`!sFullscreenRotationActive` 守卫，begin/end 均幂等） |
@@ -106,3 +106,18 @@ pwsh -File tools\mstep_deploy.ps1 -Light    # 快速档：仅 su 强杀 SystemUI
 **豁免理由**：JVM 单测需把纯逻辑抽成可实例化形态＝源码重构，清白轮禁止；以静态枚举证明（调用点全量清单 + 场景真值表）替代。
 
 **设备回归时应补的冒烟**（4 项，对应改动路径）：① RESUMING 期间角部滑动——方向不被污染、toggle 语义正常；② promotion 完成窗口内触发 cancel（几何变化/租约到期）——已重绑格不被冻结；③ collect 楔死 >20s——看门狗强制拆除后格子恢复「+」示能；④ 常规开→侧格启动→主副交换→收起全链路 + logcat 零 FATAL。
+
+## 10. R3 评审台账（全量重读 + 审计点复核，134 文件 / ~25.1k 行）
+
+**确认为 bug 并已修复**（R3 修复提交）：
+
+| 项 | 根因 | 修法 |
+|---|---|---|
+| stale 路由判别式反相（R3-A1, P3, 【LEDGER-CHALLENGE】成立） | 三条 stale 路由给 `forceAbandonLivePromotion` 传 `bindingIntact(ticket)`，而 `keepCellUnfrozen=true` 才是不冻结——实际语义与 javadoc/R1 提交信息/本表旧表述**三处文档全部相反**（绑定未变→不冻、已易主→冻）。危害链：已易主+空槽 ⇒ promoting=true 无任何复位器（parkNext/resumeNext 跳过空槽、TaskInfo 回调被 promoting 门挡、clearSlot 不可达）⇒ 死「+」格跨挂起/恢复存活。R2 白盒两轮误读参数极性判 SOUND，R3 黑盒抓出——交叉质证机制的有效性实证 | 三条 stale 路由一律传 `true`（票据已死时，槽位/任务调和机制是唯一愈合者，冻结恰好禁用它）；删除零调用的 `bindingIntact`；javadoc 改为真实策略（冻结仅保留给 inert-cancellation 楔死场景） |
+| parked「恢复」点击在 promotion 进行中不受门控（R3-B1, P3） | `onSlotTapped` 只查 `scene/transferBusy` 不查 `h.promotion`，`adoptExisting` 自身门也不查——全部兄弟入口（swapWithMain/captureMainIntoEmptySlot/dismissSideToBackground/launchIntoSlot/promoteForNotification/beginExternalPromotion）都设了 promotion 门，唯此一处遗漏；flip/home 的 promotion 早期窗口（input block 尚未上）内点 parked 格 ⇒ 并发 adoption WCT 流，最坏令新升格的格冻结到会话退出 | `onSlotTapped` 门补 `\|\| h.promotion != null`（`adoptExisting` 处加第二道 belt 冗余，不加——此分支已是唯一无门入口） |
+
+**裁决为非 bug 的评审记录**（并入已知项）：
+
+- R3-A2（HotZoneGesture 65ms 延迟触发 × 并发 opener 的跨源竞态：刚开的会话被延迟 toggle 关闭）：机制确认，但**无干净修法**——延迟 runnable 里加任何场景门都会同时杀掉 F-A5 的合法「RESUMING 期间再次滑动=取消」；区分两种场景需要从 HotZoneGesture 向 MiStepHost 传入打开归因状态（结构性改动，无真机验证条件）。记为 **F-A5 的已知接受代价**（65ms 窗口、可恢复、零状态损伤）。
+- R3-A3（三处休眠接线）：`AppRawInputHook.install` 全包零调用（app 进程在 handleLoadPackage 提前返回，永不武装；被 `NativeRawInputBridge.install` 取代）；`MiStepWeChatNative.install/.request` 仅 tests/ 引用（生产走 `MiStepWeChatShortcut.open`，tests 保留作 WeChat 更新形状金丝雀）；`HostMirrorController.attachMirrorCarrier` private 零调用——**连带**：`slot.carrier=true` 仅在其中赋值，整套 carrier 下游（reassertCarrier/restoreCarrierToMain 的 carrier 分支/carrier 底板）当前为惰性空转。接线前勿假设生效（与 B7 同族）。
+- R3-B2（接收器在 pendingLiveZoom≠null 时跳过停靠、事后无人补停）：**维持台账**——严格窄于 R1 修复前的已裁决状态（修复前永不注销），pending 窗口必有界自终止（ACK 或 ≤1.5s 超时），正确性无损；无新严重度证据，不构成 finding。
