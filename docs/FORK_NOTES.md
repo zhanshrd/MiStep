@@ -78,3 +78,18 @@ pwsh -File tools\mstep_deploy.ps1 -Light    # 快速档：仅 su 强杀 SystemUI
 - B6：live 家族 promote 方向 WCT 用 mode 0 与 BUG-1 教训「不一致」——**语境不同**：Shell transition + 同事务 reparent，成功以观察到的解析模式为门（`info(...,1)` 失败→FAILED→recover），误解析表现为交换失败+角色还原而非钉死。**禁止未经真机测试改成显式 1**。
 - B7：`HomeTransitionMagnification.appendPendingGeometry`、`HomeSurfaceTrace.install`、`NativeReturnTrace.install` 为孤儿安装（属性门控 no-op）——接线前勿假设已生效。
 - A8：`setPendingMainSide` 的 ACTIVE 守卫不可达（HotZoneGesture 源头丢弃）——注释已改为真实契约；「无手势关闭」为有意设计（关闭走顶栏 ✕ / TOGGLE / Home / 息屏）。
+
+## 8. R2 评审台账（全量重读 + R1 改动面轰炸，134 文件 / 25107 行）
+
+**确认为 bug 并已修复**（R2 修复提交）：
+
+| 项 | 根因 | 修法 |
+|---|---|---|
+| 完成窗口内误冻结已确认重绑格（R2-A1, P3） | `failPromotion` 兜底硬编码 `keepCellUnfrozen=false`；`nativeCompleting=true` 的完成窗口内（角色已落定、槽位已 `clearSlot`+`bindTask` 重绑）到达的 failPromotion（5s 租约到期 / 折叠几何变化 / suspend / 看门狗）会把健康的新绑定一并冻结 | 判别式改 `ticket.nativeCompleting`：完成窗口不冻（交还已确认绑定），未完成楔死（`cancelRequested` 闩死）维持未知结局冻结（交叉质证修正：`bindingIntact` 在闩死场景为 true，是错误判别式） |
+| RESUMING 滑动污染下次打开方向（R2-A3, P3） | `hostSceneActive()` 在 RESUMING 早期为 false，滑动通过手势门 + `setPendingMainSide` 的 ACTIVE-only 守卫，在 `consumePendingMainSide` 已消费后写入，值存活到下一次打开并覆盖朝向 | 守卫放宽为 `scene != SUSPENDED`：所有过渡期滑动不再改写下一次打开方向（残留：过渡期滑动仍会被手势源截留吃掉触摸，属既有窗口，量级 ~0.5-1s） |
+| force-abandon 缺 hint/touchRegion 恢复（R2-B9, P3） | 新拆除池相对镜像约定（`completeLiveCollect`/未确认尾部）缺 `updateHint`/`updateTouchRegion`；collect 的 `prepareCollectHandoff` 在租约外置 `hint GONE`，楔死进看门狗强制路径后格子无任何示能（冻结变体下 TaskInfo 回调被 promoting 门挡住，持续到会话退出） | `forceAbandonLivePromotion` 内 `restoreLiveSwapVisual` 之后补 `h.updateHint(slot)` + `h.updateTouchRegion(slot)` |
+
+**裁决为非 bug 的评审记录**（并入已知项）：
+
+- R2-A2（看门狗 nudge 驱动非 native 票据走 `finishLiveSwap`）：**误报**——合成失败到达的终态（`frozen=true, promoting=true`）与 `failPromotion` 外部门分支逐字节一致；「被绕过的簿记」全部为退役空操作（swapPreview/liveLift/mainLeash/compactSnapshot 在此路径从不赋值），仅 trace/日志形状不同。属路由卫生问题，不改。
+- R1 遗留说明：`forceAbandonLivePromotion` 拆除时不清 `coveredHome`——仅交换成功尾部会清；若强制拆除恰好落在成功完成窗口内，`coveredHome` 残留由下次挂起的 token 校验兜底（低概率 × 低危害，观察项）。
