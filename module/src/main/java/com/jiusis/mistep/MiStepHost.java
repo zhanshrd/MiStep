@@ -57,8 +57,8 @@ public final class MiStepHost {
             "com.jiusis.mistep.DESKTOP_ICON_LAUNCH";
 
     private static final String TAG = "MiStepProbe";
-    private static final int SLOT_MAIN = 0;
-    private static final int SLOT_COUNT = 1 + MiStepLayout.CELL_COUNT;
+    static final int SLOT_MAIN = 0;
+    static final int SLOT_COUNT = 1 + MiStepLayout.CELL_COUNT;
     private static final long LAUNCH_TIMEOUT_MS = 4000L;
     private static final long SIDE_PROMOTION_TIMEOUT_MS = 3500L;
 
@@ -67,7 +67,7 @@ public final class MiStepHost {
     final Context ctx;
     private final Executor executor;
     private final Object factory;
-    private final Object transitions;
+    final Object transitions;
     final Handler main = new Handler(Looper.getMainLooper());
 
     final Slot[] slots = new Slot[SLOT_COUNT];
@@ -93,19 +93,20 @@ public final class MiStepHost {
     private volatile java.util.Set<Integer> taskUserIds;
     private volatile long taskUserIdsReadAt;
     private volatile String taskUserIdsReadError;
-    private volatile boolean screenOn = true;
+    volatile boolean screenOn = true;
     private Slot launchCurrentSlot;
-    private Promotion promotion;
-    private SwapPreview swapPreview;
+    Promotion promotion;
+    SwapPreview swapPreview;
     private Object swapPreviewStatusOwner;
-    private final MiStepStatusBar statusBar;
+    final MiStepStatusBar statusBar;
     private final ZoomTransport zoomTransport;
     private final HostMirrorController mirrorController;
-    private volatile HomeTaskReturn coveredHome;
+    private final HostSwapController swapController;
+    volatile HomeTaskReturn coveredHome;
     private CellMovePreview cellMovePreview;
     Bitmap mainBackdrop;
     private View topStripBacking;
-    private Bitmap wallpaperBackdrop;
+    Bitmap wallpaperBackdrop;
     private boolean wallpaperBackdropRequested;
     private BroadcastReceiver wallpaperReceiver;
     private BroadcastReceiver desktopIconReceiver;
@@ -119,30 +120,30 @@ public final class MiStepHost {
     private View sideBacking;
     /** 侧栏按格分段的不透明底板；承载格需要把它藏起来让下面的真实任务画面透出来。 */
     final View[] sideBackingViews = new View[SLOT_COUNT];
-    private boolean mainOnRight;
+    boolean mainOnRight;
     private View dragGhost;
     private boolean dragMoved;
     private float dragStartRawX;
     private float dragStartRawY;
     private Slot dragTarget;
     private View keyguardMask;
-    private boolean keyguardLocked;
+    boolean keyguardLocked;
     static final int ACTIVE = 0, SUSPENDING = 1, SUSPENDED = 2, RESUMING = 3;
     volatile int scene = ACTIVE;
-    private long sceneEpoch;
-    private boolean suspendRequested;
+    long sceneEpoch;
+    boolean suspendRequested;
     private boolean landscapeSuspended;
-    private boolean transferBusy;
+    boolean transferBusy;
     private boolean overlayRefreshScheduled;
     private static boolean boundsHooksReady;
     private static boolean surfaceHooksReady;
     private Object surfaceObserver;
     private volatile boolean traceNextSwap;
     private volatile MiStepSwapTrace swapTrace;
-    private boolean compactPending;
-    private MiStepCellMotion cellMotion;
-    private MiStepSideDismiss sideDismiss;
-    private Slot sideDismissSlot;
+    boolean compactPending;
+    MiStepCellMotion cellMotion;
+    MiStepSideDismiss sideDismiss;
+    Slot sideDismissSlot;
     private static final class CellMovePlan {
         final Slot slot;
         final Rect from;
@@ -156,7 +157,7 @@ public final class MiStepHost {
     private final FinishTransactions<RenderBinding> finishTransactions = new FinishTransactions<>(16);
     private final FinishTransactions<Long> workspaceFinishes = new FinishTransactions<>(16);
 
-    private final java.util.Map<Object, OwnedTask> ownedTasks = new java.util.HashMap<>();
+    final java.util.Map<Object, OwnedTask> ownedTasks = new java.util.HashMap<>();
 
     static final class Slot implements SlotPositions.Entry {
         int index;
@@ -240,7 +241,7 @@ public final class MiStepHost {
         }
     }
 
-    private static final class OwnedTask {
+    static final class OwnedTask {
         final int id;
         final Object token;
         Object surface;
@@ -281,7 +282,7 @@ public final class MiStepHost {
         if (pendingNativeObservation == observation) pendingNativeObservation = null;
     }
 
-    private static final class Promotion {
+    static final class Promotion {
         final Slot slot;
         final int taskId;
         final Object token;
@@ -351,7 +352,7 @@ public final class MiStepHost {
     }
 
     /** Hide only the selected cell's Host drawings; its SurfaceView stays attached. */
-    private static final class LiveSwapVisualLease {
+    static final class LiveSwapVisualLease {
         private static final class AlphaHold {
             int count;
             float alpha;
@@ -439,6 +440,7 @@ public final class MiStepHost {
         statusBar = new MiStepStatusBar(main, MiStepHost::log);
         zoomTransport = new ZoomTransport(this);
         mirrorController = new HostMirrorController(this);
+        swapController = new HostSwapController(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
         installRetainedSurfaces(ctx.getClassLoader());
         for (int i = 0; i < SLOT_COUNT; i++) {
@@ -650,7 +652,7 @@ public final class MiStepHost {
 
     private void reassertCarrier() { mirrorController.reassertCarrier(); }
 
-    private void restoreCarrierToMain() { mirrorController.restoreCarrierToMain(); }
+    void restoreCarrierToMain() { mirrorController.restoreCarrierToMain(); }
 
     private void scheduleMainCropClear(long delayMs) { mirrorController.scheduleMainCropClear(delayMs); }
 
@@ -1216,7 +1218,7 @@ public final class MiStepHost {
         });
     }
 
-    private void finishPendingSuspend() {
+    void finishPendingSuspend() {
         if (suspendRequested && scene == ACTIVE && promotion == null && !transferBusy) {
             suspendRequested = false;
             suspendSession("deferred");
@@ -1467,12 +1469,12 @@ public final class MiStepHost {
         return (java.util.List<?>) XposedHelpers.callMethod(service, "getAllRootTaskInfos");
     }
 
-    private Object rootInfo(LiveTask task) throws Exception {
+    Object rootInfo(LiveTask task) throws Exception {
         for (Object info : rootInfos()) if (task.matches(info)) return info;
         return null;
     }
 
-    private boolean ordinaryRoot(Object info, int mode) {
+    boolean ordinaryRoot(Object info, int mode) {
         if (info == null || XposedHelpers.getIntField(info, "displayId") != 0
                 || !supportsTaskUser(XposedHelpers.getIntField(info, "userId"))
                 || Boolean.TRUE.equals(XposedHelpers.callMethod(info, "hasParentTask"))
@@ -1612,7 +1614,7 @@ public final class MiStepHost {
     }
 
     /** Reveal only the same Home that this app covered; never send a HOME launch intent. */
-    private LiveTask existingHomeForCollection(LiveTask task) throws Exception {
+    LiveTask existingHomeForCollection(LiveTask task) throws Exception {
         LiveTask home = existingHomeTask();
         HomeTaskReturn saved = coveredHome;
         if (saved != null && saved.covers(task.id, task.token)
@@ -1625,7 +1627,7 @@ public final class MiStepHost {
         return existingHomeForCollection(task).token;
     }
 
-    private void adoptExisting(Slot slot, LiveTask task, Runnable success, Consumer<String> failure) {
+    void adoptExisting(Slot slot, LiveTask task, Runnable success, Consumer<String> failure) {
         adoptExisting(slot, task, false, success, failure);
     }
 
@@ -1782,7 +1784,7 @@ public final class MiStepHost {
         });
     }
 
-    private void returnToSystem(Slot slot, boolean front, Runnable success, Consumer<String> failure) {
+    void returnToSystem(Slot slot, boolean front, Runnable success, Consumer<String> failure) {
         Promotion ticket = new Promotion(slot, new Slot[0]);
         ticket.background = !front;
         ticket.sceneEpoch = sceneEpoch;
@@ -2536,7 +2538,7 @@ public final class MiStepHost {
     }
 
     /** 空格子显示"+"提示；有任务时隐藏。 */
-    private void updateHint(Slot slot) {
+    void updateHint(Slot slot) {
         ensureCellBackground(slot);
         updateCellSurfaceVisibility(slot);
         if (slot.hint == null) {
@@ -2556,7 +2558,7 @@ public final class MiStepHost {
     }
 
     /** An empty TaskView keeps its last resize background; hide that container, not a screenshot. */
-    private void updateCellSurfaceVisibility(Slot slot) {
+    void updateCellSurfaceVisibility(Slot slot) {
         // Shell owns the borrowed task parents until the whole handoff finishes.
         // clearSlot/bindTask is only a logical replacement during a native swap;
         // an independent hide here would blank the just-committed real task.
@@ -2582,7 +2584,7 @@ public final class MiStepHost {
     /** Open the destination hole while its opaque empty hint still covers it.
      * Native preparation owns show/hide; only make its eventual parent nontransparent.
      */
-    private void prepareCellSurface(Slot slot) {
+    void prepareCellSurface(Slot slot) {
         if (slot.view != null) slot.view.setAlpha(1f);
         Object surface = getSurfaceField(slot.controller, "mSurfaceControl");
         if (surface == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(surface, "isValid"))) return;
@@ -3049,7 +3051,7 @@ public final class MiStepHost {
     }
 
     /** Publish only confirmed bindings; system_server rechecks each native task before use. */
-    private void publishDesktopSideTasks() {
+    void publishDesktopSideTasks() {
         final long sequence = ++desktopRegistrationSequence;
         final long epoch = sceneEpoch;
         final java.util.List<Slot> owners = new java.util.ArrayList<>();
@@ -3217,7 +3219,7 @@ public final class MiStepHost {
         })) failPromotion(ticket, "external promotion Shell executor unavailable");
     }
 
-    private boolean externalPromotionCurrent(Promotion ticket) {
+    boolean externalPromotionCurrent(Promotion ticket) {
         return promotion == ticket && !ticket.cancelled && !ticket.cancelRequested && scene == ACTIVE
                 && screenOn && !keyguardLocked
                 && sceneEpoch == ticket.sceneEpoch && isActive(ticket.slot)
@@ -3643,7 +3645,7 @@ public final class MiStepHost {
     }
 
     /** Side TaskViews return their touch areas to the host for tap/drag arbitration. */
-    private void updateTouchRegion(Slot slot) {
+    void updateTouchRegion(Slot slot) {
         try {
             if (slot.view == null) {
                 return;
@@ -3666,420 +3668,37 @@ public final class MiStepHost {
      *   副格有任务 → 轻点=与主区交换；滑动取消轻点，始终不操作副任务；
      *   空槽 → 不消费，交给宿主点击处理。
      */
-    private boolean onSlotTouch(int slotIndex, MotionEvent e) {
-        if (slotIndex <= SLOT_MAIN || slotIndex >= SLOT_COUNT) return false;
-        Slot slot = slots[slotIndex];
-        // Our MOVE session owns this pointer even while the task-transfer gate is held.
-        if (sideDismiss != null && sideDismissSlot == slot) return followSideDismiss(slot, e);
-        if (slot.promoting || slot.launching || slot.closing || slot.frozen || slot.parked
-                || transferBusy || promotion != null || cellMotion != null) {
-            recycleBuffered(slot);
-            slot.injecting = false;
-            return true;
-        }
-        if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
-            log("slotTouch down slot=" + slotIndex + " occupied=" + slot.occupied
-                    + " x=" + e.getRawX() + " y=" + e.getRawY());
-        }
-        if (!slot.occupied || slot.view == null) {
-            return false;
-        }
-        switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN: {
-                recycleBuffered(slot);
-                slot.bufferedDown = MotionEvent.obtain(e);
-                slot.touchTaskEpoch = slot.taskEpoch;
-                slot.touchSceneEpoch = sceneEpoch;
-                slot.injecting = false;
-                return true;
-            }
-            case MotionEvent.ACTION_MOVE: {
-                if (slot.bufferedDown != null && e.getPointerCount() == 1
-                        && slot.touchTaskEpoch == slot.taskEpoch && slot.touchSceneEpoch == sceneEpoch) {
-                    float dx = e.getRawX() - slot.bufferedDown.getRawX();
-                    float dy = e.getRawY() - slot.bufferedDown.getRawY();
-                    int slop = ViewConfiguration.get(ctx).getScaledTouchSlop();
-                    if (Math.abs(dx) > slop || Math.abs(dy) > slop) slot.injecting = true;
-                    if (MiStepSideDismissGesture.starts(mainOnRight, dx, dy, slop)) {
-                        dismissSideToBackground(slot);
-                        if (sideDismiss != null && sideDismissSlot == slot) sideDismiss.follow(dx);
-                    }
-                }
-                return true;
-            }
-            case MotionEvent.ACTION_POINTER_DOWN:
-            case MotionEvent.ACTION_POINTER_UP:
-                recycleBuffered(slot);
-                slot.injecting = true;
-                return true;
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL: {
-                MotionEvent down = slot.bufferedDown;
-                boolean current = down != null && e.getActionMasked() == MotionEvent.ACTION_UP
-                        && e.getPointerCount() == 1 && down.getPointerCount() == 1
-                        && e.getPointerId(0) == down.getPointerId(0)
-                        && slot.touchTaskEpoch == slot.taskEpoch && slot.touchSceneEpoch == sceneEpoch;
-                float dx = current ? e.getRawX() - down.getRawX() : 0;
-                float dy = current ? e.getRawY() - down.getRawY() : 0;
-                int slop = ViewConfiguration.get(ctx).getScaledTouchSlop();
-                boolean dismiss = current && slot.rect != null && MiStepSideDismissGesture.accepts(
-                        mainOnRight, dx, dy, slot.rect[2] - slot.rect[0],
-                        ctx.getResources().getDisplayMetrics().density, slop,
-                        e.getEventTime() - down.getEventTime());
-                boolean tap = current && !slot.injecting && Math.abs(dx) <= slop && Math.abs(dy) <= slop;
-                recycleBuffered(slot);
-                slot.injecting = false;
-                if (dismiss) {
-                    dismissSideToBackground(slot);
-                    if (sideDismiss != null && sideDismissSlot == slot) {
-                        sideDismiss.follow(dx);
-                        sideDismiss.settle(true);
-                    }
-                } else if (tap) {
-                    log("cell tap slot=" + slotIndex + " -> swap");
-                    onSlotTapped(slotIndex);
-                }
-                if (compactPending) compactCells();
-                return true;
-            }
-            default:
-                return false;
-        }
-    }
+    private boolean onSlotTouch(int slotIndex, MotionEvent e) { return swapController.onSlotTouch(slotIndex, e); }
 
-    private void recycleBuffered(Slot slot) {
-        if (slot.bufferedDown != null) {
-            slot.bufferedDown.recycle();
-            slot.bufferedDown = null;
-        }
-    }
+    private void recycleBuffered(Slot slot) { swapController.recycleBuffered(slot); }
 
-    private boolean followSideDismiss(Slot slot, MotionEvent e) {
-        MiStepSideDismiss run = sideDismiss;
-        if (!run.isTracking()) return true;
-        MotionEvent down = slot.bufferedDown;
-        int action = e.getActionMasked();
-        boolean current = down != null && e.getPointerCount() == 1
-                && e.getPointerId(0) == down.getPointerId(0)
-                && slot.touchTaskEpoch == slot.taskEpoch && slot.touchSceneEpoch == sceneEpoch;
-        float dx = current ? e.getRawX() - down.getRawX() : 0f;
-        float dy = current ? e.getRawY() - down.getRawY() : 0f;
-        if (action == MotionEvent.ACTION_MOVE && current) { run.follow(dx); return true; }
-        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL || !current
-                || action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP) {
-            boolean commit = current && action == MotionEvent.ACTION_UP && slot.rect != null
-                    && MiStepSideDismissGesture.accepts(mainOnRight, dx, dy,
-                            slot.rect[2] - slot.rect[0], ctx.getResources().getDisplayMetrics().density,
-                            ViewConfiguration.get(ctx).getScaledTouchSlop(), e.getEventTime() - down.getEventTime());
-            if (current) run.follow(dx);
-            recycleBuffered(slot); slot.injecting = false;
-            run.settle(commit);
-        }
-        return true;
-    }
+    private boolean followSideDismiss(Slot slot, MotionEvent e) { return swapController.followSideDismiss(slot, e); }
 
-    private void dismissSideToBackground(Slot slot) {
-        if (scene != ACTIVE || !screenOn || keyguardLocked || transferBusy || promotion != null
-                || cellMotion != null || !isActive(slot) || !slot.occupied || slot.carrier
-                || slot.parked || slot.frozen || slot.promoting || slot.launching || slot.closing
-                || slot.taskId < 0 || slot.taskToken == null || slot.controller == null) return;
-        for (Slot other : slots) if (other.launching || other.promoting || other.closing) return;
-        final int taskId = slot.taskId;
-        final long binding = slot.taskEpoch;
-        final long epoch = sceneEpoch;
-        final View hostRoot = root;
-        log("side outward swipe -> background task=" + taskId + " slot=" + slot.index);
-        MiStepLiveBackdrop preparing = null;
-        LiveSwapVisualLease preparingVisuals = null;
-        try {
-            final MiStepLayout geometry = layout;
-            final int emptyMask = 1 << slot.index;
-            Rect strip = liveSideStrip(geometry);
-            final MiStepLiveBackdrop backing = preparing = MiStepLiveBackdrop.create(liveHostRootSurface(),
-                    wallpaperBackdrop, screenW, screenH, strip, strip,
-                    canvas -> drawLiveEmptyHints(canvas, geometry, geometry, emptyMask), MiStepHost::log);
-            final LiveSwapVisualLease visuals = preparingVisuals =
-                    new LiveSwapVisualLease(sideBackingViews[slot.index], slot.hint);
-            transferBusy = true;
-            slot.promoting = true;
-            final MiStepSideDismiss[] run = new MiStepSideDismiss[1];
-            Runnable release = () -> {
-                run[0].close();
-                if (sideDismiss == run[0]) { sideDismiss = null; sideDismissSlot = null; }
-                recycleBuffered(slot); slot.injecting = false;
-                if (root == hostRoot && sceneEpoch == epoch) {
-                    for (Slot cell : slots) updateCellSurfaceVisibility(cell);
-                    visuals.restore();
-                    hostRoot.invalidate();
-                } else visuals.restore();
-                backing.closeAfterFrame(hostRoot);
-                if (compactPending) compactCells();
-                finishPendingSuspend();
-            };
-            float distance = (mainOnRight ? -1f : 1f)
-                    * (slot.rect[2] - slot.rect[0] + HyperOsStyle.dp(ctx, 8f));
-            run[0] = new MiStepSideDismiss(hostRoot, slot.view, distance,
-                    () -> root == hostRoot && sceneEpoch == epoch && scene == ACTIVE
-                            && isActive(slot) && slot.taskEpoch == binding && slot.taskId == taskId,
-                    reachedEdge -> {
-                        if (!reachedEdge) {
-                            if (slot.taskEpoch == binding && slot.taskId == taskId) slot.promoting = slot.frozen;
-                            transferBusy = false; release.run(); return;
-                        }
-                        returnToSystem(slot, false, () -> {
-                            // Hide the empty real container before restoring its offscreen View.
-                            if (slot.taskEpoch == binding && slot.taskId == taskId) clearSlot(slot);
-                            log("side swipe handed back task=" + taskId + "; kept in system background");
-                            release.run();
-                        }, error -> {
-                            log("side swipe handback stopped; binding retained task=" + taskId + ": " + error);
-                            release.run();
-                        });
-                    }, MiStepHost::log);
-            sideDismiss = run[0];
-            sideDismissSlot = slot;
-            log("side outward real View animation task=" + taskId + " distance=" + distance);
-            // MOVE positions the real view immediately; UP completes or rebounds from it.
-        } catch (Throwable error) {
-            if (preparingVisuals != null) preparingVisuals.restore();
-            if (preparing != null) preparing.closeAfterFrame(hostRoot);
-            transferBusy = false;
-            slot.promoting = slot.frozen;
-            log("side outward preparation stopped: " + error);
-            finishPendingSuspend();
-        }
-    }
+    private void dismissSideToBackground(Slot slot) { swapController.dismissSideToBackground(slot); }
 
     /** Keep tap-to-swap, transfer a drag to its real window without reinjecting coordinates. */
-    private void transferTouchToTask(Slot slot, long eventTime) {
-        if (root == null || slot.taskToken == null || !controllerOwns(slot, slot.taskId, slot.taskToken)) return;
-        try {
-            android.os.Bundle tokens = new android.os.Bundle();
-            tokens.putBinder("host", root.getWindowToken());
-            tokens.putBinder("task", (android.os.IBinder) XposedHelpers.callMethod(slot.taskToken, "asBinder"));
-            Intent request = new Intent("com.jiusis.mistep.TRANSFER_TOUCH");
-            request.setPackage("android");
-            request.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            request.putExtra("tokens", tokens);
-            request.putExtra("taskId", slot.taskId);
-            request.putExtra("eventTime", eventTime);
-            ctx.sendBroadcast(request);
-            log("side touch transfer requested slot=" + slot.index + " task=" + slot.taskId);
-        } catch (Throwable t) {
-            log("side touch transfer request failed slot=" + slot.index + ": " + t);
-        }
-    }
+    private void transferTouchToTask(Slot slot, long eventTime) { swapController.transferTouchToTask(slot, eventTime); }
 
     private int uidOf(String pkg) { return HostStaticUtil.uidOf(ctx, pkg); }
 
     // ---------------------------------------------------------------- 点击 / 交换
 
-    private void onSlotTapped(int slotIndex) {
-        try {
-            if (slotIndex <= SLOT_MAIN || slotIndex >= SLOT_COUNT) {
-                return;
-            }
-            log("onSlotTapped slot=" + slotIndex
-                    + (slots[slotIndex] != null && slots[slotIndex].carrier ? " carrier" : ""));
-            if (scene != ACTIVE || transferBusy) return;
-            Slot slot = slots[slotIndex];
-            if (slot.closing) return;
-            if (slot.carrier) {
-                restoreCarrierToMain();
-                return;
-            }
-            if (slot.parked && slot.occupied && !slot.frozen) {
-                adoptExisting(slot, new LiveTask(slot), this::finishPendingSuspend,
-                        error -> log("explicit resume retained task: " + error));
-                return;
-            }
-            if (!slot.occupied) {
-                captureMainIntoEmptySlot(slot);
-                return;
-            }
-            if (slotIndex == SLOT_MAIN) {
-                return;
-            }
-            swapWithMain(slotIndex);
-        } catch (Throwable t) {
-            log("onSlotTapped FAILED: " + t);
-            XposedBridge.log(t);
-        }
-    }
+    private void onSlotTapped(int slotIndex) { swapController.onSlotTapped(slotIndex); }
 
     /** Official empty-cell flow: open an app from Home, then collect that exact task. */
-    private void captureMainIntoEmptySlot(Slot requestedSlot) {
-        if (requestedSlot == null) return;
-        final Slot slot = requestedSlot;
-        if (carrierSlotIndex >= 0) {
-            android.widget.Toast.makeText(ctx, "先点副格把相机放回主区",
-                    android.widget.Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (scene != ACTIVE || !screenOn || keyguardLocked || transferBusy
-                || promotion != null || swapPreview != null
-                || slot.occupied || slot.launching || slot.promoting || slot.frozen
-                || slot.controller == null) return;
-        for (Slot other : slots) if (other.launching || other.promoting || other.closing) return;
-        final long epoch = sceneEpoch;
-        transferBusy = true;
-        if (!executeOnShell(() -> {
-            try {
-                LiveTask task = findMainTask(); // Deliberately excludes Home and existing cells.
-                main.post(() -> {
-                    if (scene != ACTIVE || epoch != sceneEpoch || !isActive(slot)
-                            || slot.occupied || promotion != null || suspendRequested) {
-                        transferBusy = false;
-                        finishPendingSuspend();
-                        return;
-                    }
-                    if (task == null) {
-                        transferBusy = false;
-                        log("empty cell keeps Home in main; open an app there first");
-                        android.widget.Toast.makeText(ctx, "先在主屏打开应用，再点此格收进来",
-                                android.widget.Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    hideIme();
-                    startLiveCollect(slot, task);
-                });
-            } catch (Throwable error) {
-                main.post(() -> {
-                    transferBusy = false;
-                    log("collect current main admission stopped: " + error);
-                    finishPendingSuspend();
-                });
-            }
-        })) {
-            transferBusy = false;
-            log("no Shell queue for collecting current main");
-        }
-    }
+    private void captureMainIntoEmptySlot(Slot requestedSlot) { swapController.captureMainIntoEmptySlot(requestedSlot); }
 
     /** Collect the actual fullscreen task; no captured app or desktop participates. */
-    private void startLiveCollect(Slot slot, LiveTask task) {
-        final MiStepLayout geometry = layout;
-        final int width = screenW, height = screenH;
-        final Object hostSurface;
-        try { hostSurface = liveHostRootSurface(); }
-        catch (Throwable error) {
-            transferBusy = false;
-            log("live collect Host unavailable: " + error);
-            finishPendingSuspend();
-            return;
-        }
-        bindTask(slot, task.id, task.token);
-        Promotion ticket = new Promotion(slot, slots);
-        ticket.sceneEpoch = sceneEpoch;
-        ticket.bindingEpoch = slot.taskEpoch;
-        ticket.previousMain = task;
-        ticket.previousLayout = ticket.targetLayout = geometry;
-        ticket.nativeSwap = ticket.nativeCollect = true;
-        slot.promoting = true;
-        promotion = ticket;
-        transferBusy = false;
-        OwnedTask candidate = ownedTasks.computeIfAbsent(task.token, key -> new OwnedTask(task.id, key));
-        candidate.recoveryController = slot.controller;
-        candidate.recoveryCandidate = true;
-        ticket.previousMainCandidate = candidate;
-        try {
-            Rect side = liveSideStrip(geometry);
-            ticket.liveBackdrop = MiStepLiveBackdrop.create(hostSurface, wallpaperBackdrop, width, height,
-                    side, side, canvas -> drawLiveEmptyHints(canvas, geometry, geometry,
-                            1 << slot.index), MiStepHost::log);
-        } catch (Throwable error) {
-            failPromotion(ticket, "collect wallpaper preparation: " + error);
-            return;
-        }
-        // Keep the empty-cell affordance until the real task occupies it.
-        ticket.liveVisual = new LiveSwapVisualLease(sideBackingViews[slot.index], null);
-        prepareCellSurface(slot);
-        if (!setLiveSwapInputBlocked(true)) {
-            failPromotion(ticket, "transition input window unavailable"); return;
-        }
-        statusBar.hideFor(ticket, () -> failPromotion(ticket, "collect status-bar lease expired"));
-        LiveSwapGeometry.Task app = new LiveSwapGeometry.Task(task.id, task.token, width, height,
-                liveMainRect(geometry), liveCellRect(geometry, slot.index));
-        statusBar.runAfterHiddenFrame(ticket, () -> afterLiveHostFrame(ticket, () -> {
-            if (!executeOnShell(() -> {
-                boolean accepted = false;
-                try {
-                    if (externalPromotionCurrent(ticket) && layout == geometry) {
-                        Object shell = XposedHelpers.getObjectField(transitions, "mTransitions");
-                        if (SystemClock.uptimeMillis() < zoomAnimUntil || !Boolean.TRUE.equals(
-                                XposedHelpers.callMethod(shell, "isIdle")))
-                            throw new IllegalStateException("workspace or native transition still animating");
-                        Object info = rootInfo(task);
-                        if (!ordinaryRoot(info, 1) || !XposedHelpers.getBooleanField(info, "isVisible"))
-                            throw new IllegalStateException("collect fullscreen identity changed");
-                        candidate.userId = XposedHelpers.getIntField(info, "userId");
-                        ticket.collectionHome = existingHomeForCollection(task);
-                        resetIdleTaskView(slot);
-                        accepted = MiStepLiveCollect.start(ctx.getClassLoader(), transitions,
-                                slot.controller, app, ticket.collectionHome.token, candidate.userId,
-                                new Rect(0, 0, width, height), hostSurface, slot.cellBackground,
-                                () -> externalPromotionCurrent(ticket) && layout == geometry,
-                                settled -> main.post(() -> prepareCollectHandoff(ticket, settled)),
-                                result -> finishLiveResult(ticket, result), MiStepHost::log);
-                        ticket.nativeSubmitted = accepted;
-                    }
-                } catch (Throwable error) { log("live collect refused: " + error); }
-                if (!accepted) main.post(() -> finishLiveCollect(ticket, new MiStepLiveSwap.Result(false,
-                        false, new IllegalStateException("live collect preflight refused"))));
-            })) failPromotion(ticket, "live collect Shell queue unavailable");
-        }));
-    }
+    private void startLiveCollect(Slot slot, LiveTask task) { swapController.startLiveCollect(slot, task); }
 
-    private void prepareCollectHandoff(Promotion ticket, Consumer<Boolean> settled) {
-        if (!externalPromotionCurrent(ticket)) { settled.accept(false); return; }
-        // The real app is still above Host. Remove the opaque empty-cell drawing
-        // now, commit that frame, then let Shell return the app to its TaskView.
-        if (ticket.slot.hint != null) ticket.slot.hint.setVisibility(View.GONE);
-        MiStepCollectFrame.await(root, () -> externalPromotionCurrent(ticket), settled);
-    }
+    private void prepareCollectHandoff(Promotion ticket, Consumer<Boolean> settled) { swapController.prepareCollectHandoff(ticket, settled); }
 
-    private void finishLiveCollect(Promotion ticket, MiStepLiveSwap.Result result) {
-        if (!livePromotionBound(ticket) || ticket.nativeCompleting) return;
-        ticket.nativeCompleting = true;
-        Slot slot = ticket.slot;
-        if (result.sideOwned && result.rolesConfirmed) {
-            slot.pkg = ticket.previousMain.pkg;
-            slot.occupied = slot.taskVisible = true;
-            slot.windowMode = 6;
-            slot.promoting = slot.launching = slot.parked = slot.frozen = false;
-            ticket.previousMainCandidate.recoveryCandidate = false;
-            HomeTaskReturn savedHome = coveredHome;
-            if (savedHome != null && savedHome.covers(ticket.taskId, ticket.token)) coveredHome = null;
-        } else if (result.rolesConfirmed) {
-            ownedTasks.remove(ticket.token, ticket.previousMainCandidate);
-            clearSlot(slot);
-        } else {
-            slot.promoting = slot.launching = false;
-            slot.occupied = slot.frozen = true;
-        }
-        if (result.sideOwned && result.rolesConfirmed) {
-            finishPromotionFocus(ticket, () -> completeLiveCollect(ticket, result), 0);
-        } else completeLiveCollect(ticket, result);
-    }
+    private void finishLiveCollect(Promotion ticket, MiStepLiveSwap.Result result) { swapController.finishLiveCollect(ticket, result); }
 
-    private void completeLiveCollect(Promotion ticket, MiStepLiveSwap.Result result) {
-        if (promotion != ticket || ticket.cancelled) return;
-        Slot slot = ticket.slot;
-        ticket.cancelled = true;
-        promotion = null;
-        restoreLiveSwapVisual(ticket);
-        statusBar.finish(ticket);
-        updateHint(slot);
-        updateTouchRegion(slot);
-        publishDesktopSideTasks();
-        log("live collect settled task=" + ticket.taskId + " side=" + result.sideOwned
-                + " confirmed=" + result.rolesConfirmed + " animated=" + result.succeeded + " error=" + result.error);
-        requestCompaction();
-        finishPendingSuspend();
-    }
+    private void completeLiveCollect(Promotion ticket, MiStepLiveSwap.Result result) { swapController.completeLiveCollect(ticket, result); }
 
     /** Promote through the existing Shell queue; retain the slot until actual detachment. */
-    private void swapWithMain(int slotIndex) {
+    void swapWithMain(int slotIndex) {
         swapWithMain(slotIndex, false);
     }
 
@@ -4160,7 +3779,7 @@ public final class MiStepHost {
         })) failPromotion(ticket, "Shell executor unavailable");
     }
 
-    private boolean setLiveSwapInputBlocked(boolean on) {
+    boolean setLiveSwapInputBlocked(boolean on) {
         if (transitionInput == null) return !on;
         if (on) {
             boolean acquired = transitionInput.block();
@@ -4208,7 +3827,7 @@ public final class MiStepHost {
         }
     }
 
-    private Object liveHostRootSurface() {
+    Object liveHostRootSurface() {
         if (root == null || !root.isAttachedToWindow() || !root.isHardwareAccelerated())
             throw new IllegalStateException("live Host window unavailable");
         Object viewRoot = XposedHelpers.callMethod(root, "getViewRootImpl");
@@ -4218,19 +3837,19 @@ public final class MiStepHost {
         return surface;
     }
 
-    private static LiveSwapGeometry.Rect liveMainRect(MiStepLayout geometry) {
+    static LiveSwapGeometry.Rect liveMainRect(MiStepLayout geometry) {
         return new LiveSwapGeometry.Rect(geometry.mainOffsetX, geometry.mainOffsetY,
                 geometry.width * geometry.mainScale, geometry.height * geometry.mainScale);
     }
 
-    private static LiveSwapGeometry.Rect liveCellRect(MiStepLayout geometry, int index) {
+    static LiveSwapGeometry.Rect liveCellRect(MiStepLayout geometry, int index) {
         int[] bounds = geometry.cellBounds(index - 1);
         float scale = geometry.cellScale(index - 1);
         return new LiveSwapGeometry.Rect(bounds[0], bounds[1],
                 geometry.width * scale, geometry.height * scale);
     }
 
-    private static Rect liveSideStrip(MiStepLayout geometry) {
+    static Rect liveSideStrip(MiStepLayout geometry) {
         return new Rect(geometry.mainOnRight ? 0 : geometry.mainWidth, geometry.topStrip,
                 geometry.mainOnRight ? geometry.sideWidth : geometry.width, geometry.height);
     }
@@ -4353,7 +3972,7 @@ public final class MiStepHost {
     }
 
     /** Paint only empty Host controls; real app buffers remain the original task surfaces. */
-    private void drawLiveEmptyHints(android.graphics.Canvas canvas, MiStepLayout original,
+    void drawLiveEmptyHints(android.graphics.Canvas canvas, MiStepLayout original,
             MiStepLayout target, int revealEmptySlots) {
         // Match the resting side background, including gaps outside the hint bounds.
         canvas.drawColor(HyperOsStyle.topWallpaperTint(ctx));
@@ -4468,7 +4087,7 @@ public final class MiStepHost {
     }
 
     /** Commit the Host visual/input hole itself before moving real tasks below its window. */
-    private void afterLiveHostFrame(Promotion ticket, Runnable action) {
+    void afterLiveHostFrame(Promotion ticket, Runnable action) {
         final View drawingRoot = root;
         if (!externalPromotionCurrent(ticket) || drawingRoot == null
                 || !drawingRoot.isAttachedToWindow() || !drawingRoot.isHardwareAccelerated()) {
@@ -4490,7 +4109,7 @@ public final class MiStepHost {
     }
 
     /** Recovery may run after screen-off, so this deliberately omits entry-only guards. */
-    private boolean livePromotionBound(Promotion ticket) {
+    boolean livePromotionBound(Promotion ticket) {
         return promotion == ticket && !ticket.cancelled && isActive(ticket.slot)
                 && sceneEpoch == ticket.sceneEpoch && ticket.slot.taskEpoch == ticket.bindingEpoch
                 && ticket.slot.taskId == ticket.taskId && ticket.token.equals(ticket.slot.taskToken);
@@ -4634,7 +4253,7 @@ public final class MiStepHost {
     }
 
     /** Already on Shell's completion turn, after exact roles and the finish Surface commit. */
-    private void finishLiveResult(Promotion ticket, MiStepLiveSwap.Result result) {
+    void finishLiveResult(Promotion ticket, MiStepLiveSwap.Result result) {
         boolean mainReady = result.rolesConfirmed && (ticket.nativeCollect ? result.sideOwned
                 : ticket.nativeHome ? result.succeeded && !result.sideOwned : result.sideOwned);
         if (mainReady && externalPromotionCurrent(ticket)) {
@@ -4793,7 +4412,7 @@ public final class MiStepHost {
         }
     }
 
-    private void restoreLiveSwapVisual(Promotion ticket) {
+    void restoreLiveSwapVisual(Promotion ticket) {
         LiveSwapVisualLease visual = ticket.liveVisual;
         ticket.liveVisual = null;
         if (visual != null) visual.restore();
@@ -5163,7 +4782,7 @@ public final class MiStepHost {
     }
 
     /** Backfill can take focus again; make the focus request after that last WCT. */
-    private void finishPromotionFocus(Promotion ticket, Runnable complete, int attempt) {
+    void finishPromotionFocus(Promotion ticket, Runnable complete, int attempt) {
         if (promotion != ticket || ticket.cancelled) return;
         if (ticket.liveMainFocusPrepared) {
             // The live Shell callback already requested the exact main task.
@@ -5239,7 +4858,7 @@ public final class MiStepHost {
         }
     }
 
-    private void failPromotion(Promotion ticket, String reason) {
+    void failPromotion(Promotion ticket, String reason) {
         traceSwapEvent("promotion-failure");
         if (promotion != ticket || ticket.cancelled) return;
         if (ticket.nativeSwap) {
@@ -5313,7 +4932,7 @@ public final class MiStepHost {
         main.post(this::finishPendingSuspend);
     }
 
-    private void clearSlot(Slot slot) {
+    void clearSlot(Slot slot) {
         slot.taskEpoch++;
         slot.removalCheckTask = -1;
         slot.retiredTaskId = slot.taskId;
@@ -5355,7 +4974,7 @@ public final class MiStepHost {
         requestCompaction();
     }
 
-    private boolean isActive(Slot slot) {
+    boolean isActive(Slot slot) {
         return root != null && sInstance == this && slot.index > 0
                 && slot.index < SLOT_COUNT && slots[slot.index] == slot;
     }
@@ -5371,7 +4990,7 @@ public final class MiStepHost {
     }
 
     /** Reject late callbacks from a task the native controller has already relinquished. */
-    private boolean controllerOwns(Slot slot, int taskId, Object token) {
+    boolean controllerOwns(Slot slot, int taskId, Object token) {
         try {
             Object info = XposedHelpers.getObjectField(slot.controller, "mTaskInfo");
             Object current = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
@@ -5416,7 +5035,7 @@ public final class MiStepHost {
         }
     }
 
-    private void bindTask(Slot slot, int taskId, Object token) {
+    void bindTask(Slot slot, int taskId, Object token) {
         if (slot.taskId != taskId || !java.util.Objects.equals(slot.taskToken, token)) {
             slot.pendingSidePromotion = null;
             slot.taskEpoch++;
@@ -5508,7 +5127,7 @@ public final class MiStepHost {
      * TaskViewTaskController keeps mTaskNotFound after an idle task vanished without a token.
      * Reusing that controller otherwise makes the framework remove the next task immediately.
      */
-    private void resetIdleTaskView(Slot slot) {
+    void resetIdleTaskView(Slot slot) {
         if (slot == null || slot.controller == null) return;
         try {
             MiStepIdleTaskView.reset(slot.controller, text -> log(text + " slot=" + slot.index));
@@ -5589,7 +5208,7 @@ public final class MiStepHost {
     }
 
     /** 与气泡同原语：IStatusBarService.hideCurrentInputMethodForBubbles(displayId)（BC L776）。 */
-    private void hideIme() {
+    void hideIme() {
         try {
             Class<?> sm = Class.forName("android.os.ServiceManager");
             Object binder = sm.getMethod("getService", String.class).invoke(null, "statusbar");
@@ -6013,7 +5632,7 @@ public final class MiStepHost {
     /**
      * v0.9.9：副格是"栈"——某个格子空了，后面的占用格子自动往上排（官方 SideAreaStackView 的紧凑排列）。
      */
-    private void compactCells() {
+    void compactCells() {
         if (root == null || layout == null) return;
         if (scene != ACTIVE || promotion != null || transferBusy || cellMotion != null) {
             compactPending = true;
@@ -6062,7 +5681,7 @@ public final class MiStepHost {
         if (!moves.isEmpty()) animateCellMoves(moves, initialEmptySlots);
     }
 
-    private void requestCompaction() {
+    void requestCompaction() {
         if (scene != ACTIVE || root == null) return;
         compactPending = true;
         main.post(this::compactCells);
