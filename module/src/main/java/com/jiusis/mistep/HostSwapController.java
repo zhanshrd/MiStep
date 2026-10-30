@@ -1187,6 +1187,10 @@ final class HostSwapController {
         slot.promoting = !keepCellUnfrozen;
         slot.frozen = !keepCellUnfrozen;
         restoreLiveSwapVisual(ticket);
+        // 对齐 completeLiveCollect 约定：按槽位状态重新推导提示与触区
+        // （collect 的 prepareCollectHandoff 在租约外把 hint 置 GONE，必须显式恢复）。
+        h.updateHint(slot);
+        h.updateTouchRegion(slot);
         h.statusBar.finish(ticket);
         h.publishDesktopSideTasks();
         MiStepHost.log("native promotion force-abandoned; cell frozen=" + !keepCellUnfrozen + ": " + reason);

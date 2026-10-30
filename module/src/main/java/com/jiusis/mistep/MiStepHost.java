@@ -660,9 +660,11 @@ public final class MiStepHost {
 
     public static void setPendingMainSide(boolean mainOnRight) {
         MiStepHost host = sInstance;
-        // ACTIVE 期间热区手势在 HotZoneGesture 源头即被丢弃，本守卫为防御性冗余；
+        // 过渡期间（RESUMING/SUSPENDING）的滑动不得改写下一次打开的方向：
+        // consumePendingMainSide 已在恢复会话时消费，晚到的写入会污染下次打开的朝向。
+        // ACTIVE 时热区手势本就在 HotZoneGesture 源头被丢弃，此守卫为防御性冗余；
         // 关闭工作区走顶栏 ✕ / TOGGLE 广播 / Home、Recents / 息屏，没有“再滑一次关闭”。
-        if (host != null && host.scene == ACTIVE) return;
+        if (host != null && host.scene != SUSPENDED) return;
         pendingMainSide = mainOnRight ? 1 : 0;
     }
 

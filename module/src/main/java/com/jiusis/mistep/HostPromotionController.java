@@ -447,7 +447,10 @@ final class HostPromotionController {
             // 兜底（看门狗 20s 强制的实际执行体）：取消路径已证明失效（cancelRequested/
             // nativeCompleting 闩死）。不做任何 WM 写入（native 事务结局未知），按未确认
             // 惯例冻结格子并释放全局闩，避免 promotion/input-blocker 永久卡死。
-            h.swapController.forceAbandonLivePromotion(ticket, "cancellation inert: " + reason, false);
+            // keepCellUnfrozen = nativeCompleting：完成窗口内（角色已落定、槽位已重绑）
+            // 到达的 failPromotion 不得冻结已确认的新绑定；未完成的楔死（cancelRequested
+            // 闩死、nativeCompleting 仍 false）维持未知结局冻结惯例。
+            h.swapController.forceAbandonLivePromotion(ticket, "cancellation inert: " + reason, ticket.nativeCompleting);
             return;
         }
         ticket.cancelled = true;
