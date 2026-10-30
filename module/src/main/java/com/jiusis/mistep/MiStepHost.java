@@ -70,10 +70,10 @@ public final class MiStepHost {
     private final Object transitions;
     final Handler main = new Handler(Looper.getMainLooper());
 
-    private final Slot[] slots = new Slot[SLOT_COUNT];
+    final Slot[] slots = new Slot[SLOT_COUNT];
 
     volatile MiStepLayout layout;
-    private FrameLayout root;
+    FrameLayout root;
     private WindowManager wm;
     private WindowManager.LayoutParams lp;
     private DisplayManager displayManager;
@@ -84,8 +84,8 @@ public final class MiStepHost {
     private boolean geometryRefreshAfterLive;
     private int lpY = 0;
     boolean zoomed;
-    private volatile int screenW = 1080;
-    private volatile int screenH = 2460;
+    volatile int screenW = 1080;
+    volatile int screenH = 2460;
     private final Object taskUsersLock = new Object();
     private final Object taskWindowStatesLock = new Object();
     private final java.util.Map<Integer, TaskWindowState> taskWindowStates =
@@ -100,9 +100,10 @@ public final class MiStepHost {
     private Object swapPreviewStatusOwner;
     private final MiStepStatusBar statusBar;
     private final ZoomTransport zoomTransport;
+    private final HostMirrorController mirrorController;
     private volatile HomeTaskReturn coveredHome;
     private CellMovePreview cellMovePreview;
-    private Bitmap mainBackdrop;
+    Bitmap mainBackdrop;
     private View topStripBacking;
     private Bitmap wallpaperBackdrop;
     private boolean wallpaperBackdropRequested;
@@ -112,12 +113,12 @@ public final class MiStepHost {
     private LiveZoomRequest pendingLiveZoom;
     private boolean mainBackdropRequested;
     /** mirror 承载时主区显示的桌面/上一主区快照（避免隐藏任务后主区全黑）。 */
-    private View carrierBackdrop;
-    private int carrierSlotIndex = -1;
+    View carrierBackdrop;
+    int carrierSlotIndex = -1;
     private MiStepTopBar topBar;
     private View sideBacking;
     /** 侧栏按格分段的不透明底板；承载格需要把它藏起来让下面的真实任务画面透出来。 */
-    private final View[] sideBackingViews = new View[SLOT_COUNT];
+    final View[] sideBackingViews = new View[SLOT_COUNT];
     private boolean mainOnRight;
     private View dragGhost;
     private boolean dragMoved;
@@ -126,8 +127,8 @@ public final class MiStepHost {
     private Slot dragTarget;
     private View keyguardMask;
     private boolean keyguardLocked;
-    private static final int ACTIVE = 0, SUSPENDING = 1, SUSPENDED = 2, RESUMING = 3;
-    private volatile int scene = ACTIVE;
+    static final int ACTIVE = 0, SUSPENDING = 1, SUSPENDED = 2, RESUMING = 3;
+    volatile int scene = ACTIVE;
     private long sceneEpoch;
     private boolean suspendRequested;
     private boolean landscapeSuspended;
@@ -157,7 +158,7 @@ public final class MiStepHost {
 
     private final java.util.Map<Object, OwnedTask> ownedTasks = new java.util.HashMap<>();
 
-    private static final class Slot implements SlotPositions.Entry {
+    static final class Slot implements SlotPositions.Entry {
         int index;
         View view;
         View hint;
@@ -399,7 +400,7 @@ public final class MiStepHost {
         }
     }
 
-    private static final class LiveTask {
+    static final class LiveTask {
         final int id;
         final Object token;
         final String pkg;
@@ -437,6 +438,7 @@ public final class MiStepHost {
         this.transitions = transitions;
         statusBar = new MiStepStatusBar(main, MiStepHost::log);
         zoomTransport = new ZoomTransport(this);
+        mirrorController = new HostMirrorController(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
         installRetainedSurfaces(ctx.getClassLoader());
         for (int i = 0; i < SLOT_COUNT; i++) {
@@ -636,549 +638,21 @@ public final class MiStepHost {
                 new Rect(x, y, x + w, y + h), Math.max(1000, holdMs), hideMode));
     }
 
-    private Object mirrorPocSurface;
-    private Object mirrorPocLeash;
-    private int mirrorPocHideMode;
+    private void createMirrorLayer() { mirrorController.createMirrorLayer(); }
 
-    /** 镜像专用透明 overlay 窗口：位于宿主之上、不接收触摸，mirror 作为它的子层。 */
-    private FrameLayout mirrorLayerRoot;
-    private WindowManager mirrorLayerWm;
-    private WindowManager.LayoutParams mirrorLayerParams;
+    private void setMirrorLayerVisible(boolean visible) { mirrorController.setMirrorLayerVisible(visible); }
 
-    private void createMirrorLayer() {
-        if (mirrorLayerRoot != null) return;
-        try {
-            mirrorLayerRoot = new FrameLayout(ctx);
-            mirrorLayerRoot.setBackgroundColor(0x00000000);
-            mirrorLayerWm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
-            mirrorLayerParams = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-                    PixelFormat.TRANSLUCENT);
-            mirrorLayerParams.gravity = Gravity.TOP | Gravity.START;
-            mirrorLayerParams.setTitle("MiStepMirrorLayer");
-            HostWindowPolicy.configure(mirrorLayerParams);
-            try { mirrorLayerParams.setFitInsetsTypes(0); } catch (Throwable ignored) {}
-            try {
-                mirrorLayerParams.layoutInDisplayCutoutMode =
-                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
-            } catch (Throwable ignored) {}
-            mirrorLayerWm.addView(mirrorLayerRoot, mirrorLayerParams);
-            log("mirror layer window added");
-        } catch (Throwable error) {
-            log("mirror layer window failed: " + error);
-            mirrorLayerRoot = null;
-        }
-    }
-
-    private void setMirrorLayerVisible(boolean visible) {
-        if (mirrorLayerRoot == null) return;
-        try {
-            if (mirrorLayerRoot.getVisibility() != (visible ? View.VISIBLE : View.GONE)) {
-                mirrorLayerRoot.setVisibility(visible ? View.VISIBLE : View.GONE);
-            }
-        } catch (Throwable ignored) {}
-    }
-
-    /** mirror 层窗口的 SurfaceControl；失败时返回 null。 */
-    private Object mirrorLayerSurface() {
-        try {
-            if (mirrorLayerRoot == null) return null;
-            Object viewRoot = XposedHelpers.callMethod(mirrorLayerRoot, "getViewRootImpl");
-            return viewRoot == null ? null
-                    : XposedHelpers.callMethod(viewRoot, "getSurfaceControl");
-        } catch (Throwable error) {
-            log("mirror layer surface unavailable: " + error);
-            return null;
-        }
-    }
-
-    /**
-     * POC：从 ShellTaskOrganizer.getTaskLeash(taskId) 取真实任务 leash，
-     * SurfaceControl.mirrorSurface 生成实时镜像，父挂到宿主窗口层并按目标矩形缩放。
-     * hideMode 1/2/3/4 分别试验 alpha/移出屏幕/空 crop/hide 隐藏原任务，
-     * 目标是镜像仍然实时、而主区不再显示原任务；结束时恢复。
-     */
     private void startMirrorPoc(int requestedTask, Rect dest, int holdMs, int hideMode) {
-        try {
-            stopMirrorPoc();
-            if (requestedTask < 0) {
-                LiveTask main = findMainTask();
-                if (main == null) {
-                    log("mirror POC: no main task");
-                    android.widget.Toast.makeText(ctx, "mirror: 主区无应用",
-                            android.widget.Toast.LENGTH_SHORT).show();
-                    return;
-                }
-                requestedTask = main.id;
-            }
-            Object organizer = null;
-            for (Slot slot : slots) {
-                if (slot.controller != null) {
-                    organizer = XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
-                    break;
-                }
-            }
-            if (organizer == null) {
-                log("mirror POC: no ShellTaskOrganizer on controllers");
-                return;
-            }
-            Object leash = XposedHelpers.callMethod(organizer, "getTaskLeash",
-                    new Class<?>[]{int.class}, requestedTask);
-            if (leash == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                log("mirror POC: leash unavailable task=" + requestedTask + " leash=" + leash);
-                return;
-            }
-            if (hideMode == 5) {
-                // 免 mirror 承载：把原任务 leash 直接变换进格子（原任务窗口仍是满屏，
-                // 只是显示变换成格子大小/位置），验证画面与触摸能否同时成立。
-                if (!applyDirectCarrier(leash, dest, true)) return;
-                mirrorPocLeash = leash;
-                mirrorPocHideMode = 5;
-                log("direct carrier shown task=" + requestedTask + " dest=" + dest);
-                main.postDelayed(this::stopMirrorPoc, holdMs);
-                return;
-            }
-            Object parent = mirrorLayerSurface();
-            if (parent == null) {
-                Object viewRoot = XposedHelpers.callMethod(root, "getViewRootImpl");
-                parent = viewRoot == null ? null
-                        : XposedHelpers.callMethod(viewRoot, "getSurfaceControl");
-            }
-            if (parent == null) {
-                log("mirror POC: host window SurfaceControl unavailable");
-                return;
-            }
-            Class<?> scClass = Class.forName("android.view.SurfaceControl");
-            Object mirror = XposedHelpers.callStaticMethod(scClass, "mirrorSurface", leash);
-            float sx = dest.width() / (float) screenW;
-            float sy = dest.height() / (float) screenH;
-            Object tx = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            try {
-                hideMirrorSource(tx, leash, hideMode);
-                XposedHelpers.callMethod(tx, "reparent", mirror, parent);
-                XposedHelpers.callMethod(tx, "setLayer", mirror, 1000000);
-                XposedHelpers.callMethod(tx, "setPosition", mirror,
-                        (float) dest.left, (float) dest.top);
-                XposedHelpers.callMethod(tx, "setMatrix", mirror, sx, 0f, 0f, sy);
-                XposedHelpers.callMethod(tx, "setAlpha", mirror, 1f);
-                XposedHelpers.callMethod(tx, "show", mirror);
-                XposedHelpers.callMethod(tx, "apply");
-            } finally {
-                try { XposedHelpers.callMethod(tx, "close"); } catch (Throwable ignored) {}
-            }
-            mirrorPocSurface = mirror;
-            mirrorPocLeash = leash;
-            mirrorPocHideMode = hideMode;
-            log("mirror POC shown task=" + requestedTask + " dest=" + dest
-                    + " scale=" + sx + "x" + sy + " hideMode=" + hideMode
-                    + " leash=" + leash + " parent=" + parent);
-            main.postDelayed(this::stopMirrorPoc, holdMs);
-        } catch (Throwable error) {
-            log("mirror POC failed: " + error);
-            XposedBridge.log(error);
-            stopMirrorPoc();
-        }
+        mirrorController.startMirrorPoc(requestedTask, dest, holdMs, hideMode);
     }
 
-    /**
-     * 试不同的“原任务隐藏”方式，目标是镜像仍然实时、而主区不再显示原任务：
-     * 0=不隐藏；1=alpha 0（已证会让镜像一起变空）；2=移出屏幕；3=空 crop；4=hide。
-     */
-    private void hideMirrorSource(Object tx, Object leash, int mode) {
-        try {
-            switch (mode) {
-                case 1:
-                    XposedHelpers.callMethod(tx, "setAlpha", leash, 0f);
-                    break;
-                case 2:
-                    XposedHelpers.callMethod(tx, "setPosition", leash, -4000f, -4000f);
-                    break;
-                case 3:
-                    XposedHelpers.callMethod(tx, "setCrop", leash, new Rect(0, 0, 0, 0));
-                    break;
-                case 4:
-                    XposedHelpers.callMethod(tx, "hide", leash);
-                    break;
-                default:
-                    break;
-            }
-        } catch (Throwable error) {
-            log("mirror hide mode " + mode + " failed: " + error);
-        }
-    }
+    private Object shellOrganizer() { return mirrorController.shellOrganizer(); }
 
-    private void restoreMirrorSource(Object tx, Object leash, int mode) {
-        try {
-            switch (mode) {
-                case 1:
-                    XposedHelpers.callMethod(tx, "setAlpha", leash, 1f);
-                    break;
-                case 2:
-                    XposedHelpers.callMethod(tx, "setPosition", leash, 0f, 0f);
-                    break;
-                case 3:
-                    XposedHelpers.callMethod(tx, "setCrop",
-                            new Class<?>[]{Class.forName("android.view.SurfaceControl"),
-                                    android.graphics.Rect.class}, leash, null);
-                    break;
-                case 4:
-                    XposedHelpers.callMethod(tx, "show", leash);
-                    break;
-                default:
-                    break;
-            }
-        } catch (Throwable error) {
-            log("mirror restore mode " + mode + " failed: " + error);
-        }
-    }
+    private void reassertCarrier() { mirrorController.reassertCarrier(); }
 
-    /**
-     * 免 mirror 承载：屏幕坐标 = 放大倍率 × 显示内容坐标 + 主区偏移，因此把格子的
-     * 屏幕矩形反算成任务 leash 的位置/缩放。原任务窗口仍占满屏、输入通道不变。
-     */
-    private boolean applyDirectCarrier(Object leash, Rect dest, boolean logSuccess) {
-        try {
-            final float ratio = layout.mainScale;
-            final float sx = dest.width() / (ratio * screenW);
-            final float sy = dest.height() / (ratio * screenH);
-            final float px = (dest.left - layout.mainOffsetX) / ratio;
-            final float py = (dest.top - layout.mainOffsetY) / ratio;
-            Object tx = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            try {
-                XposedHelpers.callMethod(tx, "setPosition", leash, px, py);
-                XposedHelpers.callMethod(tx, "setMatrix", leash, sx, 0f, 0f, sy);
-                XposedHelpers.callMethod(tx, "apply");
-            } finally {
-                try { XposedHelpers.callMethod(tx, "close"); } catch (Throwable ignored) {}
-            }
-            if (logSuccess) {
-                log("direct carrier transform ratio=" + ratio + " scale=" + sx + "x" + sy
-                        + " pos=" + px + "," + py);
-            }
-            return true;
-        } catch (Throwable error) {
-            log("direct carrier failed: " + error);
-            return false;
-        }
-    }
+    private void restoreCarrierToMain() { mirrorController.restoreCarrierToMain(); }
 
-    private void restoreDirectCarrier(Object leash) {
-        try {
-            Object tx = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            try {
-                XposedHelpers.callMethod(tx, "setPosition", leash, 0f, 0f);
-                XposedHelpers.callMethod(tx, "setMatrix", leash, 1f, 0f, 0f, 1f);
-                XposedHelpers.callMethod(tx, "apply");
-            } finally {
-                try { XposedHelpers.callMethod(tx, "close"); } catch (Throwable ignored) {}
-            }
-            log("direct carrier restored task to main");
-        } catch (Throwable error) {
-            log("direct carrier restore failed: " + error);
-        }
-    }
-
-    private void stopMirrorPoc() {
-        Object mirror = mirrorPocSurface;
-        Object leash = mirrorPocLeash;
-        int hideMode = mirrorPocHideMode;
-        mirrorPocSurface = null;
-        mirrorPocLeash = null;
-        mirrorPocHideMode = 0;
-        if (hideMode == 5) {
-            if (leash != null && Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                restoreDirectCarrier(leash);
-            }
-            return;
-        }
-        if (mirror == null) return;
-        try {
-            Object tx = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            try {
-                if (hideMode != 0 && leash != null
-                        && Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                    restoreMirrorSource(tx, leash, hideMode);
-                }
-                XposedHelpers.callMethod(tx, "remove", mirror);
-                XposedHelpers.callMethod(tx, "apply");
-            } finally {
-                try { XposedHelpers.callMethod(tx, "close"); } catch (Throwable ignored) {}
-            }
-            XposedHelpers.callMethod(mirror, "release");
-            log("mirror POC removed; restoredHideMode=" + hideMode);
-        } catch (Throwable error) {
-            log("mirror POC cleanup failed: " + error);
-        }
-    }
-
-    // ---------------------------------------------------------------- mirror 承载（fullscreen-only 应用进副格）
-
-    private Object shellOrganizer() {
-        for (Slot slot : slots) {
-            if (slot.controller != null) {
-                return XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 把 fullscreen-only 应用（相机等）放进副格：
-     * 任务保持满屏前台（预览继续刷新），直接把任务 leash 变换成格子的大小/位置；
-     * 主区显示桌面快照。此形态真机验证宿主仍能收到触摸（mirror 形态会被 CLONE 输入窗口挡住）。
-     */
-    private boolean attachMirrorCarrier(Slot slot, LiveTask task) {
-        if (slot == null || task == null || scene != ACTIVE || carrierSlotIndex >= 0) return false;
-        if (slot.rect == null) return false;
-        try {
-            Object organizer = shellOrganizer();
-            Object leash = organizer == null ? null
-                    : XposedHelpers.callMethod(organizer, "getTaskLeash",
-                            new Class<?>[]{int.class}, task.id);
-            if (leash == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                log("carrier: no task leash for task=" + task.id);
-                return false;
-            }
-            final Rect dest = new Rect(slot.rect[0], slot.rect[1], slot.rect[2], slot.rect[3]);
-            // 不用 mirror：直接把原任务 leash 变换进格子。真机验证这种形态下宿主仍能收到
-            // 触摸（mirror 形态会被 MIUI 的 CLONE 输入窗口挡住），且任务仍是前台、预览继续。
-            if (!applyDirectCarrier(leash, dest, true)) {
-                log("carrier: direct transform failed task=" + task.id);
-                return false;
-            }
-            slot.carrier = true;
-            slot.carrierTaskId = task.id;
-            slot.carrierLeash = leash;
-            slot.carrierMirror = null;
-            slot.taskId = task.id;
-            slot.taskToken = null;
-            slot.pkg = task.pkg;
-            slot.occupied = true;
-            slot.parked = false;
-            slot.frozen = false;
-            slot.taskVisible = true;
-            slot.launching = false;
-            // 底板/hint 是不透明的宿主 View，会盖住下面的真实任务画面：承载格必须让位。
-            View backing = sideBackingViews[slot.index];
-            if (backing != null) backing.setVisibility(View.GONE);
-            if (slot.hint != null) slot.hint.setVisibility(View.GONE);
-            // 格子的 SF 纯色底也是宿主层的子 surface，同样会挡住真实任务画面。
-            removeCellBackground(slot);
-            carrierSlotIndex = slot.index;
-            showCarrierBackdrop(task.pkg, slot.index);
-            // 承载格没有 TaskView 可点：在格子上放一个透明点击层，点它把任务放回主区。
-            try {
-                final View tap = new View(ctx);
-                tap.setBackgroundColor(0x01000000);
-                tap.setOnClickListener(v -> {
-                    log("carrier tap layer clicked slot=" + slot.index);
-                    restoreCarrierToMain();
-                });
-                root.setOnTouchListener((v, event) -> {
-                    if (carrierSlotIndex >= 0 && event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                        log("carrier root touch down " + event.getRawX() + "," + event.getRawY());
-                    }
-                    return false;
-                });
-                FrameLayout.LayoutParams tapParams =
-                        new FrameLayout.LayoutParams(dest.width(), dest.height());
-                tapParams.leftMargin = dest.left;
-                tapParams.topMargin = dest.top;
-                root.addView(tap, tapParams);
-                slot.carrierTapView = tap;
-            } catch (Throwable error) {
-                log("carrier tap layer failed: " + error);
-            }
-            root.requestLayout();
-            root.invalidate();
-            log("carrier attached (direct) task=" + task.id + " slot=" + slot.index
-                    + " dest=" + dest + " leash=" + leash);
-            android.widget.Toast.makeText(ctx, "已放入副格",
-                    android.widget.Toast.LENGTH_SHORT).show();
-            return true;
-        } catch (Throwable error) {
-            log("carrier attach failed: " + error);
-            XposedBridge.log(error);
-            restoreCarrierToMain();
-            return false;
-        }
-    }
-
-    /** 主区在承载期间没有真实任务可看，用 Home 快照占位并提示返回方式。 */
-    private void showCarrierBackdrop(String pkg, int slotIndex) {
-        if (carrierBackdrop != null || root == null || layout == null) return;
-        try {
-            FrameLayout box = new FrameLayout(ctx);
-            if (mainBackdrop != null && !mainBackdrop.isRecycled()) {
-                android.widget.ImageView image = new android.widget.ImageView(ctx);
-                image.setImageBitmap(mainBackdrop);
-                image.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
-                box.addView(image, new FrameLayout.LayoutParams(-1, -1));
-                View shade = new View(ctx);
-                shade.setBackgroundColor(HyperOsStyle.dark(ctx) ? 0x33000000 : 0x22000000);
-                box.addView(shade, new FrameLayout.LayoutParams(-1, -1));
-            } else {
-                box.setBackgroundColor(HyperOsStyle.page(ctx));
-            }
-            TextView hint = new TextView(ctx);
-            hint.setText(pkg + " 在 " + slotIndex + " 号窗口\n点按返回主区");
-            hint.setTextColor(HyperOsStyle.textPrimary(ctx));
-            hint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15f);
-            hint.setTypeface(android.graphics.Typeface.create(
-                    "sans-serif-medium", android.graphics.Typeface.NORMAL));
-            hint.setGravity(Gravity.CENTER);
-            hint.setBackground(HyperOsStyle.glassSheet(ctx, 22f));
-            hint.setPadding(dp(18), dp(12), dp(18), dp(12));
-            FrameLayout.LayoutParams hintParams = new FrameLayout.LayoutParams(-1, dp(82));
-            hintParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-            hintParams.leftMargin = dp(16);
-            hintParams.rightMargin = dp(16);
-            hintParams.bottomMargin = dp(16);
-            box.addView(hint, hintParams);
-            box.setOnClickListener(v -> restoreCarrierToMain());
-            FrameLayout.LayoutParams params =
-                    new FrameLayout.LayoutParams(layout.mainDispWidth, layout.mainDispHeight);
-            params.leftMargin = layout.mainOffsetX;
-            params.topMargin = layout.mainOffsetY;
-            root.addView(box, params);
-            carrierBackdrop = box;
-            log("carrier backdrop added for " + pkg + " slot=" + slotIndex);
-        } catch (Throwable error) {
-            log("carrier backdrop failed: " + error);
-        }
-    }
-
-    private void removeCarrierBackdrop() {
-        View box = carrierBackdrop;
-        carrierBackdrop = null;
-        if (box != null && root != null) {
-            try { root.removeView(box); } catch (Throwable ignored) {}
-            root.requestLayout();
-            root.invalidate();
-        }
-    }
-
-    /** 心跳/系统重排后重新声明“原任务 leash 在格子里的位置/缩放”。 */
-    private void reassertCarrier() {
-        for (Slot slot : slots) {
-            if (!slot.carrier) continue;
-            Object leash = slot.carrierLeash;
-            if (leash == null || slot.rect == null) continue;
-            try {
-                if (!Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                    log("carrier leash invalid; restoring task to main");
-                    restoreCarrierToMain();
-                    return;
-                }
-                Rect dest = new Rect(slot.rect[0], slot.rect[1], slot.rect[2], slot.rect[3]);
-                applyDirectCarrier(leash, dest, false);
-            } catch (Throwable error) {
-                log("carrier reassert failed: " + error);
-            }
-        }
-    }
-
-    /** 把承载中的任务移回主区（点击格子/主区、退出一步、系统返回都走这里）。 */
-    private void restoreCarrierToMain() {
-        boolean restored = false;
-        for (Slot slot : slots) {
-            if (!slot.carrier) continue;
-            Object leash = slot.carrierLeash;
-            try {
-                if (leash != null
-                        && Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                    restoreDirectCarrier(leash);
-                }
-            } catch (Throwable error) {
-                log("carrier restore failed: " + error);
-            }
-            slot.carrier = false;
-            slot.carrierTaskId = -1;
-            slot.carrierLeash = null;
-            slot.carrierMirror = null;
-            View tap = slot.carrierTapView;
-            slot.carrierTapView = null;
-            if (tap != null && root != null) {
-                try { root.removeView(tap); } catch (Throwable ignored) {}
-            }
-            slot.occupied = false;
-            slot.taskId = -1;
-            slot.taskToken = null;
-            slot.pkg = null;
-            slot.taskVisible = false;
-            View backing = sideBackingViews[slot.index];
-            if (backing != null) backing.setVisibility(View.VISIBLE);
-            if (slot.hint != null) slot.hint.setVisibility(View.VISIBLE);
-            log("carrier restored slot=" + slot.index + " task to main");
-            restored = true;
-        }
-        carrierSlotIndex = -1;
-        removeCarrierBackdrop();
-        if (root != null) {
-            root.setOnTouchListener(null);
-        }
-        if (restored && root != null) {
-            root.requestLayout();
-            root.invalidate();
-        }
-    }
-
-    /**
-     * 清掉主任务 leash 上可能残留的过渡裁切。旧版 clampOpeningTransition 把动画期的
-     * crop 写进了 finish 事务，任务回到常驻后仍被裁到主区矩形（顶栏启动的应用只显示
-     * 一部分）；这里在进入一步、快捷启动后、主任务变化时主动清一次。
-     */
-    private void clearMainTaskLeashCrop(int taskId) {
-        if (taskId < 0) return;
-        try {
-            Object organizer = shellOrganizer();
-            if (organizer == null) return;
-            Object leash = XposedHelpers.callMethod(organizer, "getTaskLeash",
-                    new Class<?>[]{int.class}, taskId);
-            if (leash == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                return;
-            }
-            Object tx = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            try {
-                XposedHelpers.callMethod(tx, "setCrop",
-                        new Class<?>[]{Class.forName("android.view.SurfaceControl"),
-                                android.graphics.Rect.class}, leash, null);
-                XposedHelpers.callMethod(tx, "apply");
-            } finally {
-                try { XposedHelpers.callMethod(tx, "close"); } catch (Throwable ignored) {}
-            }
-            log("main task leash crop cleared task=" + taskId);
-        } catch (Throwable error) {
-            log("clear main task crop failed task=" + taskId + ": " + error);
-        }
-    }
-
-    /** 延时清一次主任务 leash 裁切（进入一步/恢复/快捷启动后调用）。 */
-    private void scheduleMainCropClear(long delayMs) {
-        main.postDelayed(() -> {
-            if (root == null || scene == SUSPENDED) return;
-            if (!executeOnShell(() -> {
-                try {
-                    LiveTask mainTask = findMainTask();
-                    if (mainTask != null) clearMainTaskLeashCrop(mainTask.id);
-                } catch (Throwable error) {
-                    log("main task crop clear failed: " + error);
-                }
-            })) {
-                log("main task crop clear skipped: no shell queue");
-            }
-        }, delayMs);
-    }
+    private void scheduleMainCropClear(long delayMs) { mirrorController.scheduleMainCropClear(delayMs); }
 
     /** 打开一步时按滑动起始角决定主区在哪边：从左角滑 → 主区在左；从右角滑 → 主区在右。 */
     private static volatile int pendingMainSide = -1;
@@ -2066,7 +1540,7 @@ public final class MiStepHost {
         }
     }
 
-    private LiveTask findMainTask() throws Exception {
+    LiveTask findMainTask() throws Exception {
         // A closing fullscreen app may remain visible while Home has already taken
         // focus. Visibility alone cannot make that departing app a swap participant.
         // If both claim focus the scene is still changing: retain both task bindings.
@@ -3998,11 +3472,11 @@ public final class MiStepHost {
         return null;
     }
 
-    private int dp(float value) {
+    int dp(float value) {
         return Math.round(ctx.getResources().getDisplayMetrics().density * value);
     }
 
-    private void removeCellBackground(Slot slot) {
+    void removeCellBackground(Slot slot) {
         Object background = slot.cellBackground;
         slot.cellBackground = null;
         slot.cellBackgroundParent = null;
@@ -6792,7 +6266,7 @@ public final class MiStepHost {
         return sb.toString();
     }
 
-    private boolean executeOnShell(Runnable task) {
+    boolean executeOnShell(Runnable task) {
         try {
             Object shell = XposedHelpers.getObjectField(transitions, "mShellExecutor");
             if (shell instanceof Executor) {
