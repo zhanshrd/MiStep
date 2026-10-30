@@ -1941,8 +1941,24 @@ public final class MiStepHost {
                         if (!checks.isEmpty()) {
                             try {
                                 Executor uiExecutor = action -> h.main.post(action);
+                                // SDK 37: 监听参数类型是 SurfaceControl$TransactionCommittedListener
+                                //（onTransactionCommitted()）；传 Runnable 会反射失配、提交信号全失。
+                                Class<?> callbackType = XposedHelpers.findClass(
+                                        "android.view.SurfaceControl$TransactionCommittedListener",
+                                        p.thisObject.getClass().getClassLoader());
+                                Object callback = java.lang.reflect.Proxy.newProxyInstance(
+                                        callbackType.getClassLoader(), new Class<?>[]{callbackType},
+                                        (proxy, method, args) -> {
+                                            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                                            if ("equals".equals(method.getName())) return args != null && proxy == args[0];
+                                            if ("toString".equals(method.getName())) return "MiStepNativeObservation";
+                                            if ("onTransactionCommitted".equals(method.getName())) {
+                                                for (NativeObservation check : checks) check.run();
+                                            }
+                                            return null;
+                                        });
                                 XposedHelpers.callMethod(p.thisObject, "addTransactionCommittedListener",
-                                        uiExecutor, (Runnable) () -> { for (NativeObservation check : checks) check.run(); });
+                                        uiExecutor, callback);
                             } catch (Throwable unavailable) {
                                 log("commit signal unavailable; retain bounded observation watchdog");
                             }
@@ -4905,7 +4921,9 @@ public final class MiStepHost {
         Object wct = Class.forName("android.window.WindowContainerTransaction")
                 .getDeclaredConstructor().newInstance();
         Object token = ticket.token;
-        XposedHelpers.callMethod(wct, "setWindowingMode", token, 0);
+        // 显式 FULLSCREEN：UNDEFINED(0) 会从父容器继承——而父容器正是 always-on-top
+        // 多窗口 RootTask，等于把任务留在原地（真机 BUG-1：QQ 被钉死在置顶栈）。
+        XposedHelpers.callMethod(wct, "setWindowingMode", token, 1);
         XposedHelpers.callMethod(wct, "setInterceptBackPressedOnTaskRoot", token, false);
         XposedHelpers.callMethod(wct, "setTaskForceExcludedFromRecents", token, false);
         XposedHelpers.callMethod(wct, "setDisablePip", token, false);

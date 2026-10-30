@@ -885,9 +885,42 @@ public class HostEntry implements IXposedHookLoadPackage {
                     log("zoom dispatch " + java.util.Arrays.toString(request)
                             + " from leased request '" + selected.command + "'");
                 }
+                scheduleZoomDivergenceCheck(target, request);
                 target.dispatch.submit(target, request[0], request[1], request[2]);
             }
         }
+    }
+
+    /**
+     * 去重可能永久吞掉与上次相同的目标值：若 WM 侧真实 spec 被外部路径清掉/改掉，
+     * 相同心跳会被 dedup 拦截，工作区从此不再缩放（与动画路径的 invalidateLastAttempt
+     * 同理，但外部清 spec 没有人清 lastAttempt）。这里低频（每 3 次派发约 1 次）在
+     * WM 锁下读回真实 spec，发现发散就清 lastAttempt，让下一次 submit 自然生效。
+     */
+    private static int sZoomDivergenceTick;
+
+    private static void scheduleZoomDivergenceCheck(ZoomTarget target, float[] desired) {
+        if ((sZoomDivergenceTick++ % 3) != 0) return;
+        final float scale = desired[0], offsetY = desired[1], offsetX = desired[2];
+        target.handler.post(() -> {
+            synchronized (target.globalLock) {
+                if (target != sZoomTarget || target.display != sDisplayContent) return;
+                try {
+                    Object actual = XposedHelpers.getObjectField(target.display, "mMagnificationSpec");
+                    float aScale = actual == null ? 1f : XposedHelpers.getFloatField(actual, "scale");
+                    float aY = actual == null ? 0f : XposedHelpers.getFloatField(actual, "offsetY");
+                    float aX = actual == null ? 0f : XposedHelpers.getFloatField(actual, "offsetX");
+                    if (Float.compare(aScale, scale) != 0 || Float.compare(aY, offsetY) != 0
+                            || Float.compare(aX, offsetX) != 0) {
+                        target.dispatch.invalidateLastAttempt();
+                        log("zoom spec divergence: actual " + aScale + "/" + aY + "/" + aX
+                                + " desired " + scale + "/" + offsetY + "/" + offsetX + "; reassert armed");
+                    }
+                } catch (Throwable ignored) {
+                    // 只读探测，尽力而为
+                }
+            }
+        });
     }
 
     /** Preserve active WM magnification after Shell resets its transition targets. */
