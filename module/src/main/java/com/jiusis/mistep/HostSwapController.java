@@ -252,7 +252,7 @@ final class HostSwapController {
             }
             MiStepHost.log("onSlotTapped slot=" + slotIndex
                     + (h.slots[slotIndex] != null && h.slots[slotIndex].carrier ? " carrier" : ""));
-            if (h.scene != MiStepHost.ACTIVE || h.transferBusy) return;
+            if (h.scene != MiStepHost.ACTIVE || h.transferBusy || h.promotion != null) return;
             MiStepHost.Slot slot = h.slots[slotIndex];
             if (slot.closing) return;
             if (slot.carrier) {
@@ -413,7 +413,7 @@ final class HostSwapController {
         if (ticket.nativeCompleting) return;
         if (!livePromotionBound(ticket)) {
             if (h.promotion == ticket && !ticket.cancelled)
-                forceAbandonLivePromotion(ticket, "stale live collect completion", bindingIntact(ticket));
+                forceAbandonLivePromotion(ticket, "stale live collect completion", true);
             return;
         }
         ticket.nativeCompleting = true;
@@ -1074,7 +1074,7 @@ final class HostSwapController {
         if (h.sceneEpoch != ticket.sceneEpoch || ticket.slot.taskEpoch != ticket.bindingEpoch
                 || ticket.slot.taskId != ticket.taskId || !ticket.token.equals(ticket.slot.taskToken)) {
             MiStepHost.log("stale native completion rejected; scene or original slot binding changed");
-            forceAbandonLivePromotion(ticket, "stale native completion", bindingIntact(ticket));
+            forceAbandonLivePromotion(ticket, "stale native completion", true);
             return;
         }
         ticket.nativeCompleting = true;
@@ -1142,7 +1142,7 @@ final class HostSwapController {
         if (ticket.nativeCompleting) return;
         if (!livePromotionBound(ticket)) {
             if (h.promotion == ticket && !ticket.cancelled)
-                forceAbandonLivePromotion(ticket, "stale live home completion", bindingIntact(ticket));
+                forceAbandonLivePromotion(ticket, "stale live home completion", true);
             return;
         }
         ticket.nativeCompleting = true;
@@ -1176,9 +1176,14 @@ final class HostSwapController {
     }
 
     /** Last-resort teardown when the native cancellation path is proven inert (watchdog
-     *  force, stale completions): releases every global latch with NO WM write — the
-     *  native outcome is unknown. The cell is frozen per the unconfirmed-completion
-     *  convention (heals at session exit) unless the slot binding already moved on. */
+     *  force) or a completion arrives stale: releases every global latch with NO WM
+     *  write — the native outcome is unknown. Stale completions never freeze
+     *  (keepCellUnfrozen=true): with the ticket dead, slot/task reconciliation
+     *  (TaskInfo callbacks, visibility/mode repair) is the only healer, and freezing
+     *  disables exactly those. Freezing (keepCellUnfrozen=false) is reserved for the
+     *  inert-cancellation wedge, where a transition may still be mid-flight and
+     *  reconciliation would fight it; it heals at session exit per the
+     *  unconfirmed-completion convention. */
     void forceAbandonLivePromotion(MiStepHost.Promotion ticket, String reason, boolean keepCellUnfrozen) {
         if (h.promotion != ticket || ticket.cancelled) return;
         ticket.cancelled = true;
@@ -1195,12 +1200,6 @@ final class HostSwapController {
         h.publishDesktopSideTasks();
         MiStepHost.log("native promotion force-abandoned; cell frozen=" + !keepCellUnfrozen + ": " + reason);
         h.finishPendingSuspend();
-    }
-
-    /** True when the ticket slot still carries exactly the ticket's binding. */
-    private static boolean bindingIntact(MiStepHost.Promotion ticket) {
-        return ticket.slot.taskEpoch == ticket.bindingEpoch && ticket.slot.taskId == ticket.taskId
-                && java.util.Objects.equals(ticket.token, ticket.slot.taskToken);
     }
 
     void restoreLiveSwapVisual(MiStepHost.Promotion ticket) {
