@@ -2439,6 +2439,49 @@ public final class MiStepHost {
                 main.postDelayed(this, 4000L);
             }
         }, 4000L);
+        startPromotionWatchdog();
+    }
+
+    /** BUG-2 韧性：promotion/transfer 卡死时 suspend 会无限排队、cancel 路径存在静默 no-op。
+     *  本看门狗独立于 scene 门禁（覆盖 ACTIVE/SUSPENDING/RESUMING 各种卡态）：
+     *  >8s 温和取消一次（requestLiveSwapCancellation），>20s 强制 failPromotion 走正规
+     *  失败汇总（回滚 WCT/清理槽位/触发 finishPendingSuspend），窗口期归零防连发。 */
+    private long promotionWatchdogSince;
+    private boolean promotionWatchdogNudged;
+
+    private void startPromotionWatchdog() {
+        main.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (root == null || sInstance != MiStepHost.this) {
+                    return;
+                }
+                if (promotion == null) {
+                    promotionWatchdogSince = 0L;
+                    promotionWatchdogNudged = false;
+                } else {
+                    long now = android.os.SystemClock.uptimeMillis();
+                    if (promotionWatchdogSince == 0L) {
+                        promotionWatchdogSince = now;
+                    }
+                    long stuckMs = now - promotionWatchdogSince;
+                    if (stuckMs > 8000L && !promotionWatchdogNudged) {
+                        promotionWatchdogNudged = true;
+                        log("promotion watchdog: task=" + promotion.taskId + " stuck "
+                                + (stuckMs / 1000L) + "s, requesting live-swap cancellation");
+                        promotionController.requestLiveSwapCancellation(promotion, "watchdog");
+                    }
+                    if (stuckMs > 20000L) {
+                        log("promotion watchdog: task=" + promotion.taskId + " stuck "
+                                + (stuckMs / 1000L) + "s, forcing failPromotion");
+                        promotionWatchdogSince = now;
+                        promotionWatchdogNudged = false;
+                        failPromotion(promotion, "promotion watchdog deadline");
+                    }
+                }
+                main.postDelayed(this, 4000L);
+            }
+        }, 4000L);
     }
 
     private void createSubViews() {

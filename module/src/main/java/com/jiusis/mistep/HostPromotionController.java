@@ -513,7 +513,7 @@ final class HostPromotionController {
         h.main.post(h::finishPendingSuspend);
     }
 
-    private void requestLiveSwapCancellation(MiStepHost.Promotion ticket, String reason) {
+    void requestLiveSwapCancellation(MiStepHost.Promotion ticket, String reason) {
         if (h.promotion != ticket || ticket.cancelled || ticket.cancelRequested || ticket.nativeCompleting) return;
         // WCT may already be applied while Shell still waits for onTransitionReady.
         // Keep this binding/ticket until the facade's unique recovery completion.
