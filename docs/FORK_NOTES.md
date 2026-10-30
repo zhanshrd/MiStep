@@ -93,3 +93,16 @@ pwsh -File tools\mstep_deploy.ps1 -Light    # 快速档：仅 su 强杀 SystemUI
 
 - R2-A2（看门狗 nudge 驱动非 native 票据走 `finishLiveSwap`）：**误报**——合成失败到达的终态（`frozen=true, promoting=true`）与 `failPromotion` 外部门分支逐字节一致；「被绕过的簿记」全部为退役空操作（swapPreview/liveLift/mainLeash/compactSnapshot 在此路径从不赋值），仅 trace/日志形状不同。属路由卫生问题，不改。
 - R1 遗留说明：`forceAbandonLivePromotion` 拆除时不清 `coveredHome`——仅交换成功尾部会清；若强制拆除恰好落在成功完成窗口内，`coveredHome` 残留由下次挂起的 token 校验兜底（低概率 × 低危害，观察项）。
+
+## 9. 运行时验证豁免（操作者在案指令）
+
+**操作者原话（2026-10-30 会话记录）**：「我要拔掉手机了，你后续复查都自己看，别手机联调了，遇到问题你自己搜别问我。」
+
+据此，以下改动路径**仅通过编译 + 静态断言验证，未做真机运行时验证**（接受风险）：
+
+- R1（c7126a0）：`forceAbandonLivePromotion` 拆除池、`requestLiveSwapCancellation` 布尔契约、`toggleVisibility` RESUMING 挂起闩、`restoreLiveSwapVisual` 接收器停靠、`OwnedTask.userId` volatile、HostEntry 旋转锁 catch 回补、`setDropHighlight` scale。
+- R2（258cbf2）：failPromotion 兜底 `nativeCompleting` 判别式、`setPendingMainSide` 的 `scene != SUSPENDED` 守卫、force-abandon 内 `updateHint`/`updateTouchRegion` 补齐。
+
+**豁免理由**：JVM 单测需把纯逻辑抽成可实例化形态＝源码重构，清白轮禁止；以静态枚举证明（调用点全量清单 + 场景真值表）替代。
+
+**设备回归时应补的冒烟**（4 项，对应改动路径）：① RESUMING 期间角部滑动——方向不被污染、toggle 语义正常；② promotion 完成窗口内触发 cancel（几何变化/租约到期）——已重绑格不被冻结；③ collect 楔死 >20s——看门狗强制拆除后格子恢复「+」示能；④ 常规开→侧格启动→主副交换→收起全链路 + logcat 零 FATAL。
