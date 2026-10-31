@@ -107,6 +107,24 @@ pwsh -File tools\mstep_deploy.ps1 -Light    # 快速档：仅 su 强杀 SystemUI
 
 **设备回归时应补的冒烟**（4 项，对应改动路径）：① RESUMING 期间角部滑动——方向不被污染、toggle 语义正常；② promotion 完成窗口内触发 cancel（几何变化/租约到期）——已重绑格不被冻结；③ collect 楔死 >20s——看门狗强制拆除后格子恢复「+」示能；④ 常规开→侧格启动→主副交换→收起全链路 + logcat 零 FATAL。
 
+## 11. 上游同步手册（2026-10-31 查证）
+
+**查证结论**：上游 `JIUSIS/MiStep` 自本 fork 分叉点 `32555b4`（= v1.0.0 发布态，upstream 最后推送 2026-10-28T19:07Z）之后**零新提交、零新分支、零新 tag**（唯一分支 main @ `32555b4`，唯一 Release v1.0.0）。本 fork 严格领先上游（含重构 + BUG-1/2/3 修复 + 看门狗 + 1.1.0 版本线）。「上游有新特性」的说法与仓库事实不符——若酷安等渠道出现新特性 APK，其源码尚未按 NC-SA 要求公开，无法同步。
+
+**未来同步姿势**（本 fork 已深度重构，禁止直接 merge——`MiStepHost` 拆分后结构不同，必然冲突）：
+
+```powershell
+git fetch upstream --prune
+git log --oneline 32555b4..upstream/main   # 上游新提交清单
+git diff 32555b4...upstream/main --stat    # 上游改动面
+```
+
+逐提交评估 → 语义移植到本 fork 结构（协作类已拆分，勿整文件覆盖）→ `build.ps1` 编译 + 静态断言 → 若版本吸收上游特性则 fork 版本号 +1（如 1.2.0/1002000，`HostEntry` 三处 runtimeMarker 对齐）→ 按 /goal 常设令，**移植面需重新过双路评审**。
+
+远程：`origin` = zhanshrd/MiStep（本 fork），`upstream` = JIUSIS/MiStep（已配置，走 socks5h://127.0.0.1:10808 代理）。
+
+**等着的预告**（作者已宣布、尚未上传源码，2026-10-31 用户转述）：顶部横向区域（topStrip 顶条带）也将能容纳一个「框」（副格）。开源后移植时注意：该特性落在 `MiStepTopBar` / `MiStepLayout`（topStrip 布局）/ `HotZoneGesture`（顶条触摸）与我们的顶栏控制中心切换逻辑交界处，本 fork 顶栏结构已深度改造（控制中心↔音乐面板切换、状态栏租约），**不可整文件覆盖，按 §11 手册语义移植 + 重开评审**。
+
 ## 10. R3 评审台账（全量重读 + 审计点复核，134 文件 / ~25.1k 行）
 
 **确认为 bug 并已修复**（R3 修复提交）：
