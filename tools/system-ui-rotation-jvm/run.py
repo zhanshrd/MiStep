@@ -75,7 +75,8 @@ public class SystemUiRotationRegression {
     window(d,2024,"com.android.systemui","NavigationBarPanel"),
     window(d,2040,"foreign","NotificationShade"),
     window(d,2038,"com.android.systemui","MiStepHost"),
-    window(d,2036,"com.android.systemui","Screenshot")};
+    window(d,2036,"com.android.systemui","Screenshot"),
+    window(d,2017,"com.android.systemui","MiStepQuickAppPicker")};
   for(int j=0;j<nativePanels.length;j++){Window panel=nativePanels[j];owner.update(panel,d,main,s->{});
     check(panel.mToken.applies==(j<8?1:0),"main native panel whitelist: "+panel.mAttrs.title);}
   main.home=true;owner.update(ime,d,main,s->{});main.home=false;owner.clear(s->{});

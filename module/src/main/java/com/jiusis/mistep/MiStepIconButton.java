@@ -10,7 +10,7 @@ import android.view.View;
 /** Toolbar icons keep their touch target without painting a button plate. */
 final class MiStepIconButton extends View {
     static final int SETTINGS = 0, EXIT = 1, PREVIOUS = 2, NEXT = 3, CLIPBOARD = 4,
-            TORCH = 5, SCREENSHOT = 6, RECORD = 7;
+            TORCH = 5, SCREENSHOT = 6, RECORD = 7, CLEAR = 8, DELETE = 9, CLOSE = 10;
     private final int icon;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private boolean exitLeft;
@@ -54,6 +54,15 @@ final class MiStepIconButton extends View {
             canvas.drawRoundRect(8, 2.5f, 16, 6.5f, 1.4f, 1.4f, paint);
             canvas.drawLine(8, 11, 16, 11, paint);
             canvas.drawLine(8, 15.5f, 13.5f, 15.5f, paint);
+        } else if (icon == CLEAR || icon == DELETE) {
+            canvas.drawLine(5, 7, 19, 7, paint);
+            canvas.drawLine(9, 4, 15, 4, paint);
+            canvas.drawRoundRect(7, 8, 17, 20.5f, 1.5f, 1.5f, paint);
+            canvas.drawLine(10, 11, 10, 17.5f, paint);
+            canvas.drawLine(14, 11, 14, 17.5f, paint);
+        } else if (icon == CLOSE) {
+            canvas.drawLine(6, 6, 18, 18, paint);
+            canvas.drawLine(18, 6, 6, 18, paint);
         } else if (icon == TORCH) {
             // Rounded flashlight head and grip; the short rays stay inside the icon box.
             Path body = new Path();

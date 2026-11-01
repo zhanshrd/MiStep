@@ -6,6 +6,26 @@ final class DesktopIconLaunchPolicy {
 
     private DesktopIconLaunchPolicy() {}
 
+    static int launchUser(String method, Class<?>[] types, Object[] args, int callerUser) {
+        if ("startActivity".equals(method)) return callerUser;
+        if (!("startActivityAsUser".equals(method) || "startActivityAsUserWithFeature".equals(method))
+                || types == null || args == null || types.length != args.length) return -1;
+        // These ATMS overloads end in userId, optionally followed by a boolean.
+        for (int i = types.length - 1; i >= 0; i--) if (types[i] == int.class)
+            return args[i] instanceof Integer user && user >= 0 ? user : -1;
+        return -1;
+    }
+
+    static int uniqueSideSlot(String packageName, int user, String[] sidePackages,
+            int[] sideUsers, boolean[] occupied) {
+        if (user < 0 || sidePackages == null || sideUsers == null || occupied == null
+                || sidePackages.length != sideUsers.length || sidePackages.length != occupied.length)
+            return -1;
+        boolean[] matchingUser = new boolean[occupied.length];
+        for (int i = 0; i < matchingUser.length; i++) matchingUser[i] = occupied[i] && sideUsers[i] == user;
+        return uniqueSideSlot(packageName, sidePackages, matchingUser);
+    }
+
     static String packageForLauncherEntry(String callerPackage, String action,
             boolean launcherCategory, String componentPackage) {
         if (!LAUNCHER.equals(callerPackage) || !ACTION_MAIN.equals(action)

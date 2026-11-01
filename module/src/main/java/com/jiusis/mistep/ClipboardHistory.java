@@ -9,9 +9,14 @@ final class ClipboardHistory {
     static final int MAX_TEXT = 8192;
     static final int MAX_TOTAL = 65536;
     private final List<String> entries = new ArrayList<>();
+    private String clearedPrimaryText;
 
     synchronized void add(String text, boolean sensitive) {
         if (sensitive || text == null || text.trim().isEmpty() || text.length() > MAX_TEXT) return;
+        if (clearedPrimaryText != null) {
+            if (clearedPrimaryText.equals(text)) return;
+            clearedPrimaryText = null;
+        }
         entries.remove(text);
         entries.add(0, text);
         int total = 0;
@@ -26,5 +31,7 @@ final class ClipboardHistory {
 
     synchronized List<String> snapshot() { return new ArrayList<>(entries); }
     synchronized void remove(String text) { entries.remove(text); }
-    synchronized void clear() { entries.clear(); }
+    synchronized void clear() { entries.clear(); clearedPrimaryText = null; }
+    synchronized void clearKeepingPrimary(String text) { entries.clear(); clearedPrimaryText = text; }
+    synchronized void primaryClipChanged() { clearedPrimaryText = null; }
 }

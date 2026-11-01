@@ -223,7 +223,7 @@ final class MediaLyricLookup {
         try {
             JSONObject data=new JSONObject(get("https://music.163.com/api/song/lyric?id="+id+"&lv=-1&tv=-1"));
             String raw=lyric(data,"lrc"),translation=lyric(data,"tlyric");
-            if(usable(raw))return raw+(usable(translation)?"\n"+translation:"");
+            if(usable(raw))return usable(translation)?MediaLyrics.combineTranslation(raw,translation):raw;
         } catch(Exception error) {note("netease lyric",error);}
         return "";
     }

@@ -18,6 +18,7 @@ public final class HotZoneGesture {
     private final Context context;
     private final Runnable trigger;
     private final CornerSwipe swipe = new CornerSwipe();
+    private final TopTaskSwipe topSwipe = new TopTaskSwipe();
     private Object monitor, receiver;
     private boolean enabled;
     private long generation;
@@ -76,12 +77,20 @@ public final class HotZoneGesture {
         int rotation = wm.getDefaultDisplay().getRotation();
         int action = e.getActionMasked();
         if (MiStepHost.hostSceneActive()) {
+            generation++;
             swipe.reset();
+            onTopMotion(e,size);
             return;
         }
+        if(topSwipe.accepted())MiStepHost.endTopGesture(true);
+        topSwipe.reset();
         if (action == MotionEvent.ACTION_DOWN) {
             reset();
             if (!MiStepEntryGuard.canOpen(context)) return;
+            if (!MiStepStatusBar.allowsCornerGesture(size.x, size.y)) {
+                log("corner gesture ignored in landscape or native fullscreen");
+                return;
+            }
         }
         if (action == MotionEvent.ACTION_DOWN) {
             float density = context.getResources().getDisplayMetrics().density;
@@ -90,6 +99,7 @@ public final class HotZoneGesture {
                     Math.round(72f * density), Math.round(58f * density),
                     Math.round(24f * density));
         } else if (action == MotionEvent.ACTION_MOVE) {
+            if (!MiStepStatusBar.allowsCornerGesture(size.x, size.y)) { reset(); return; }
             if (swipe.move(e.getPointerId(0), e.getPointerCount(), e.getRawX(), e.getRawY(),
                     e.getEventTime(), size.x, size.y, rotation)) {
                 if (!MiStepEntryGuard.canOpen(context)) { reset(); return; }
@@ -104,11 +114,12 @@ public final class HotZoneGesture {
                 long accepted = generation;
                 MAIN.postDelayed(() -> {
                     if (enabled && generation == accepted) {
-                        if (!MiStepEntryGuard.canOpen(context)) { reset(); return; }
+                        if (MiStepHost.hostSceneActive() || !MiStepEntryGuard.canOpen(context)) { reset(); return; }
                         Point current = new Point();
                         wm.getDefaultDisplay().getRealSize(current);
                         if (current.x != size.x || current.y != size.y
-                                || wm.getDefaultDisplay().getRotation() != rotation) { reset(); return; }
+                                || wm.getDefaultDisplay().getRotation() != rotation
+                                || !MiStepStatusBar.allowsCornerGesture(current.x, current.y)) { reset(); return; }
                         generation++;
                         // 主区在滑动的相反一侧：左角滑出左侧栏 → 主区在右；右角滑出右侧栏 → 主区在左。
                         boolean mainRight = swipe.sign() > 0;
@@ -127,6 +138,27 @@ public final class HotZoneGesture {
             swipe.reset();
         }
     }
+    private void onTopMotion(MotionEvent e,Point size) {
+        int height=MiStepHost.topGestureHeight();
+        if(height<=0) {
+            if(topSwipe.accepted())MiStepHost.endTopGesture(true);
+            topSwipe.reset();return;
+        }
+        int count=e.getPointerCount();
+        int result=topSwipe.event(e.getActionMasked(),count,e.getPointerId(0),count>1?e.getPointerId(1):-1,
+                e.getRawX(),e.getRawY(),count>1?e.getRawX(1):0,count>1?e.getRawY(1):0,
+                e.getEventTime(),size.x,height,context.getResources().getDisplayMetrics().density);
+        if(result==TopTaskSwipe.ACCEPT) {
+            if(!pilferPointers() || !MiStepHost.beginTopGesture()) {topSwipe.reset();return;}
+            MiStepHost.moveTopGesture(topSwipe.displacement,e.getEventTime());
+            log("upper two-finger drag accepted");
+        } else if(result==TopTaskSwipe.DRAG) {
+            MiStepHost.moveTopGesture(topSwipe.displacement,e.getEventTime());
+        } else if(result==TopTaskSwipe.FINISH || result==TopTaskSwipe.CANCEL) {
+            MiStepHost.endTopGesture(result==TopTaskSwipe.CANCEL);
+        }
+    }
+
     private boolean pilferPointers() {
         try {
             Object platform = XposedHelpers.getObjectField(monitor, "mInputMonitor");
@@ -141,6 +173,8 @@ public final class HotZoneGesture {
     private void reset() {
         generation++;
         swipe.reset();
+        if(topSwipe.accepted())MiStepHost.endTopGesture(true);
+        topSwipe.reset();
     }
     public static boolean isAttached() {
         return instance != null && instance.enabled && instance.receiver != null;

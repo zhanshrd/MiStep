@@ -27,12 +27,13 @@ files={
 files['com/jiusis/mistep/MiStepNotificationLaunch.java']=(source/'MiStepNotificationLaunch.java').read_text(encoding='utf-8')
 files['com/jiusis/mistep/MiStepHost.java']='''package com.jiusis.mistep;import android.os.Looper;import de.robv.android.xposed.XposedHelpers;import java.util.*;
 class MiStepHost{
- static MiStepHost sInstance;static final int ACTIVE=1,SLOT_MAIN=0;int scene=ACTIVE;boolean screenOn=true,keyguardLocked,transferBusy,canStart=true;Promotion promotion;Slot[] slots={new Slot(0),new Slot(1),new Slot(2)};QueueMain main=new QueueMain();
+ static MiStepHost sInstance;static final int ACTIVE=1,SLOT_MAIN=0,CELL_SLOT_COUNT=4;int scene=ACTIVE;boolean screenOn=true,keyguardLocked,transferBusy,canStart=true;Promotion promotion;Slot[] slots={new Slot(0),new Slot(1),new Slot(2)};QueueMain main=new QueueMain();
  static class QueueMain{ArrayList<Runnable> q=new ArrayList<>();Looper getLooper(){return Looper.MAIN;}void post(Runnable r){q.add(r);}void drain(){for(Runnable r:new ArrayList<>(q))r.run();q.clear();}}
  static class Info{int taskId=42,userId=0;}static class Controller{Info mTaskInfo=new Info();}
  static class Slot{int index,windowMode=6,taskId=42;boolean occupied=true,parked,frozen,carrier;String pkg="settings";Object taskToken=new Object();Controller controller=new Controller();Slot(int i){index=i;if(i!=1)occupied=false;}}
  static class Promotion{Slot slot;boolean cancelled;int taskId=42;Runnable notificationLaunch;Promotion(Slot s){slot=s;}}
  int currentUserId(){return 0;}boolean mayWriteSideSurface(Slot s){return true;}boolean controllerOwns(Slot s,int id,Object t){return true;}void swapWithMain(int i){if(canStart)promotion=new Promotion(slots[i]);}static void log(String s){}
+ boolean supportsTaskUser(int id){return id==0||id==999;}
 '''+method('static boolean promoteForNotification(')+'\n'+method('private void resumeNotificationLaunch(')+'''
  void finish(){resumeNotificationLaunch(promotion);resumeNotificationLaunch(promotion);main.drain();}
 }'''
@@ -48,8 +49,12 @@ public class NotificationRouteTest{
   reset();h.canStart=false;click();check(!args.stopped&&starter.count==1,"refused preparation preserves native click");
   reset();h.transferBusy=true;click();check(!args.stopped,"busy bypass");
   reset();pending.user=10;click();check(!args.stopped,"other profile bypass");
+  reset();pending.user=999;h.slots[1].controller.mTaskInfo.userId=999;click();check(args.stopped&&h.promotion!=null,"associated clone notification not promoted");h.finish();check(starter.count==1&&starter.received[0]==pending,"clone original PendingIntent not retained");
+  reset();pending.user=999;click();check(!args.stopped,"clone notification must not select same-package owner app");
+  reset();h.slots[2].occupied=true;h.slots[2].controller.mTaskInfo.userId=999;click();check(args.stopped&&h.promotion.slot==h.slots[1],"same package in clone must not make owner route ambiguous");
   reset();h.keyguardLocked=true;click();check(!args.stopped,"locked bypass");
   reset();h.slots[1].frozen=true;click();check(!args.stopped,"frozen bypass");
+  reset();h.slots[1].index=4;click();check(!args.stopped&&h.promotion==null,"upper task keeps native notification dispatch instead of lower-slot swap");
   reset();h.slots[2].occupied=true;click();check(!args.stopped,"ambiguous same-package tasks bypass");
   reset();h.slots[1].controller.mTaskInfo.taskId=99;click();check(!args.stopped,"stale controller identity bypass");
   reset();pending.activity=false;click();check(!args.stopped,"service/broadcast not intercepted");

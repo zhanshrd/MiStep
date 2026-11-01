@@ -45,7 +45,7 @@ final class QuickAppRail extends View {
     private float scrollOffset;
     private float scrollStart;
     private boolean scrolling;
-    private boolean selecting;
+    private boolean editing;
     private final float tileWidth;
     private final float touchSlop;
     private int selectedIndex = -1;
@@ -58,6 +58,7 @@ final class QuickAppRail extends View {
 
     interface Listener {
         void onLaunch(QuickApp quickApp);
+        void onCustomize();
     }
 
     QuickAppRail(Context context, List<QuickApp> list, Listener listener) {
@@ -73,12 +74,12 @@ final class QuickAppRail extends View {
         this.longPress = new Runnable() { // from class: com.jiusis.mistep.QuickAppRail.2
             @Override // java.lang.Runnable
             public final void run() {
-                QuickAppRail.this.beginDragSelection();
+                QuickAppRail.this.openAppPicker();
             }
         };
         this.lensX = -1.0f;
         this.activeIndex = -1;
-        this.apps = list == null ? Collections.emptyList() : Collections.unmodifiableList(list.subList(0, Math.min(18, list.size())));
+        this.apps = list == null ? Collections.emptyList() : Collections.unmodifiableList(new java.util.ArrayList<>(list));
         this.listener = listener;
         float f = context.getResources().getDisplayMetrics().density;
         this.tileWidth = 48.0f * f;
@@ -97,7 +98,12 @@ final class QuickAppRail extends View {
         setElevation(0f);
         setClickable(true);
         setFocusable(true);
-        setContentDescription("快捷应用栏，长按后拖动可选择应用");
+        setContentDescription("快捷应用栏，点击打开，长按图标自定义应用");
+        setOnLongClickListener(view -> {
+            if (this.listener == null) return false;
+            this.listener.onCustomize();
+            return true;
+        });
     }
 
     void stepAndLaunch(int direction) {
@@ -145,7 +151,7 @@ final class QuickAppRail extends View {
         removeCallbacks(longPress);
         resetTouch();
         apps = next == null ? Collections.emptyList()
-                : Collections.unmodifiableList(new java.util.ArrayList<>(next.subList(0, Math.min(18, next.size()))));
+                : Collections.unmodifiableList(new java.util.ArrayList<>(next));
         selectedIndex = stackFromIndex = stackToIndex = -1;
         stackProgress = 1f;
         scrollOffset = scrollStart = 0f;
@@ -167,7 +173,7 @@ final class QuickAppRail extends View {
         boolean stacking = stackProgress < 1f && stackFromIndex >= 0 && stackToIndex >= 0;
         for (int i = 0; i < apps.size(); i++) {
             if (!stacking || (i != stackFromIndex && i != stackToIndex)) {
-                float scale = i == this.activeIndex && (this.selecting || this.down)
+                float scale = i == this.activeIndex && this.down && !this.editing
                         ? 1.18f : 1.0f;
                 drawIcon(canvas, i, tileCenter(i), iconY, scale, 255);
             }
@@ -234,7 +240,7 @@ final class QuickAppRail extends View {
                     stackFromIndex = stackToIndex = -1;
                 }
                 this.down = true;
-                this.selecting = false;
+                this.editing = false;
                 this.scrolling = false;
                 this.downX = motionEvent.getX();
                 this.downY = motionEvent.getY();
@@ -245,17 +251,15 @@ final class QuickAppRail extends View {
                 this.pressY = this.downY;
                 animateEnergy(1.0f, 100L);
                 removeCallbacks(this.longPress);
-                postDelayed(this.longPress, 170L);
+                if (this.activeIndex >= 0) postDelayed(this.longPress, ViewConfiguration.getLongPressTimeout());
                 invalidate();
                 break;
             case 1:
                 removeCallbacks(this.longPress);
+                if (!this.down) break;
                 float x = motionEvent.getX() - this.downX;
                 float y = motionEvent.getY() - this.downY;
-                if (this.selecting) {
-                    updateDragSelection(motionEvent.getX());
-                    launchActive();
-                } else if (!this.scrolling && Math.abs(x) < this.touchSlop && Math.abs(y) < this.touchSlop) {
+                if (!this.editing && !this.scrolling && Math.abs(x) < this.touchSlop && Math.abs(y) < this.touchSlop) {
                     this.activeIndex = indexAt(motionEvent.getX());
                     this.lensX = this.activeIndex >= 0 ? tileCenter(this.activeIndex) : -1.0f;
                     launchActive();
@@ -263,25 +267,25 @@ final class QuickAppRail extends View {
                 resetTouch();
                 break;
             case 2:
+                if (!this.down || this.editing) break;
                 this.pressX = motionEvent.getX();
                 this.pressY = motionEvent.getY();
                 float x2 = motionEvent.getX() - this.downX;
                 float y2 = motionEvent.getY() - this.downY;
-                if (this.selecting) {
-                    updateDragSelection(motionEvent.getX());
-                } else if (Math.abs(x2) > this.touchSlop || Math.abs(y2) > this.touchSlop) {
+                if (Math.abs(x2) > this.touchSlop || Math.abs(y2) > this.touchSlop) {
                     removeCallbacks(this.longPress);
-                    if (!this.scrolling && Math.abs(x2) >= Math.abs(y2)) {
+                    if (!this.scrolling) {
                         this.scrolling = true;
                         this.activeIndex = -1;
                     }
-                    if (this.scrolling) {
+                    if (Math.abs(x2) >= Math.abs(y2)) {
                         this.scrollOffset = clamp(this.scrollStart - x2, 0.0f, maxScroll());
                     }
                 }
                 invalidate();
                 break;
             case MiStepLayout.CELL_COUNT /* 3 */:
+            case MotionEvent.ACTION_POINTER_DOWN:
                 removeCallbacks(this.longPress);
                 resetTouch();
                 break;
@@ -290,38 +294,11 @@ final class QuickAppRail extends View {
     }
 
     /* JADX INFO: Access modifiers changed from: private */
-    public void beginDragSelection() {
-        String str;
-        if (!this.down || this.scrolling) {
-            return;
-        }
-        this.selecting = true;
-        this.activeIndex = indexAt(this.pressX);
-        this.lensX = this.activeIndex >= 0 ? tileCenter(this.activeIndex) : -1.0f;
-        performHapticFeedback(0);
-        if (this.activeIndex >= 0) {
-            str = "已选择 " + this.apps.get(this.activeIndex).label;
-        } else {
-            str = "快捷应用选择";
-        }
-        announceForAccessibility(str);
-        invalidate();
-    }
-
-    private void updateDragSelection(float f) {
-        float f2 = getResources().getDisplayMetrics().density * 22.0f;
-        if (f < f2) {
-            this.scrollOffset = clamp(this.scrollOffset - (f2 * 0.12f), 0.0f, maxScroll());
-        } else if (f > getWidth() - f2) {
-            this.scrollOffset = clamp(this.scrollOffset + (f2 * 0.12f), 0.0f, maxScroll());
-        }
-        int iIndexAt = indexAt(f);
-        if (iIndexAt != this.activeIndex && iIndexAt >= 0) {
-            this.activeIndex = iIndexAt;
-            moveLensTo(tileCenter(iIndexAt));
-            performHapticFeedback(4);
-            announceForAccessibility(this.apps.get(iIndexAt).label);
-        }
+    private void openAppPicker() {
+        if (!this.down || this.scrolling || this.editing || this.activeIndex < 0) return;
+        this.editing = true;
+        this.activeIndex = -1;
+        performLongClick();
         invalidate();
     }
 
@@ -354,7 +331,7 @@ final class QuickAppRail extends View {
             this.lensAnimator = null;
         }
         this.down = false;
-        this.selecting = false;
+        this.editing = false;
         this.scrolling = false;
         this.activeIndex = -1;
         this.lensX = -1.0f;
@@ -407,10 +384,20 @@ final class QuickAppRail extends View {
     }
 
     private int indexAt(float f) {
-        if (this.apps.isEmpty()) {
+        if (this.apps.isEmpty() || f < 0 || f >= getWidth()) {
             return -1;
         }
-        return Math.max(0, Math.min(this.apps.size() - 1, (int) Math.floor(((f + this.scrollOffset) - this.padding) / this.tileWidth)));
+        int index = (int) Math.floor(((f + this.scrollOffset) - this.padding) / this.tileWidth);
+        return index >= 0 && index < this.apps.size() ? index : -1;
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        removeCallbacks(longPress);
+        ++stackGeneration;
+        if (stackAnimator != null) stackAnimator.cancel();
+        resetTouch();
+        if (energyAnimator != null) energyAnimator.cancel();
+        super.onDetachedFromWindow();
     }
 
     private float tileCenter(int i) {

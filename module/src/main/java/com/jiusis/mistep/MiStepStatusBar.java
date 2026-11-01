@@ -24,6 +24,9 @@ final class MiStepStatusBar {
     private static MiStepStatusBar current;
     private static boolean nativeStateKnown;
     private static int nativeWindowState;
+    private static boolean nativeTopAppHidesStatusBar;
+    private static boolean nativeTransientStatusBar;
+    private static boolean nativePanelExpanded;
     private final Handler main;
     private final Consumer<String> log;
     private final SwapStatusBarLease lease;
@@ -46,17 +49,49 @@ final class MiStepStatusBar {
                             if ((message.what & 0xffff0000) == 786432
                                     && message.obj instanceof Integer state)
                                 nativeWindowStateChanged(message.arg1, message.arg2, state);
+                            else if ((message.what & 0xffff0000) == (37 << 16)) {
+                                boolean hidden=message.arg1!=0;
+                                if(hidden!=nativeTopAppHidesStatusBar)nativeTransientStatusBar=false;
+                                nativeTopAppHidesStatusBar=hidden;
+                            } else if (((message.what & 0xffff0000) == (48 << 16)
+                                    || (message.what & 0xffff0000) == (49 << 16)) && message.obj != null) {
+                                try {
+                                    int display=XposedHelpers.getIntField(message.obj,"argi1");
+                                    int types=XposedHelpers.getIntField(message.obj,"argi2");
+                                    if(display==Display.DEFAULT_DISPLAY && (types & 1)!=0)
+                                        nativeTransientStatusBar=(message.what & 0xffff0000)==(48 << 16);
+                                } catch(Throwable unsupported) {nativeTransientStatusBar=false;}
+                            }
                         }
                     });
         } catch (Throwable error) {
             XposedBridge.log("MiStep: native status window observer unavailable: " + error);
         }
+        try {
+            XposedHelpers.findAndHookMethod("com.android.systemui.shade.NotificationShadeWindowControllerImpl",loader,
+                    "onShadeOrQsExpanded",Boolean.class,new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) {
+                            nativePanelExpanded=Boolean.TRUE.equals(p.args[0]);
+                        }
+                    });
+        } catch(Throwable error) {
+            XposedBridge.log("MiStep: native panel expansion observer unavailable: "+error);
+        }
+    }
+
+    /** A separate corner swipe is allowed only while the revealed status bar remains shown. */
+    static boolean allowsCornerGesture(int width, int height) {
+        if(width<=0 || height<=0 || nativePanelExpanded
+                || nativeStateKnown && nativeWindowState!=0)return false;
+        if(nativeTransientStatusBar)return nativeStateKnown && nativeWindowState==0;
+        return height>width && !nativeTopAppHidesStatusBar;
     }
 
     static void nativeWindowStateChanged(int display, int window, int state) {
         if (display != Display.DEFAULT_DISPLAY || window != 1 || state < 0 || state > 2) return;
         nativeStateKnown = true;
         nativeWindowState = state;
+        if(state!=0)nativeTransientStatusBar=false;
         MiStepStatusBar bar = current;
         if (bar == null) return;
         bar.log.accept("native status window state=" + state);

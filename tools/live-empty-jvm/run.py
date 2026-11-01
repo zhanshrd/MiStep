@@ -38,7 +38,7 @@ import android.graphics.Canvas;
 public class EmptyHostRegression {
  static class LiveSwapVisualLease {static void writeAlpha(View v,float a){v.setAlpha(a);}}
  static int checks;static void check(boolean b,String s){checks++;if(!b)throw new AssertionError(s);}
- static final int SLOT_COUNT=4;
+ static final int SLOT_COUNT=4,CELL_SLOT_COUNT=4;
  static class WallpaperCropDrawable extends android.graphics.drawable.Drawable {int x=-1,y=-1,tint;WallpaperCropDrawable(){}WallpaperCropDrawable(Object bitmap,int w,int h,int a,int b,int color){x=a;y=b;tint=color;}void setBounds(int a,int b,int c,int d){}void draw(Canvas c){c.emptyPaints++;c.emptyTint=tint;}void withScreenOrigin(int a,int b,Runnable draw){int ox=x,oy=y;try{x=a;y=b;draw.run();}finally{x=ox;y=oy;}}}
  static class HyperOsStyle {static int tint=0x1fffffff;static int topWallpaperTint(Object ctx){return tint;}static int textSecondary(Object ctx){return 0xff777777;}static float dp(Object ctx,float value){return value;}}
  Object ctx=new Object();

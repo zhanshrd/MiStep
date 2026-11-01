@@ -14,7 +14,7 @@ public final class MiStepNavigationPolicyTest {
 
     public static void main(String[] args) {
         expect(true, "homekey");
-        expect(true, "recentapps");
+        expect(false, "recentapps");
         expect(false, "gestureNav");
         expect(false, "back");
         expect(false, null);

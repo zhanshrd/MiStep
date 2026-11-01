@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.jiusis.mistep"
-    android:versionCode="1000000"
-    android:versionName="1.0.0">
+    android:versionCode="1000034"
+    android:versionName="1.0.1">
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="37" />
 
@@ -18,7 +18,7 @@
             android:value="Mi Step：系统主区域缩放与三个真实副任务。" />
         <meta-data android:name="xposedminversion" android:value="82" />
         <meta-data android:name="xposedscope"
-            android:value="android;com.android.systemui;com.android.settings;com.xiaomi.type" />
+            android:value="android;com.android.systemui" />
     </application>
 </manifest>
 

@@ -22,7 +22,7 @@ public class SideTouchRegression {
  static class View {}static class Slot {boolean promoting,launching,closing,frozen,parked,occupied=true,injecting;View view=new View();int[]rect={0,0,100,200};long taskEpoch,touchTaskEpoch,touchSceneEpoch;MotionEvent bufferedDown;}
  static class XC_MethodHook {static class MethodHookParam {Object thisObject;boolean returned;void setResult(Object result){returned=true;}}protected void beforeHookedMethod(MethodHookParam p){}}
  static class XposedHelpers {static XC_MethodHook hook;static Class<?>findClass(String n,ClassLoader cl){return Object.class;}static Object findAndHookMethod(Class<?>c,String n,Object...args){hook=(XC_MethodHook)args[args.length-1];return hook;}}
- static SideTouchRegression sInstance;static final int SLOT_MAIN=0,SLOT_COUNT=4;Slot[]slots={new Slot(),new Slot(),new Slot(),new Slot()};static class Context{Context getResources(){return this;}Context getDisplayMetrics(){return this;}float density=1;}Context ctx=new Context();int taps,transfers,compactions;boolean compactPending;
+ static SideTouchRegression sInstance;static final int SLOT_MAIN=0,SLOT_COUNT=4,CELL_SLOT_COUNT=4;Slot[]slots={new Slot(),new Slot(),new Slot(),new Slot()};static class Context{Context getResources(){return this;}Context getDisplayMetrics(){return this;}float density=1;}Context ctx=new Context();int taps,transfers,compactions;boolean compactPending;
  static class Dismiss{void follow(float dx){}void settle(boolean done){}}Dismiss sideDismiss;Object promotion,cellMotion;Slot sideDismissSlot;boolean transferBusy,mainOnRight=true;long sceneEpoch=1;
  boolean followSideDismiss(Slot s,MotionEvent e){return true;}
  boolean beginSideDismiss(Slot s,MotionEvent e){return false;}

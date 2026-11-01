@@ -29,7 +29,9 @@ final class MiStepControlCenter extends FrameLayout {
     private final View[] cells = new View[4];
     private final FrameLayout firstPage;
     private final MiStepNativeMedia musicPage;
-    private final ControlCenterPages pages = new ControlCenterPages();
+    private final ControlCenterPages pages = new ControlCenterPages(3);
+    private final TextView landscapePage;
+    private Runnable landscapeRequest;
     private ValueAnimator pageAnimator;
     private VelocityTracker pageVelocity;
     private int page;
@@ -68,11 +70,18 @@ final class MiStepControlCenter extends FrameLayout {
         setClipToPadding(true);
         firstPage = new FrameLayout(context);
         addView(firstPage, new FrameLayout.LayoutParams(-1, -1));
+        landscapePage = new TextView(context);
+        landscapePage.setText("横屏窗口\n点按打开，再点空白窗口收纳主屏应用\n双指上下滑动翻转顶部");
+        landscapePage.setTextColor(HyperOsStyle.textPrimary(context));
+        landscapePage.setGravity(Gravity.CENTER);
+        landscapePage.setTextSize(15);
+        landscapePage.setOnClickListener(v->{if(landscapeRequest!=null)landscapeRequest.run();});
+        addView(landscapePage,new FrameLayout.LayoutParams(-1,-1));
         musicPage = new MiStepNativeMedia(context);
         addView(musicPage, new FrameLayout.LayoutParams(-1, -1));
         musicPage.setVisibility(View.INVISIBLE);
         musicPage.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        setContentDescription("控制中心第1页，左右滑动切换音乐控件");
+        setContentDescription("控制中心第1页，左右滑动切换音乐和横屏窗口");
         connectivityCard = new View(context);
         GradientDrawable panel = new GradientDrawable();
         panel.setColor(0xb2353f49);
@@ -108,7 +117,7 @@ final class MiStepControlCenter extends FrameLayout {
         transit = tile("乘车码", () -> MiStepSystemActions.openCode(getContext(), transitAnchor(), MiStepCodes.TRANSIT));
         firstPage.addView(payment); firstPage.addView(transit);
         try {
-            volume = new MiStepOs4Controls.Slider(context, "音量", "ic_volume_slider_animate_icon");
+            volume = new MiStepOs4Controls.Slider(context, "音量");
             volume.slider.setMax(audio == null ? 15 : audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
             firstPage.addView(volume.root);
             volume.slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -122,7 +131,7 @@ final class MiStepControlCenter extends FrameLayout {
                 public void onStartTrackingTouch(SeekBar bar) { volumeTracking = true; }
                 public void onStopTrackingTouch(SeekBar bar) { volumeTracking = false; refreshValues(); }
             });
-            brightness = new MiStepOs4Controls.Slider(context, "亮度", "ic_brightness_slider_animate_icon");
+            brightness = new MiStepOs4Controls.Slider(context, "亮度");
             brightness.slider.setMax(XposedHelpers.getStaticIntField(brightnessUtils(), "GAMMA_SPACE_MAX"));
             firstPage.addView(brightness.root);
             brightness.slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -212,9 +221,17 @@ final class MiStepControlCenter extends FrameLayout {
         renderPages();
     }
 
+    void setOnLandscapeRequest(Runnable request) { landscapeRequest=request; }
+
+    void leaveLandscapePage() {
+        if(page!=2)return;
+        cancelPageAnimation(); page=1; pageOffset=pageSpan(); renderPages(); finishPage();
+    }
+
     private void renderPages() {
         firstPage.setTranslationX(-pageOffset);
         musicPage.setTranslationX(pageSpan() - pageOffset);
+        landscapePage.setTranslationX(2*pageSpan()-pageOffset);
     }
 
     private float pageSpan() {
@@ -233,14 +250,17 @@ final class MiStepControlCenter extends FrameLayout {
         firstPage.setImportantForAccessibility(page == 0 ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         musicPage.setImportantForAccessibility(page == 1 ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         musicPage.setActive(page == 1);
+        landscapePage.setVisibility(page==2?View.VISIBLE:View.INVISIBLE);
+        landscapePage.setImportantForAccessibility(page==2?View.IMPORTANT_FOR_ACCESSIBILITY_AUTO:View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         setContentDescription(page == 0 ? "控制中心第1页，左右滑动切换音乐控件" : "原生音乐第2页，左右滑动返回控制中心");
     }
 
     private void settlePage(int target) {
         cancelPageAnimation();
-        page = Math.max(0, Math.min(1, target));
+        page = Math.max(0, Math.min(2, target));
         firstPage.setVisibility(View.VISIBLE);
         musicPage.setVisibility(View.VISIBLE);
+        landscapePage.setVisibility(View.VISIBLE);
         if (page == 1) musicPage.setActive(true);
         ValueAnimator next = ValueAnimator.ofFloat(pageOffset, page * pageSpan());
         pageAnimator = next;
@@ -252,6 +272,7 @@ final class MiStepControlCenter extends FrameLayout {
                 if (pageAnimator != animation) return;
                 pageAnimator = null;
                 finishPage();
+                if(page==2 && landscapeRequest!=null)landscapeRequest.run();
             }
         });
         next.start();
@@ -300,7 +321,7 @@ final class MiStepControlCenter extends FrameLayout {
             boolean wasVisible = musicPage.getVisibility() == View.VISIBLE;
             pageOffset = pages.move(event.getX(), event.getY());
             if (pages.dragging) {
-                firstPage.setVisibility(View.VISIBLE); musicPage.setVisibility(View.VISIBLE);
+                firstPage.setVisibility(View.VISIBLE); musicPage.setVisibility(View.VISIBLE); landscapePage.setVisibility(View.VISIBLE);
                 if (!wasVisible) musicPage.setActive(true);
                 renderPages();
             }
@@ -317,13 +338,13 @@ final class MiStepControlCenter extends FrameLayout {
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info);
         info.setScrollable(true);
-        info.addAction(page == 0 ? AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD
-                : AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
+        if(page<2)info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
+        if(page>0)info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
     }
 
     @Override public boolean performAccessibilityAction(int action, Bundle args) {
-        if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD && page == 0) { settlePage(1); return true; }
-        if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD && page == 1) { settlePage(0); return true; }
+        if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD && page < 2) { settlePage(page+1); return true; }
+        if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD && page > 0) { settlePage(page-1); return true; }
         return super.performAccessibilityAction(action, args);
     }
     private void size(View view, int x, int y, int width, int height) {

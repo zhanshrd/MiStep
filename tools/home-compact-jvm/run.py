@@ -52,13 +52,16 @@ public class HomeCompactRegression {
   CellMovePreview(Root r,Bitmap b,Rect x,List<Move>m){}void close(){}void setOnClosed(Runnable r){}
  }
  static class Main{List<Runnable>queue=new ArrayList<>();void postDelayed(Runnable r,long d){queue.add(r);}void post(Runnable r){queue.add(r);}}
- final int SLOT_COUNT=4,SLOT_MAIN=0;Slot[]slots=new Slot[4];Root root=new Root();Layout layout=new Layout();
+ final int SLOT_COUNT=4,CELL_SLOT_COUNT=4,SLOT_TOP=4,SLOT_MAIN=0;Slot[]slots=new Slot[4];Root root=new Root();Layout layout=new Layout();
+ static class TopState {Object owner(){return null;}void release(Object key,boolean dismissed){}}
+ TopState topTaskState=new TopState();Slot topOriginalSlot;
  Promotion promotion;HomeTaskReturn coveredHome;CellMovePreview cellMovePreview;boolean compactPending;Slot launchCurrentSlot;Object cellMotion;
  static final int ACTIVE=1;int scene=ACTIVE;long sceneEpoch=1;boolean screenOn=true,keyguardLocked,transferBusy;long SIDE_PROMOTION_TIMEOUT_MS=3500;
  Object ctx=new Object();Idle transitions=new Idle();StatusBar statusBar=new StatusBar();Runnable observed;int promotionChecks,failures;
  Main main=new Main();Map<Integer,WindowState> taskWindowStates=new HashMap<>();final Object taskWindowStatesLock=new Object();
  int focusDone,previewFinished,registrations;boolean mainOnRight=true;
  void resumeNotificationLaunch(Promotion p){}void traceSwapEvent(String s){}void releaseCompactSnapshot(Promotion p){}void finishSwapPreview(Promotion p,long d){previewFinished++;}
+ void releaseRetainedTopSnapshot(){}
  void finishPendingSuspend(){focusDone++;}void log(String s){}void closeSwapPreview(){}
  void recycleBuffered(Slot s){s.bufferedDown=null;}
  void updateHint(Slot s){s.view.hintUpdates++;}void updateTouchRegion(Slot s){s.view.touchUpdates++;}

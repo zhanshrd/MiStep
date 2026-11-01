@@ -35,6 +35,13 @@ if (-not $Unsigned) {
 $ns = 'http://schemas.android.com/apk/res/android'
 if ($manifest.manifest.GetAttribute('versionName',$ns) -ne $version.name -or
     $manifest.manifest.GetAttribute('versionCode',$ns) -ne [string]$version.code) { throw 'Version metadata mismatch.' }
+$recommendedScope = @($manifest.manifest.application.'meta-data' | Where-Object {
+    $_.GetAttribute('name',$ns) -ceq 'xposedscope'
+})
+if ($recommendedScope.Count -ne 1 -or
+    $recommendedScope[0].GetAttribute('value',$ns) -cne 'android;com.android.systemui') {
+    throw 'Recommended scope must contain only system framework and SystemUI.'
+}
 $entry = Get-Content -LiteralPath (Join-Path $src 'java\com\jiusis\mistep\HostEntry.java') -Raw
 if ([regex]::Matches($entry,[regex]::Escape($version.runtimeMarker)).Count -ne 3) { throw 'Runtime markers mismatch.' }
 New-Item -ItemType Directory -Force -Path $out,$dist,(Join-Path $out 'classes'),(Join-Path $out 'native'),(Join-Path $out 'dex') | Out-Null

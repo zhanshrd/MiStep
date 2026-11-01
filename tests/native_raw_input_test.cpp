@@ -41,17 +41,21 @@ int original(void* dispatcher, void* connection, void* entry) {
     return publish_result;
 }
 
-void run(const mistep::Zoom& zoom, uint8_t* entry, bool remap) {
+void run(const mistep::Zoom& zoom, uint8_t* entry, bool remap,
+        const mistep::TopInput& top = {}, bool profile = false) {
     uint8_t before[160];
     std::memcpy(before, entry, sizeof(before));
     expected_local = mistep::read<mistep::Transform>(entry, 0x1c);
     expected_raw = mistep::read<mistep::Transform>(entry, 0x44);
-    if (remap) check(mistep::corrected_raw(zoom, expected_local, expected_raw, expected_raw),
+    bool upper = profile && top.uid >= 10000 && mistep::read<int32_t>(entry,0x84)==top.uid
+            && mistep::uniform_basis(expected_local,1/top.scale);
+    const mistep::Zoom selected = upper ? mistep::Zoom{top.scale,0,0} : zoom;
+    if (remap) check(mistep::corrected_raw(selected, expected_local, expected_raw, expected_raw),
             "expected inverse available");
     const int before_calls = original_calls;
     bool observed = !remap;
     const int result = mistep::publish(original, reinterpret_cast<void*>(0x1234),
-            reinterpret_cast<void*>(0x5678), entry, zoom, &observed);
+            reinterpret_cast<void*>(0x5678), entry, zoom, &observed, top, profile);
     check(observed == remap, "remap decision matches actual geometry");
     check(result == publish_result, "original return value preserved");
     check(original_calls == before_calls + 1, "original called exactly once");
@@ -165,6 +169,28 @@ int main() {
     }
     auto mirror=local;mirror.m[0]=-mirror.m[0];
     check(!mistep::corrected_raw({zoom.scale,622,0,1080,2460,0},mirror,raw,corrected),"mirrored unsupported input skipped");
+
+    // TOP dialogs use logical pixels for local gestures and raw distances alike.
+    const mistep::TopInput top{10321,.364424f};
+    auto upper=identity();upper.m[0]=upper.m[4]=1/top.scale;
+    upper.m[6]=-321;upper.m[7]=-567; // Comment/dialog local origin is not raw origin.
+    write(entry,0x1c,upper);write(entry,0x44,raw);write<int32_t>(entry,0x84,top.uid);
+    for(int result : {0,-11,-32}) {publish_result=result;run(zoom,entry,true,top,true);}
+    run(zoom,entry,false,top,false); // No new offset read on an unverified ABI.
+    write<int32_t>(entry,0x84,top.uid+1);run(zoom,entry,false,top,true);
+    write<int32_t>(entry,0x84,top.uid);run(zoom,entry,false,{},true); // Returned/hidden lease.
+    write<uint32_t>(entry,0x18,8);run(zoom,entry,false,top,true);
+    write<uint32_t>(entry,0x18,0);write<int32_t>(event,0x3c,1);run(zoom,entry,false,top,true);
+    write<int32_t>(event,0x3c,0);write(entry,0x1c,local);run(zoom,entry,true,top,true);
+    mistep::Transform upper_raw;
+    check(mistep::corrected_raw({top.scale,0,0},upper,raw,upper_raw),"TOP raw inverse exists");
+    for(float distance : {1.f,30.f,100.f,300.f}) {
+        check(mistep::close(upper_raw.m[4]*distance,upper.m[4]*distance),
+                "comment drag raw and local distances agree at every tested distance");
+    }
+    check(upper_raw.m[6]==0&&upper_raw.m[7]==0,"comment local origin never shifts absolute raw");
+    write(entry,0x1c,upper);write(entry,0x44,upper_raw);run(zoom,entry,false,top,true);
+    write(entry,0x44,raw);write(entry,0x1c,raw);run(zoom,entry,false,top,true);
 
     void* libui = dlopen("/system/lib64/libui.so", RTLD_NOW);
     check(libui != nullptr, "real target libui opened in isolated process");

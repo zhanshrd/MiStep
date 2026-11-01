@@ -26,6 +26,15 @@ public final class ClipboardHistoryTest {
         check(history.snapshot().size() == 2, "snapshot is detached");
         history.remove("first");
         check(history.snapshot().equals(List.of("second")), "remove one item");
+        history.clearKeepingPrimary("active clip");
+        history.add("active clip", false);
+        check(history.snapshot().isEmpty(), "cleared primary clip is not restored when history is reopened");
+        history.add("new clip", false);
+        check(history.snapshot().equals(List.of("new clip")), "a new primary clip resumes history recording");
+        history.clearKeepingPrimary("repeatable clip");
+        history.primaryClipChanged();
+        history.add("repeatable clip", false);
+        check(history.snapshot().equals(List.of("repeatable clip")), "re-copy after clear is recorded");
         history.clear();
         for (int i = 0; i < ClipboardHistory.MAX_ENTRIES + 3; i++)
             history.add("entry-" + i, false);

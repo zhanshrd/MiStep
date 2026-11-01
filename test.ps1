@@ -3,6 +3,13 @@ $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
 if (-not $SdkPath) { $SdkPath=$env:ANDROID_SDK_ROOT }
 if (-not $JavaHome -or -not $SdkPath) { throw 'Set JAVA_HOME and ANDROID_HOME.' }
+$controls = Get-Content -LiteralPath (Join-Path $root 'module\src\main\java\com\jiusis\mistep\MiStepOs4Controls.java') -Raw
+foreach ($forbidden in @('MiStepControlGlyph','glyphView')) {
+    if ($controls.Contains($forbidden)) { throw "Control-center tiles must not add a custom glyph layer: $forbidden" }
+}
+if (-not $controls.Contains('icon.setVisibility(View.VISIBLE)')) { throw 'Native OEM tile icon must remain visible.' }
+if (-not $controls.Contains('MiStepNativeIconContext.wrap(system)')) { throw 'Native tile must use original APK icon resources.' }
+if (-not $controls.Contains('new MiStepCodeIcon.GlyphView')) { throw 'Payment and transit keep their MiStep action artwork.' }
 $jdk=Join-Path $JavaHome 'bin'
 $android=Join-Path $SdkPath 'platforms\android-37.0\android.jar'
 $classes=Join-Path $root 'build\classes'

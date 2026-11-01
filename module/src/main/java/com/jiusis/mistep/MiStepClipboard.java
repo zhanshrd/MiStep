@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
+import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PersistableBundle;
@@ -32,7 +33,10 @@ final class MiStepClipboard {
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ClipboardHistory history = new ClipboardHistory();
-    private final ClipboardManager.OnPrimaryClipChangedListener listener = () -> main.post(this::record);
+    private final ClipboardManager.OnPrimaryClipChangedListener listener = () -> main.post(() -> {
+        history.primaryClipChanged();
+        record();
+    });
     private ClipboardManager clipboard;
     private ViewGroup owner;
     private FrameLayout popup;
@@ -98,6 +102,20 @@ final class MiStepClipboard {
         } catch (Throwable ignored) { /* Access can be denied during a user or lock transition. */ }
     }
 
+    private String primaryText() {
+        if (clipboard == null) return null;
+        try {
+            ClipData clip = clipboard.getPrimaryClip();
+            if (clip == null || clip.getItemCount() != 1) return null;
+            PersistableBundle extras = clip.getDescription().getExtras();
+            if (extras != null && extras.getBoolean("android.content.extra.IS_SENSITIVE", false)) return null;
+            CharSequence text = clip.getItemAt(0).getText();
+            if (text == null || text.length() == 0 || text.length() > ClipboardHistory.MAX_TEXT) return null;
+            String value = text.toString();
+            return value.trim().isEmpty() ? null : value;
+        } catch (Throwable ignored) { return null; }
+    }
+
     void toggle(ViewGroup host, Rect area, Bitmap backdrop, int screenWidth, int screenHeight) {
         if (popup != null) {
             if (closing && popupPanel != null) animateOpen(popupPanel);
@@ -124,14 +142,14 @@ final class MiStepClipboard {
         LinearLayout header = new LinearLayout(context);
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = label("剪贴板", 14);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         header.addView(title, new LinearLayout.LayoutParams(0, dp(30), 1));
-        TextView clear = label("清空", 12);
-        clear.setPadding(dp(10), 0, dp(10), 0);
-        clear.setOnClickListener(v -> { history.clear(); render(panel, header); });
-        header.addView(clear, new LinearLayout.LayoutParams(-2, dp(30)));
-        MiStepIconButton close = new MiStepIconButton(context, MiStepIconButton.EXIT, "关闭剪贴板");
+        MiStepIconButton clear = new MiStepIconButton(context, MiStepIconButton.CLEAR, "清空剪贴板历史");
+        clear.setOnClickListener(v -> { history.clearKeepingPrimary(primaryText()); render(panel, header); });
+        header.addView(clear, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        MiStepIconButton close = new MiStepIconButton(context, MiStepIconButton.CLOSE, "关闭剪贴板");
         close.setOnClickListener(v -> dismissAnimated());
-        header.addView(close, new LinearLayout.LayoutParams(dp(30), dp(30)));
+        header.addView(close, new LinearLayout.LayoutParams(dp(36), dp(36)));
         render(panel, header);
         try {
             host.addView(container, bounds);
@@ -160,11 +178,11 @@ final class MiStepClipboard {
         for (String value : texts) {
             LinearLayout row = new LinearLayout(context);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            TextView text = label(value, 12);
-            text.setMaxLines(4);
-            text.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            text.setPadding(0, dp(8), dp(8), dp(8));
-            text.setOnClickListener(v -> {
+            row.setPadding(dp(10), dp(4), dp(4), dp(4));
+            row.setMinimumHeight(dp(52));
+            row.setBackground(HyperOsStyle.pressableItem(context, 10f));
+            row.setContentDescription("复制：" + value);
+            row.setOnClickListener(v -> {
                 try {
                     if (clipboard == null || locked()) return;
                     clipboard.setPrimaryClip(ClipData.newPlainText("Mi Step", value));
@@ -174,14 +192,21 @@ final class MiStepClipboard {
                     Toast.makeText(context, "复制失败", Toast.LENGTH_SHORT).show();
                 }
             });
+            TextView text = label(value, 12);
+            text.setMaxLines(4);
+            text.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            text.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
-            TextView remove = label("删除", 11);
+            MiStepIconButton remove = new MiStepIconButton(context, MiStepIconButton.DELETE, "删除这条剪贴板记录");
             remove.setOnClickListener(v -> { history.remove(value); render(panel, header); });
-            row.addView(remove, new LinearLayout.LayoutParams(dp(44), dp(48)));
+            row.addView(remove, new LinearLayout.LayoutParams(dp(40), dp(44)));
             rows.addView(row);
             View line = new View(context);
             line.setBackgroundColor(0x20777777);
-            rows.addView(line, new LinearLayout.LayoutParams(-1, dp(1)));
+            LinearLayout.LayoutParams divider = new LinearLayout.LayoutParams(-1, dp(1));
+            divider.leftMargin = dp(10);
+            divider.rightMargin = dp(10);
+            rows.addView(line, divider);
         }
     }
 

@@ -54,6 +54,13 @@ public final class CornerSwipeTest {
         check(move(s, W - 480, 0, 1100), "right start-zone boundary");
         s.down(7, 1, 320, 0, 1000, W, H, 0, REGION, SWEEP, VERTICAL_DRIFT);
         check(!move(s, 500, 200, 1100), "left exclusive boundary");
+        for (int r : new int[]{1, 3}) {
+            for (int startX : new int[]{100, H - 100}) {
+                s.down(7, 1, startX, 10, 1000, H, W, r, REGION, SWEEP, VERTICAL_DRIFT);
+                check(s.move(7, 1, startX < REGION ? startX + SWEEP : startX - SWEEP,
+                        10, 1100, H, W, r), "landscape recognizer works after native reveal admission");
+            }
+        }
         System.out.println("CornerSwipe: " + checks + " checks passed");
     }
 }

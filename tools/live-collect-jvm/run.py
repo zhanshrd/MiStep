@@ -19,14 +19,16 @@ public class LiveCollectRegression {
  static void check(boolean v,String why){checks++;if(!v)throw new AssertionError(why);}
  static class Case {
   Fixture f=new Fixture(); Surface parent=new Surface(1); MiStepLiveCollectTask task;
-  Case(){f.o.mTaskListeners.map.remove(12);f.c.mTaskToken=null;f.c.mTaskInfo=null;f.c.mTaskLeash=null;
-   task=new MiStepLiveCollectTask(f.o,f.views,f.c,11,"A","HOME",0,new Rect(0,0,1200,2608),parent,s->{});}
+  Case(){this(0);}Case(int user){f.a.userId=user;f.o.mTaskListeners.map.remove(12);f.c.mTaskToken=null;f.c.mTaskInfo=null;f.c.mTaskLeash=null;
+   task=new MiStepLiveCollectTask(f.o,f.views,f.c,11,"A","HOME",user,new Rect(0,0,1200,2608),parent,s->{});}
   void arm()throws Exception{task.arm(LiveCollectRegression.class.getClassLoader());}
   Surface canonical(){return ((Appeared)f.o.mTasks.get(11)).leash;}
   LiveHomeRegression.Transition transition(){LiveHomeRegression.Transition t=new LiveHomeRegression.Transition();
-   t.changes.add(new LiveHomeRegression.Change(new Info(11,"A",6),new Surface(11)));return t;}
+   Info snapshot=new Info(11,"A",6);snapshot.userId=f.a.userId;t.changes.add(new LiveHomeRegression.Change(snapshot,new Surface(11)));return t;}
  }
  public static void main(String[]args)throws Exception {
+  Case clone=new Case(999);check(clone.task.preflight(),"clone collection rejected");clone.arm();check(clone.task.resolve(clone.transition())!=null,"clone collection transition rejected");clone.f.a.mode=6;clone.task.prepare(new Tx(),new Tx());check(clone.task.sideOwned(),"clone collection owner lost");clone.task.settle(new Tx(),.2473f);clone.task.windowTransaction(true,false);clone.f.a.mode=1;clone.task.settle(new Tx(),.2473f);check(clone.task.originalSettled(),"clone fullscreen rollback lost");
+  Case staleClone=new Case(999);staleClone.f.a.userId=0;check(!staleClone.task.preflight(),"clone canonical user drift admitted");
   Case a=new Case();check(a.task.preflight(),"valid empty TaskView rejected");a.arm();
   check(a.f.o.getTaskListener(a.f.a,false)!=a.f.o.fullscreen,"exact temporary lease missing");
   List<String> w=((android.window.WindowContainerTransaction)a.task.windowTransaction(false,false)).ops;

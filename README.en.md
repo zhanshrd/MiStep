@@ -12,17 +12,19 @@
 </p>
 
 <p align="center">
-  <kbd>1.0.0</kbd> &nbsp; <kbd>HyperOS 4</kbd> &nbsp; <kbd>Android 17</kbd> &nbsp; <kbd>ARM64</kbd> &nbsp; <kbd>Root + LSPosed</kbd> &nbsp; <kbd>Source available · Noncommercial</kbd>
+  <kbd>1.0.1</kbd> &nbsp; <kbd>HyperOS 4</kbd> &nbsp; <kbd>Android 17</kbd> &nbsp; <kbd>ARM64</kbd> &nbsp; <kbd>Root + LSPosed</kbd> &nbsp; <kbd>Source available · Noncommercial</kbd>
 </p>
 
 <p align="center">
-  <a href="https://github.com/JIUSIS/MiStep/releases/tag/v1.0.0"><strong>Download 1.0.0</strong></a> ·
+  <a href="https://github.com/JIUSIS/MiStep/releases/tag/v1.0.1"><strong>Download 1.0.1</strong></a> ·
   <a href="#features">Features</a> ·
   <a href="#installation-and-first-steps">Installation</a> ·
   <a href="#a-note-from-a-wish-making-engineer">Why I made it</a>
 </p>
 
 ---
+
+**Version 1.0.1 is now available.** It adds an interactive top task window, two-finger face switching, custom pinned apps, app-clone support and a fullscreen entry rule. It also corrects translated-lyric alignment, clipboard history returning after clearing, and control-center icons. See the [1.0.1 release notes](docs/发行说明-1.0.1.md).
 
 ## Multitasking that feels natural again
 
@@ -63,13 +65,13 @@ The slot becomes empty, and **the task returns to the system background without 
 
 ### 04 · Frequent apps, within reach
 
-The top rail shows up to 18 apps, ordered by foreground usage over the last seven days. If usage statistics are unavailable, app names and other metadata provide a stable fallback order.
+The top rail shows your pinned apps first, followed by apps ordered by foreground usage over the last seven days. If usage statistics are unavailable, app names and other metadata provide a stable fallback order.
 
 | Gesture | Action |
 | --- | --- |
 | Tap an app icon | Open it in the main area, or swap its existing side task into the main area |
 | Swipe the rail horizontally | Browse icons outside the visible portion |
-| Long press, drag horizontally, then release | Select and open an app |
+| Long press an app icon | Choose custom apps, then tap Done to pin them at the front |
 | Tap the previous or next toolbar arrow | Move to the previous or next frequent app |
 
 ### 05 · Controls at the top of your workspace
@@ -123,7 +125,7 @@ The workspace uses a blurred version of the desktop wallpaper, rounded corners a
 
 ### 09 · Left or right layouts and landscape inside Mi Step
 
-Swipe **right from the upper left corner** for side tasks on the left, or **left from the upper right corner** for side tasks on the right.
+Test build 1000021 allows corner entry in portrait while the status bar is normally visible. In immersive fullscreen, first reveal the native status bar without expanding notifications or quick settings, then start a new corner gesture. Entry remains blocked while the status bar is hidden. This rule also applies in landscape; actual landscape game behavior still needs validation. Swipe **right from the upper left corner** for side tasks on the left, or **left from the upper right corner** for side tasks on the right.
 
 When an app enters landscape inside the main area, Mi Step coordinates its orientation, touch mapping, task swaps and floating keyboard position. Version 1.0.0 includes fixes for landscape drag direction, keyboard movement limits, rotation ownership during swaps and status bar animations leaving the main area.
 
@@ -146,7 +148,7 @@ Different ROMs on the same model may expose different interfaces. These targets 
 
 The permanent package name is **`com.jiusis.mistep`**. Future versions will keep it. If you installed an earlier package name, exit the workspace and disable the old module in LSPosed first. Install this package, enable the new module, select its scope again, then reboot normally. You can uninstall the old module after confirming the new one works. A changed package name cannot overwrite the old installation; do not enable both modules together.
 
-1. Download `MiStep-1.0.0.apk` from the [1.0.0 release](https://github.com/JIUSIS/MiStep/releases/tag/v1.0.0). Check it against `SHA256SUMS.txt` on that page.
+1. Download `MiStep-1.0.1.apk` from the [1.0.1 release](https://github.com/JIUSIS/MiStep/releases/tag/v1.0.1). Check it against `SHA256SUMS.txt` on that page.
 2. Install it, enable **Mi Step** in LSPosed and select the recommended scope below.
 3. **Reboot normally** so the system processes load the module.
 4. With the phone in portrait, use the upper corner swipe gesture. Open an app in the main area, then tap an empty side slot's ＋ to collect it.
@@ -155,8 +157,8 @@ The permanent package name is **`com.jiusis.mistep`**. Future versions will keep
 | --- | --- | --- |
 | System framework | `android` | System tasks, main area scaling and input |
 | System UI | `com.android.systemui` | Workspace, toolbar and native controls |
-| Settings | `com.android.settings` | Settings interface adaptation |
-| Xiaomi keyboard | `com.xiaomi.type` | Select when using the Xiaomi keyboard |
+
+Version 1.0.1 recommends these two system processes. Optionally select `com.xiaomi.type` to prevent the Xiaomi keyboard from automatically switching to floating mode in landscape. This remaining keyboard policy is independent of ordinary app layout and input. Settings, Douyin and media players need no app scope; the earlier Douyin TOP photo patch has been withdrawn. Previously saved LSPosed selections are not automatically cleared. See the [scope and system adaptation notes](docs/作用域与系统适配.md) (Chinese).
 
 The module has no separate launcher screen. Enter through the gestures after installation. The gear opens system settings. See the [full usage guide](docs/使用说明.md) for upgrades, signing and recovery. The linked detailed guides are currently in Chinese.
 

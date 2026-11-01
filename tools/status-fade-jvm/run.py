@@ -24,7 +24,7 @@ files = {
 'android/os/Looper.java': 'package android.os;public class Looper {static final Looper main=new Looper();public static Looper myLooper(){return main;}}',
 'android/os/Message.java': 'package android.os;public class Message {public int what,arg1,arg2;public Object obj;}',
 'de/robv/android/xposed/XC_MethodHook.java': 'package de.robv.android.xposed;public class XC_MethodHook {public static class MethodHookParam {public Object[] args;} protected void beforeHookedMethod(MethodHookParam p) throws Throwable {}}',
-'de/robv/android/xposed/XposedHelpers.java': 'package de.robv.android.xposed;public class XposedHelpers {public static Object findAndHookMethod(String n,ClassLoader c,String m,Object...a){return null;}}',
+'de/robv/android/xposed/XposedHelpers.java': 'package de.robv.android.xposed;public class XposedHelpers {public static Object findAndHookMethod(String n,ClassLoader c,String m,Object...a){return null;}public static int getIntField(Object o,String n){try{return o.getClass().getField(n).getInt(o);}catch(Exception e){throw new RuntimeException(e);}}}',
 'de/robv/android/xposed/XposedBridge.java': 'package de.robv.android.xposed;public class XposedBridge {public static void log(String s){}}',
 'android/os/Handler.java': 'package android.os;import java.util.*;public class Handler {public List<Runnable>delayed=new ArrayList<>();public Looper getLooper(){return Looper.myLooper();}public boolean post(Runnable r){r.run();return true;}public void postDelayed(Runnable r,long d){delayed.add(r);}public void removeCallbacks(Runnable r){delayed.remove(r);}}',
 'android/view/animation/LinearInterpolator.java': 'package android.view.animation;public class LinearInterpolator {}',

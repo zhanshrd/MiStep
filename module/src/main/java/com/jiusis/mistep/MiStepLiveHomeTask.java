@@ -16,22 +16,22 @@ final class MiStepLiveHomeTask {
         this.displayParent = displayParent; this.sideParent = sideParent; this.request = request;
         lock = XposedHelpers.getObjectField(organizer, "mLock");
     }
-    private Object info(int id, Object token, int mode, int activityType) {
+    private Object info(int id, Object token, int expectedUser, int mode, int activityType) {
         Object entry = XposedHelpers.callMethod(XposedHelpers.getObjectField(organizer, "mTasks"), "get", id);
         if (entry == null) throw new IllegalStateException("Home/app canonical absent");
         Object task = XposedHelpers.callMethod(entry, "getTaskInfo");
         if (XposedHelpers.getIntField(task, "taskId") != id
                 || !token.equals(XposedHelpers.getObjectField(task, "token"))
                 || XposedHelpers.getIntField(task, "displayId") != 0
-                || XposedHelpers.getIntField(task, "userId") != request.userId
+                || XposedHelpers.getIntField(task, "userId") != expectedUser
                 || (mode >= 0 && !Integer.valueOf(mode).equals(XposedHelpers.callMethod(task, "getWindowingMode")))
                 || !Integer.valueOf(activityType).equals(XposedHelpers.callMethod(task, "getActivityType"))
                 || Boolean.TRUE.equals(XposedHelpers.callMethod(task, "hasParentTask")))
             throw new IllegalStateException("Home/app canonical identity changed");
         return task;
     }
-    private Object app(int mode) { return info(request.app.id, request.app.token, mode, 1); }
-    private void home() { info(request.homeId, request.homeToken, 1, 2); }
+    private Object app(int mode) { return info(request.app.id, request.app.token, request.appUserId, mode, 1); }
+    private void home() { info(request.homeId, request.homeToken, request.homeUserId, 1, 2); }
     private Object owner(Object task) { return XposedHelpers.callMethod(organizer, "getTaskListener", task, false); }
     private Object canonical() {
         Object entry = XposedHelpers.callMethod(XposedHelpers.getObjectField(organizer, "mTasks"), "get", request.app.id);
@@ -83,10 +83,10 @@ final class MiStepLiveHomeTask {
                 Object token = XposedHelpers.getObjectField(task, "token");
                 // Home visibility bookkeeping belongs to Shell; never mutate its leash or WCT.
                 if (request.homeToken.equals(token)) {
-                    checkTransitionTask(task, request.homeId, request.homeToken, 1, 2);
+                    checkTransitionTask(task, request.homeId, request.homeToken, request.homeUserId, 1, 2);
                 } else if (request.app.token.equals(token)) {
                     if (match != null) throw new IllegalStateException("duplicate Home app change");
-                    checkTransitionTask(task, request.app.id, request.app.token, 1, 1);
+                    checkTransitionTask(task, request.app.id, request.app.token, request.appUserId, 1, 1);
                     transitionApp = task;
                     match = XposedHelpers.callMethod(change, "getLeash");
                 }
@@ -97,11 +97,11 @@ final class MiStepLiveHomeTask {
             leash = match; return match;
         }
     }
-    private void checkTransitionTask(Object task, int id, Object token, int mode, int type) {
+    private void checkTransitionTask(Object task, int id, Object token, int expectedUser, int mode, int type) {
         if (XposedHelpers.getIntField(task, "taskId") != id
                 || !token.equals(XposedHelpers.getObjectField(task, "token"))
                 || XposedHelpers.getIntField(task, "displayId") != 0
-                || XposedHelpers.getIntField(task, "userId") != request.userId
+                || XposedHelpers.getIntField(task, "userId") != expectedUser
                 || !Integer.valueOf(mode).equals(XposedHelpers.callMethod(task, "getWindowingMode"))
                 || !Integer.valueOf(type).equals(XposedHelpers.callMethod(task, "getActivityType"))
                 || Boolean.TRUE.equals(XposedHelpers.callMethod(task, "hasParentTask")))

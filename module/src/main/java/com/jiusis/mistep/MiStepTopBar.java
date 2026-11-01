@@ -17,6 +17,8 @@ final class MiStepTopBar extends FrameLayout {
     private final Listener listener;
     private final ControlsHeader header;
     private final QuickAppRail quickRail;
+    private final QuickAppPicker appPicker = new QuickAppPicker();
+    private List<QuickApp> availableApps;
     private final MiStepControlCenter controlCenter;
     private boolean mainOnRight;
     private int statusBarInset;
@@ -35,6 +37,8 @@ final class MiStepTopBar extends FrameLayout {
         void onDragStart(MotionEvent event);
         void onExit();
         void onLaunch(QuickApp app);
+        boolean canCustomizeApps();
+        void onOpenLandscape();
     }
 
     MiStepTopBar(Context context, MiStepLayout layout, List<QuickApp> apps, Listener listener) {
@@ -46,9 +50,27 @@ final class MiStepTopBar extends FrameLayout {
         setClipToPadding(false);
         header = new ControlsHeader(context);
         addView(header, new FrameLayout.LayoutParams(-1, 1));
-        quickRail = new QuickAppRail(context, apps, listener::onLaunch);
+        availableApps = new java.util.ArrayList<>(apps);
+        quickRail = new QuickAppRail(context, QuickAppPins.arrange(context, availableApps), new QuickAppRail.Listener() {
+            public void onLaunch(QuickApp app) { listener.onLaunch(app); }
+            public void onCustomize() {
+                if (!listener.canCustomizeApps()) return;
+                MiStepClipboard.get(getContext()).close();
+                MiStepScanner.closeImmediately();
+                try {
+                    appPicker.show(getContext(), availableApps, glassWallpaper, glassWidth, glassHeight,
+                            () -> quickRail.setApps(QuickAppPins.arrange(getContext(), availableApps)));
+                } catch (Throwable unavailable) {
+                    appPicker.close();
+                    android.widget.Toast.makeText(getContext(), "暂时无法打开应用选择框",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                    android.util.Log.w("MiStepProbe", "quick app picker unavailable", unavailable);
+                }
+            }
+        });
         addView(quickRail, new FrameLayout.LayoutParams(-1, 1));
         controlCenter = new MiStepControlCenter(context);
+        controlCenter.setOnLandscapeRequest(listener::onOpenLandscape);
         addView(controlCenter, new FrameLayout.LayoutParams(-1, 1));
     }
 
@@ -60,7 +82,14 @@ final class MiStepTopBar extends FrameLayout {
 
     void stepApp(int direction) { quickRail.stepAndLaunch(direction); }
 
-    void setQuickApps(List<QuickApp> apps) { quickRail.setApps(apps); }
+    void setQuickApps(List<QuickApp> apps) {
+        availableApps = new java.util.ArrayList<>(apps);
+        quickRail.setApps(QuickAppPins.arrange(getContext(), availableApps));
+    }
+
+    void closeQuickAppPicker() { appPicker.close(); }
+
+    void leaveLandscapePage() { controlCenter.leaveLandscapePage(); }
 
     void toggleClipboard(Bitmap backdrop, int screenWidth, int screenHeight) {
         if (geometry == null) return;
@@ -73,16 +102,23 @@ final class MiStepTopBar extends FrameLayout {
     @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         if (oldw > 0 && (w != oldw || h != oldh)) {
+            appPicker.close();
             MiStepClipboard.get(getContext()).close();
             MiStepScanner.closeImmediately();
         }
     }
 
     @Override protected void onDetachedFromWindow() {
+        appPicker.close();
         header.swap.settle(mainOnRight);
         MiStepScanner.closeImmediately();
         MiStepClipboard.get(getContext()).close();
         super.onDetachedFromWindow();
+    }
+
+    @Override protected void onVisibilityChanged(View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (appPicker != null && !isShown()) appPicker.close();
     }
 
     void setStatusBarInset(int value) {
@@ -165,6 +201,9 @@ final class MiStepTopBar extends FrameLayout {
             title.setIncludeFontPadding(false);
             title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             title.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            title.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+            title.setContentDescription("Mi Step，双指上下滑动翻转顶部，点按打开横屏窗口");
+            title.setOnClickListener(view->listener.onOpenLandscape());
             addView(title);
             exit = button(MiStepIconButton.EXIT, "退出 Mi Step", listener::onExit);
             settings = button(MiStepIconButton.SETTINGS, "打开系统设置", listener::onOpenSettings);
