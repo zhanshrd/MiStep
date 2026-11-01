@@ -225,7 +225,7 @@ final class HostPromotionController {
             try {
                 // Prepare every surface operation before changing listener ownership.
                 XposedHelpers.callMethod(area, "reparentToDisplayArea", 0, canonical, tx);
-                boolean liveCenterReveal=ticket.liveMainReveal && h.topTransition!=null;
+                boolean liveCenterReveal=ticket.liveMainReveal && h.topCtrl.topTransition!=null;
                 ticket.liveMainReveal=liveCenterReveal;
                 float initialScale=liveCenterReveal
                         ?TopTaskReturnPolicy.CENTER_START_SCALE:1f;
@@ -252,7 +252,7 @@ final class HostPromotionController {
                 XposedHelpers.callMethod(tx, "apply");
                 if(liveCenterReveal) {
                     ticket.liveRevealSurface=canonical;
-                    h.topTransition.setLiveSurface(canonical);
+                    h.topCtrl.topTransition.setLiveSurface(canonical);
                 }
                 // Native removeListener hands off to fallback but does not notify the old owner.
                 // This native callback retires/release its own copied handle, never canonical.
