@@ -105,11 +105,11 @@ public final class MiStepHost {
     private final ZoomTransport zoomTransport;
     private final HostMirrorController mirrorController;
     final HostSwapController swapController;
-    private final HostPromotionController promotionController;
+    final HostPromotionController promotionController;
     volatile HomeTaskReturn coveredHome;
     CellMovePreview cellMovePreview;
     Bitmap mainBackdrop;
-    private View topStripBacking;
+    View topStripBacking;
     Bitmap wallpaperBackdrop;
     private boolean wallpaperBackdropRequested;
     private BroadcastReceiver wallpaperReceiver;
@@ -120,6 +120,7 @@ public final class MiStepHost {
     int carrierSlotIndex = -1;
     MiStepTopBar topBar;
     final HostTopTaskController topCtrl;
+    final HostLifecycleController lifecycle;
     private View sideBacking;
     /** 侧栏按格分段的不透明底板；承载格需要把它藏起来让下面的真实任务画面透出来。 */
     final View[] sideBackingViews = new View[SLOT_COUNT];
@@ -129,13 +130,13 @@ public final class MiStepHost {
     private float dragStartRawX;
     private float dragStartRawY;
     private Slot dragTarget;
-    private View keyguardMask;
+    View keyguardMask;
     boolean keyguardLocked;
     static final int ACTIVE = 0, SUSPENDING = 1, SUSPENDED = 2, RESUMING = 3;
     volatile int scene = ACTIVE;
     long sceneEpoch;
     boolean suspendRequested;
-    private boolean landscapeSuspended;
+    boolean landscapeSuspended;
     boolean transferBusy;
     private boolean overlayRefreshScheduled;
     private static boolean boundsHooksReady;
@@ -448,6 +449,7 @@ public final class MiStepHost {
         swapController = new HostSwapController(this);
         promotionController = new HostPromotionController(this);
         topCtrl = new HostTopTaskController(this);
+        lifecycle = new HostLifecycleController(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
         installRetainedSurfaces(ctx.getClassLoader());
         for (int i = 0; i < SLOT_COUNT; i++) {
@@ -649,7 +651,7 @@ public final class MiStepHost {
 
     private void createMirrorLayer() { mirrorController.createMirrorLayer(); }
 
-    private void setMirrorLayerVisible(boolean visible) { mirrorController.setMirrorLayerVisible(visible); }
+    void setMirrorLayerVisible(boolean visible) { mirrorController.setMirrorLayerVisible(visible); }
 
     private void startMirrorPoc(int requestedTask, Rect dest, int holdMs, int hideMode) {
         mirrorController.startMirrorPoc(requestedTask, dest, holdMs, hideMode);
@@ -676,7 +678,7 @@ public final class MiStepHost {
         pendingMainSide = mainOnRight ? 1 : 0;
     }
 
-    private void consumePendingMainSide() {
+    void consumePendingMainSide() {
         int pending = pendingMainSide;
         if (pending < 0) return;
         pendingMainSide = -1;
@@ -955,294 +957,15 @@ public final class MiStepHost {
         }
     }
 
-    /** 等 TaskView 就绪再启动；宿主刚建时窗口可能还没 attach。 */
-    private void launchWhenReady(int slot, String pkg, int attempt) {
-        if (slot <= SLOT_MAIN || slot >= SLOT_COUNT) {
-            return;
-        }
-        if (slots[slot].view == null && attempt < 8) {
-            main.postDelayed(() -> launchWhenReady(slot, pkg, attempt + 1), 400L);
-            return;
-        }
-        launchPackage(slot, pkg);
-    }
 
-    private void toggleVisibility() {
-        main.post(() -> {
-            if (scene == SUSPENDED) resumeSession();
-            else if (scene == ACTIVE) suspendSession("exit");
-            else if (scene == RESUMING) suspendSession("exit"); // suspendSession latches suspendRequested during RESUMING.
-            else log("toggle ignored while SUSPENDING; exit already in progress");
-        });
-    }
 
-    /** Transfer live tasks first. Removing a SurfaceView while still bound hides its task. */
-    private void suspendSession(String reason) {
-        if (topBar != null) topBar.closeQuickAppPicker();
-        if (!"native-landscape".equals(reason)) landscapeSuspended = false;
-        statusBar.restore(); // Includes a deferred exit while native ownership is changing.
-        MiStepClipboard.get(ctx).close();
-        if (root == null) return;
-        if (scene == RESUMING) {
-            suspendRequested = true;
-            if (!workspaceEntering) return; // A native readoption still owns its callback.
-            workspaceEntering = false;
-            workspaceGeneration++; // Cancel a pending first-frame entry before it can shrink again.
-            scene = ACTIVE;
-        }
-        if (scene != ACTIVE) return;
-        if (promotion != null || transferBusy) {
-            suspendRequested = true;
-            if (cellMotion != null) cellMotion.finish();
-            if (sideDismiss != null && sideDismiss.isTracking()) sideDismiss.settle(false);
-            log("suspend queued after task transfer: " + reason);
-            if (promotion != null && promotion.nativeSwap)
-                failPromotion(promotion, "suspend requested: " + reason);
-            return;
-        }
-        for (Slot slot : slots) {
-            if (slot.launching) {
-                suspendRequested = true;
-                log("suspend queued after launch: " + reason);
-                return;
-            }
-        }
-        scene = SUSPENDING;
-        sceneEpoch++;
-        resetTopForSuspend();
-        publishDesktopSideTasks();
-        suspendRequested = false;
-        closeSwapPreview();
-        closeCellMovePreview();
-        // fullscreen-only 的镜像承载任务仍在主区：退出前先移回，避免下次进入是一块黑屏。
-        restoreCarrierToMain();
-        if (mainBackdrop != null) {
-            mainBackdrop.recycle();
-            mainBackdrop = null;
-        }
-        hideIme();
-        workspaceEntering = false;
-        final long exitAnimation = ++workspaceGeneration;
-        if (screenOn) writeZoomAnimated(false); else writeZoom(false);
-        setZoomState(false);
-        log("suspend begin; retain live task identities: " + reason);
-        final long exitEpoch = sceneEpoch;
-        Runnable returnTasks = () -> {
-            if (scene == SUSPENDING && sceneEpoch == exitEpoch)
-                returnUnboundOwnedCandidates(exitEpoch, () -> parkNext(1));
-        };
-        if (screenOn) playWorkspaceFade(false, exitAnimation, returnTasks);
-        else {
-            android.animation.ValueAnimator previous = workspaceAnimator;
-            workspaceAnimator = null;
-            if (previous != null) previous.cancel();
-            setWorkspaceAlpha(0f);
-            returnTasks.run();
-        }
-    }
 
-    /** A pending swap can leave A outside the saved slot; it remains in the recovery ledger. */
-    private void returnUnboundOwnedCandidates(long epoch, Runnable complete) {
-        OwnedTask next = null;
-        for (OwnedTask candidate : ownedTasks.values()) {
-            if (!candidate.recoveryCandidate) continue;
-            boolean inSlot = false;
-            for (Slot slot : slots) if (slot.index > 0 && slot.occupied
-                    && candidate.token.equals(slot.taskToken)) { inSlot = true; break; }
-            if (!inSlot) { next = candidate; break; }
-        }
-        if (next == null) { complete.run(); return; }
-        returnUnboundOwnedCandidate(next, epoch, 0, complete);
-    }
 
-    private void returnUnboundOwnedCandidate(OwnedTask candidate, long epoch, int attempt, Runnable complete) {
-        if (scene != SUSPENDING || sceneEpoch != epoch || ownedTasks.get(candidate.token) != candidate) return;
-        if (!executeOnShell(() -> {
-            if (scene != SUSPENDING || sceneEpoch != epoch || ownedTasks.get(candidate.token) != candidate) return;
-            boolean ready = false;
-            String error = "owned candidate not yet returned";
-            try {
-                Object controller = candidate.recoveryController;
-                if (controller == null || candidate.userId < 0) throw new IllegalStateException("candidate owner/user absent");
-                LiveTask identity = new LiveTask(candidate.id, candidate.token, null);
-                Object organizer = XposedHelpers.getObjectField(controller, "mTaskOrganizer");
-                Object core = rootInfo(identity);
-                Object appeared;
-                synchronized (XposedHelpers.getObjectField(organizer, "mLock")) {
-                    appeared = ((android.util.SparseArray<?>) XposedHelpers.getObjectField(
-                            organizer, "mTasks")).get(candidate.id);
-                    if (appeared != null && !identity.matches(XposedHelpers.callMethod(appeared, "getTaskInfo")))
-                        throw new IllegalStateException("candidate canonical token changed");
-                }
-                if (core == null) {
-                    if (appeared != null) throw new IllegalStateException("candidate still in organizer outside root list");
-                    Object pending = XposedHelpers.getObjectField(controller, "mPendingInfo");
-                    if (candidate.token.equals(XposedHelpers.getObjectField(controller, "mTaskToken"))
-                            || (pending != null && identity.matches(pending)))
-                        throw new IllegalStateException("candidate still referenced by its controller");
-                    ready = true; // Exact task is gone from both sources, never infer death from roots alone.
-                } else {
-                    if (!identity.matches(core) || XposedHelpers.getIntField(core, "userId") != candidate.userId
-                            || (!ordinaryRoot(core, 1) && !ordinaryRoot(core, 6)))
-                        throw new IllegalStateException("candidate identity/user/display/role changed");
-                    Slot recovery = new Slot(-1);
-                    recovery.controller = controller; recovery.taskId = candidate.id;
-                    recovery.taskToken = candidate.token;
-                    Promotion handback = new Promotion(recovery, new Slot[0]);
-                    handback.background = true; handback.candidateRecovery = true;
-                    if (attempt == 0 || ordinaryRoot(core, 6)) {
-                        if (!applyWct("return-unbound-owned-candidate", fullscreenExitTransaction(handback)))
-                            throw new IllegalStateException("candidate fullscreen transaction refused");
-                    } else {
-                        handoffPromotedTask(handback);
-                        ready = handback.handoffComplete;
-                    }
-                }
-            } catch (Throwable failure) { error = failure.toString(); }
-            final boolean returned = ready;
-            final String detail = error;
-            main.post(() -> {
-                if (scene != SUSPENDING || sceneEpoch != epoch || ownedTasks.get(candidate.token) != candidate) return;
-                if (returned) {
-                    ownedTasks.remove(candidate.token);
-                    log("unbound owned candidate returned alive task=" + candidate.id);
-                    returnUnboundOwnedCandidates(epoch, complete);
-                } else if (attempt < 3) {
-                    main.postDelayed(() -> returnUnboundOwnedCandidate(candidate, epoch, attempt + 1, complete), 350L);
-                } else {
-                    // Preserve the exact A/B ledger and attached surfaces for a later explicit exit.
-                    scene = ACTIVE;
-                    if (screenOn && !keyguardLocked) { setWorkspaceAlpha(1f); writeZoom(true); setZoomState(true); }
-                    log("suspend stopped; unresolved owned candidate retained task=" + candidate.id + ": " + detail);
-                }
-            });
-        })) {
-            scene = ACTIVE;
-            if (screenOn && !keyguardLocked) { setWorkspaceAlpha(1f); writeZoom(true); setZoomState(true); }
-            log("suspend stopped; owned candidate Shell executor unavailable task=" + candidate.id);
-        }
-    }
 
-    private void parkNext(int index) {
-        if (index >= SLOT_COUNT) {
-            root.setVisibility(View.GONE);
-            setMirrorLayerVisible(false);
-            scene = SUSPENDED;
-            publishDesktopSideTasks();
-            log("host suspended; all side tasks returned alive: " + describeTasks());
-            return;
-        }
-        Slot slot = slots[index];
-        if (!slot.occupied || slot.parked || slot.taskToken == null) {
-            parkNext(index + 1);
-            return;
-        }
-        returnToSystem(slot, false, () -> {
-            if(index==SLOT_TOP) {
-                topCtrl.onParkSuccessAtTop();
-            }
-            parkNext(index + 1);
-        }, error -> {
-            // Some peers may already be parked. Restore them before exposing ACTIVE again.
-            scene = RESUMING;
-            setWorkspaceAlpha(1f);
-            writeZoom(true);
-            setZoomState(true);
-            log("suspend incomplete; restore parked peers before resuming: " + error);
-            resumeNext(1, sceneEpoch);
-        });
-    }
 
-    private void resumeSession() {
-        if (scene != SUSPENDED || !screenOn || root == null || !MiStepEntryGuard.canOpen(ctx)) return;
-        landscapeSuspended = false;
-        scene = RESUMING;
-        final long epoch = ++sceneEpoch;
-        // Read the foreground before showing our overlay or reclaiming any saved task.
-        // A desktop launch while suspended is the user's new main-task choice.
-        if (!executeOnShell(() -> {
-            try {
-                final java.util.Set<Object> foreground = new java.util.HashSet<>();
-                for (Object info : rootInfos()) {
-                    if (RetainedTaskRestorePolicy.preserveAsMain(ordinaryRoot(info, 1),
-                            XposedHelpers.getBooleanField(info, "isVisible"),
-                            XposedHelpers.getBooleanField(info, "isFocused"))) {
-                        foreground.add(XposedHelpers.getObjectField(info, "token"));
-                    }
-                }
-                main.post(() -> {
-                    if (scene != RESUMING || sceneEpoch != epoch) return;
-                    for (Slot saved : slots) {
-                        if (saved.parked && saved.occupied && saved.taskToken != null
-                                && !RetainedTaskRestorePolicy.reclaim(
-                                        saved.occupied, saved.parked, saved.taskToken, foreground)) {
-                            int id = saved.taskId;
-                            TaskWindowState state = saved.windowState;
-                            saved.windowState = null;
-                            clearSlot(saved); // Forget the slot; never remove or move the live task.
-                            if (state != null) { state.slotIndex = SLOT_MAIN; state.active = true; }
-                            log("resume kept desktop foreground task=" + id + " in main; old cell released");
-                        }
-                    }
-                    showResumingSession(epoch);
-                });
-            } catch (Throwable error) {
-                main.post(() -> {
-                    if (scene != RESUMING || sceneEpoch != epoch) return;
-                    scene = SUSPENDED;
-                    log("resume stopped before reclaiming tasks: " + error);
-                });
-            }
-        })) { scene = SUSPENDED; log("resume stopped: no Shell queue"); }
-    }
 
-    private void showResumingSession(long epoch) {
-        if (scene != RESUMING || sceneEpoch != epoch) return;
-        if (!MiStepEntryGuard.canOpen(ctx)) { scene = SUSPENDED; return; }
-        consumePendingMainSide();
-        setWorkspaceAlpha(0f);
-        root.setVisibility(View.VISIBLE);
-        setMirrorLayerVisible(true);
-        main.postDelayed(this::collapseStatusBarPanels, 220L);
-        beginWorkspaceEntry(() -> {
-            if (scene == RESUMING && sceneEpoch == epoch) resumeNext(1, epoch);
-        });
-    }
 
-    private void resumeNext(int index, long epoch) {
-        if (scene != RESUMING || epoch != sceneEpoch) return;
-        if (suspendRequested || !screenOn) {
-            scene = ACTIVE;
-            suspendSession("navigation-during-resume");
-            return;
-        }
-        if (index >= SLOT_COUNT) {
-            scene = ACTIVE;
-            publishDesktopSideTasks();
-            requestCompaction();
-            refreshQuickApps();
-            reassertSideTaskViews("resume complete");
-            log("host resumed from retained task identities: " + describeTasks());
-            finishPendingSuspend();
-            return;
-        }
-        Slot slot = slots[index];
-        if (!slot.occupied || !slot.parked) { resumeNext(index + 1, epoch); return; }
-        LiveTask saved = new LiveTask(slot);
-        adoptExisting(slot, saved, () -> resumeNext(index + 1, epoch), error -> {
-            // External task removal is a real empty cell; a failed admission never launches it.
-            updateHint(slot);
-            log("resume task unavailable; keep existing system task, no relaunch: " + error);
-            resumeNext(index + 1, epoch);
-        });
-    }
 
-    void finishPendingSuspend() {
-        if (suspendRequested && scene == ACTIVE && promotion == null && !transferBusy) {
-            suspendRequested = false;
-            suspendSession("deferred");
-        }
-    }
 
     /** Process-wide hooks, restricted to these exact three view/controller identities. */
     private static final ThreadLocal<java.util.List<MiStepSideClose>> nativeCloses = new ThreadLocal<>();
@@ -2215,7 +1938,7 @@ TopTaskGeometry topGeometry() {
     }
 
 
-    private void setZoomState(boolean on) {
+    void setZoomState(boolean on) {
         zoomed = on;
         HostEntry.setHostZoomed(on);
         MiStepStatusBarSampling.geometryChanged();
@@ -2228,96 +1951,21 @@ TopTaskGeometry topGeometry() {
      * 动画结束后再写一次稳态续租，避免 4 秒租约把进行中的动画取消。
      */
     static final long ZOOM_ANIM_MS = 300L;
-    private android.animation.ValueAnimator workspaceAnimator;
-    private long workspaceGeneration;
-    private float workspaceAlpha = 1f;
+    android.animation.ValueAnimator workspaceAnimator;
+        long workspaceGeneration;
+    float workspaceAlpha = 1f;
     boolean workspaceEntering;
 
-    /** Wait for the real Host buffer/wallpaper before shrinking the existing main surface. */
-    private void beginWorkspaceEntry(Runnable ready) {
-        final long generation = ++workspaceGeneration;
-        workspaceEntering = true;
-        zoomAnimUntil = SystemClock.uptimeMillis() + 1000L;
-        setWorkspaceAlpha(0f);
-        awaitWorkspaceFrame(generation, 0, ready);
-    }
 
-    private void awaitWorkspaceFrame(long generation, int attempt, Runnable ready) {
-        if (generation != workspaceGeneration || root == null || !screenOn
-                || scene != ACTIVE && scene != RESUMING) return;
-        if (wallpaperBackdrop == null && attempt < 24) {
-            main.postDelayed(() -> awaitWorkspaceFrame(generation, attempt + 1, ready), 16L);
-            return;
-        }
-        FrameLayout enteringRoot = root;
-        Runnable start = () -> main.post(() -> {
-            if (generation != workspaceGeneration || root != enteringRoot || !screenOn
-                    || scene != ACTIVE && scene != RESUMING) return;
-            writeZoomAnimated(true);
-            setZoomState(true);
-            scheduleMainCropClear(900L);
-            playWorkspaceFade(true, generation, ready);
-        });
-        if (root.isAttachedToWindow() && root.isHardwareAccelerated()) {
-            root.getViewTreeObserver().registerFrameCommitCallback(start);
-            root.invalidate();
-        } else start.run();
-    }
 
-    /** Fade Host controls and real TaskView surface parents; task buffers are never copied. */
-    private void setWorkspaceAlpha(float value) {
-        workspaceAlpha = Math.max(0f, Math.min(1f, value));
-        if (topBar != null) topBar.setAlpha(workspaceAlpha);
-        if (topCtrl.topTaskPane != null) topCtrl.topTaskPane.setAlpha(workspaceAlpha);
-        if (topStripBacking != null) topStripBacking.setAlpha(workspaceAlpha);
-        Object tx = null;
-        try {
-            for (int i = 1; i < SLOT_COUNT; i++) {
-                LiveSwapVisualLease.writeAlpha(sideBackingViews[i], workspaceAlpha);
-                Slot slot = slots[i];
-                if (slot == null) continue;
-                LiveSwapVisualLease.writeAlpha(slot.hint, workspaceAlpha);
-                Object surface = getSurfaceField(slot.controller, "mSurfaceControl");
-                if (surface == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(surface, "isValid"))) continue;
-                if (tx == null) tx = Class.forName("android.view.SurfaceControl$Transaction").getDeclaredConstructor().newInstance();
-                XposedHelpers.callMethod(tx, "setAlpha", surface, workspaceAlpha);
-            }
-            if (tx != null) XposedHelpers.callMethod(tx, "apply");
-        } catch (Throwable error) { log("workspace surface fade: " + error); }
-        finally { closeSurfaceObject(tx, "close"); }
-    }
 
-    private void playWorkspaceFade(boolean entering, long generation, Runnable complete) {
-        android.animation.ValueAnimator previous = workspaceAnimator;
-        workspaceAnimator = null;
-        if (previous != null) previous.cancel();
-        final float from = entering ? 0f : workspaceAlpha;
-        android.animation.ValueAnimator animator = android.animation.ValueAnimator.ofFloat(from, entering ? 1f : 0f);
-        animator.setDuration(ZOOM_ANIM_MS);
-        animator.setInterpolator(new android.view.animation.PathInterpolator(.34f, .69f, .1f, 1f));
-        animator.addUpdateListener(value -> {
-            if (workspaceAnimator == animator && generation == workspaceGeneration)
-                setWorkspaceAlpha((Float) value.getAnimatedValue());
-        });
-        animator.addListener(new android.animation.AnimatorListenerAdapter() {
-            @Override public void onAnimationEnd(android.animation.Animator value) {
-                if (workspaceAnimator != animator || generation != workspaceGeneration) return;
-                workspaceAnimator = null;
-                if (entering) workspaceEntering = false;
-                setWorkspaceAlpha(entering ? 1f : 0f);
-                if (complete != null) complete.run();
-            }
-        });
-        workspaceAnimator = animator;
-        animator.start();
-    }
     /** 动画期间宿主不得写普通稳态（会取消动画）；心跳按此时间窗跳过。 */
     volatile long zoomAnimUntil;
     long zoomCommandGeneration;
 
     private String zoomOnCommand() { return zoomTransport.zoomOnCommand(); }
 
-    private void writeZoomAnimated(boolean on) { zoomTransport.writeZoomAnimated(on); }
+    void writeZoomAnimated(boolean on) { zoomTransport.writeZoomAnimated(on); }
 
     void writeZoom(boolean on) { zoomTransport.writeZoom(on); }
 
@@ -2527,7 +2175,7 @@ TopTaskGeometry topGeometry() {
     static void endTopGesture(boolean cancelled) { HostTopTaskController.endTopGesture(cancelled); }
     static void onTopTaskState(Intent intent) { HostTopTaskController.onTopTaskState(intent); }
     static boolean ownsTopNativeCaption(Object info) { return HostTopTaskController.ownsTopNativeCaption(info); }
-    private void resetTopForSuspend() { topCtrl.resetTopForSuspend(); }
+    void resetTopForSuspend() { topCtrl.resetTopForSuspend(); }
     private void createTopTaskControls() { topCtrl.createTopTaskControls(); }
     private void updateTopTaskGeometry() { topCtrl.updateTopTaskGeometry(); }
     private void openTopFace(boolean manual) { topCtrl.openTopFace(manual); }
@@ -2978,7 +2626,7 @@ TopTaskGeometry topGeometry() {
                 + " queuedTaskBounds=" + queued + " " + layout.describe());
     }
 
-    private void refreshQuickApps() {
+    void refreshQuickApps() {
         if (topBar == null || root == null) return;
         final MiStepTopBar readyBar = topBar;
         final FrameLayout readyRoot = root;
@@ -2990,65 +2638,15 @@ TopTaskGeometry topGeometry() {
         });
     }
 
-    private void updateTopBarState() {
+    void updateTopBarState() {
         if (workspaceAnimator != null || workspaceAlpha < 1f) return;
         boolean available = scene == ACTIVE && screenOn && !keyguardLocked
                 && promotion == null && !transferBusy;
         if (topBar != null) topBar.setAlpha(available ? 1f : 0.92f);
     }
 
-    private void enterKeyguardPrivacy() {
-        if (topBar != null) topBar.closeQuickAppPicker();
-        keyguardLocked = true;
-        publishDesktopSideTasks();
-        statusBar.restore();
-        hideIme();
-        updateTopBarState();
-        if (root == null) return;
-        if (keyguardMask == null) {
-            View mask = new View(ctx);
-            mask.setBackgroundColor(0xFF000000);
-            mask.setElevation(2200f);
-            root.addView(mask, new FrameLayout.LayoutParams(-1, -1));
-            keyguardMask = mask;
-        }
-        root.requestLayout();
-        log("keyguard privacy shown; retain Mi Step display zoom");
-    }
 
-    private void refreshKeyguardPrivacy() {
-        try {
-            android.app.KeyguardManager km =
-                    (android.app.KeyguardManager) ctx.getSystemService(Context.KEYGUARD_SERVICE);
-            if (km != null && km.isKeyguardLocked()) {
-                enterKeyguardPrivacy();
-                return;
-            }
-        } catch (Throwable error) {
-            log("keyguard state read failed: " + error);
-        }
-        leaveKeyguardPrivacy();
-    }
 
-    private void leaveKeyguardPrivacy() {
-        keyguardLocked = false;
-        publishDesktopSideTasks();
-        if (keyguardMask != null && root != null) {
-            root.removeView(keyguardMask);
-            keyguardMask = null;
-            root.requestLayout();
-        }
-        updateTopBarState();
-        if (scene == ACTIVE && screenOn) {
-            for (Slot slot : slots) {
-                if (slot.occupied && !slot.promoting) {
-                    reapplyScale(slot);
-                    scheduleSideVisibilityRepair(slot);
-                }
-            }
-        }
-        log("keyguard privacy cleared");
-    }
 
 
     /** 只取桌面壁纸做高斯模糊底（不使用应用内容），供顶栏/侧栏格子的液态玻璃使用。 */
@@ -3111,7 +2709,7 @@ TopTaskGeometry topGeometry() {
     }
 
     /** 角部滑动起手在状态栏区域时 MIUI 通知栏/控制中心会被顺带拉出并盖住主区；打开一步后主动收起。 */
-    private void collapseStatusBarPanels() {
+    void collapseStatusBarPanels() {
         try {
             Object sbm = ctx.getSystemService(Context.STATUS_BAR_SERVICE);
             if (sbm == null) return;
@@ -3872,6 +3470,24 @@ TopTaskGeometry topGeometry() {
 
     // ---------------------------------------------------------------- 点击 / 交换
 
+    void launchWhenReady(int slot, String pkg, int attempt) { lifecycle.launchWhenReady(slot, pkg, attempt); }
+    void toggleVisibility() { lifecycle.toggleVisibility(); }
+    void suspendSession(String reason) { lifecycle.suspendSession(reason); }
+    void returnUnboundOwnedCandidates(long epoch, Runnable complete) { lifecycle.returnUnboundOwnedCandidates(epoch, complete); }
+    void returnUnboundOwnedCandidate(OwnedTask candidate, long epoch, int attempt, Runnable complete) { lifecycle.returnUnboundOwnedCandidate(candidate, epoch, attempt, complete); }
+    void parkNext(int index) { lifecycle.parkNext(index); }
+    void resumeSession() { lifecycle.resumeSession(); }
+    void showResumingSession(long epoch) { lifecycle.showResumingSession(epoch); }
+    void resumeNext(int index, long epoch) { lifecycle.resumeNext(index, epoch); }
+    void finishPendingSuspend() { lifecycle.finishPendingSuspend(); }
+    void beginWorkspaceEntry(Runnable ready) { lifecycle.beginWorkspaceEntry(ready); }
+    void awaitWorkspaceFrame(long generation, int attempt, Runnable ready) { lifecycle.awaitWorkspaceFrame(generation, attempt, ready); }
+    void setWorkspaceAlpha(float value) { lifecycle.setWorkspaceAlpha(value); }
+    void playWorkspaceFade(boolean entering, long generation, Runnable complete) { lifecycle.playWorkspaceFade(entering, generation, complete); }
+    void enterKeyguardPrivacy() { lifecycle.enterKeyguardPrivacy(); }
+    void refreshKeyguardPrivacy() { lifecycle.refreshKeyguardPrivacy(); }
+    void leaveKeyguardPrivacy() { lifecycle.leaveKeyguardPrivacy(); }
+
     private void onSlotTapped(int slotIndex) {
         if(slotIndex==SLOT_TOP) { topCtrl.releaseTopTask(true,true,null); return; }
         swapController.onSlotTapped(slotIndex);
@@ -3917,7 +3533,7 @@ TopTaskGeometry topGeometry() {
 
     void closeSwapPreview() { promotionController.closeSwapPreview(); }
 
-    private void closeCellMovePreview() { promotionController.closeCellMovePreview(); }
+    void closeCellMovePreview() { promotionController.closeCellMovePreview(); }
 
     private Object fullscreenExitTransaction(Promotion ticket) throws Exception { return promotionController.fullscreenExitTransaction(ticket); }
 
@@ -4185,7 +3801,7 @@ TopTaskGeometry topGeometry() {
 
     // ---------------------------------------------------------------- 启动 / 关闭任务
 
-    private void launchPackage(int slotIndex, String pkg) {
+    void launchPackage(int slotIndex, String pkg) {
         if (slotIndex <= SLOT_MAIN || slotIndex >= SLOT_COUNT) {
             log("launchPackage bad slot=" + slotIndex);
             return;
@@ -4745,7 +4361,7 @@ TopTaskGeometry topGeometry() {
     private static String appBoundsOf(Object info) { return HostStaticUtil.appBoundsOf(info); }
 
     /** An external fullscreen task can be reordered above our roots without killing them. */
-    private void scheduleSideVisibilityRepair(Slot slot) {
+    void scheduleSideVisibilityRepair(Slot slot) {
         if (!canRender(slot) || scene != ACTIVE || !screenOn || keyguardLocked
                 || slot.promoting || slot.launching
                 || slot.frozen || !slot.occupied || slot.taskVisible || slot.reassertPending) return;
@@ -4808,7 +4424,7 @@ TopTaskGeometry topGeometry() {
     }
 
     /** Idempotently show every live side TaskView after a task-set change. */
-    private void reassertSideTaskViews(String reason) {
+    void reassertSideTaskViews(String reason) {
         final long epoch = sceneEpoch;
         if (!executeOnShell(() -> {
             if (!screenOn || (scene != ACTIVE && scene != RESUMING)
@@ -4862,7 +4478,7 @@ TopTaskGeometry topGeometry() {
                 && token != null && token.equals(slot.taskToken);
     }
 
-    private String describeTasks() {
+    String describeTasks() {
         StringBuilder sb = new StringBuilder();
         for (Slot s : slots) {
             sb.append(" [").append(s.index).append(':')
@@ -4952,7 +4568,7 @@ TopTaskGeometry topGeometry() {
         main.postDelayed(() -> reapplyScale(slot), 1200L);
     }
 
-    private void reapplyScale(Slot slot) {
+    void reapplyScale(Slot slot) {
         if (holdsLiveFlipZoom() || !canRender(slot) || slot.promoting || !slot.occupied || !mayWriteSideSurface(slot)) {
             return;
         }
