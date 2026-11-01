@@ -19,6 +19,7 @@ body=r"""
 package com.jiusis.mistep;
 import java.util.*;
 public class HomeAndSideSurfaceRegression {
+ static final int SLOT_TOP=4;boolean topFace;
  static int checks;
  static void check(boolean v,String why){checks++;if(!v)throw new AssertionError(why);}
  static class ComponentName{final String pkg;ComponentName(String p){pkg=p;}String getPackageName(){return pkg;}}
@@ -40,7 +41,7 @@ public class HomeAndSideSurfaceRegression {
  static class Organizer{Object mLock=new Object();TaskMap mTasks=new TaskMap();}
  static class Controller{Info mTaskInfo;Organizer mTaskOrganizer=new Organizer();Controller(Info i){mTaskInfo=i;mTaskOrganizer.mTasks.entry=new Appeared(i);}}
  static class PendingSidePromotion{boolean desktopLaunch;PendingSidePromotion(boolean d){desktopLaunch=d;}}
- static class Slot{int taskId;Object taskToken;boolean parked;int windowMode=6;Object controller;PendingSidePromotion pendingSidePromotion;}
+ static class Slot{int index=1;int taskId;Object taskToken;boolean parked;int windowMode=6;Object controller;PendingSidePromotion pendingSidePromotion;}
  Slot[] slots={new Slot(),new Slot()}; List<Info> roots=new ArrayList<>();
  List<?> rootInfos(){return roots;}int currentUserId(){return 0;}Iterable<Integer> supportedTaskUsers(){return List.of(0);}
  boolean supportsTaskUser(int id){return id==0;}void updateTaskWindowState(int a,Object b,int c,boolean d){}

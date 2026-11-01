@@ -41,7 +41,7 @@ final class HostSwapController {
      *   空槽 → 不消费，交给宿主点击处理。
      */
     boolean onSlotTouch(int slotIndex, MotionEvent e) {
-        if (slotIndex <= MiStepHost.SLOT_MAIN || slotIndex >= MiStepHost.SLOT_COUNT) return false;
+        if (slotIndex <= MiStepHost.SLOT_MAIN || slotIndex >= MiStepHost.CELL_SLOT_COUNT) return false;
         MiStepHost.Slot slot = h.slots[slotIndex];
         // Our MOVE session owns this pointer even while the task-transfer gate is held.
         if (h.sideDismiss != null && h.sideDismissSlot == slot) return followSideDismiss(slot, e);
@@ -381,13 +381,17 @@ final class HostSwapController {
                                 XposedHelpers.callMethod(shell, "isIdle")))
                             throw new IllegalStateException("workspace or native transition still animating");
                         Object info = h.rootInfo(task);
-                        if (!h.ordinaryRoot(info, 1) || !XposedHelpers.getBooleanField(info, "isVisible"))
+                        if (!h.ordinaryRoot(info, 1) || !h.mainTaskVisible(info))
                             throw new IllegalStateException("collect fullscreen identity changed");
                         candidate.userId = XposedHelpers.getIntField(info, "userId");
                         ticket.collectionHome = h.existingHomeForCollection(task);
+                        Object homeInfo = h.rootInfo(ticket.collectionHome);
+                        if (!h.isHomeRoot(homeInfo) || h.windowModeOf(homeInfo) != 1)
+                            throw new IllegalStateException("collect Home identity changed");
+                        ticket.liveMainUserId = XposedHelpers.getIntField(homeInfo, "userId");
                         h.resetIdleTaskView(slot);
                         accepted = MiStepLiveCollect.start(h.ctx.getClassLoader(), h.transitions,
-                                slot.controller, app, ticket.collectionHome.token, candidate.userId,
+                                slot.controller, app, ticket.collectionHome.token, candidate.userId, ticket.liveMainUserId,
                                 new Rect(0, 0, width, height), hostSurface, slot.cellBackground,
                                 () -> h.externalPromotionCurrent(ticket) && h.layout == geometry,
                                 settled -> h.main.post(() -> prepareCollectHandoff(ticket, settled)),
@@ -638,10 +642,10 @@ final class HostSwapController {
                 liveCellRect(geometry, ticket.slot.index), liveMainRect(target));
         final Object hostSurface;
         final java.util.List<LiveTaskSwapDriver.Peer> peers = new java.util.ArrayList<>();
-        final Object[] cellBackgrounds = new Object[MiStepHost.SLOT_COUNT - 1];
+        final Object[] cellBackgrounds = new Object[MiStepHost.CELL_SLOT_COUNT - 1];
         try {
             hostSurface = liveHostRootSurface();
-            for (int i = 1; i < MiStepHost.SLOT_COUNT; i++) {
+            for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
                 MiStepHost.Slot peer = h.slots[i];
                 cellBackgrounds[i - 1] = peer.cellBackground;
                 if (peer == ticket.slot || !peer.occupied) continue;
@@ -649,9 +653,12 @@ final class HostSwapController {
                         || peer.windowMode != 6 || peer.taskToken == null || peer.controller == null)
                     throw new IllegalStateException("peer not live for flip slot=" + i);
                 ticket.livePeers.add(new MiStepHost.LivePeerBinding(peer));
+                Object peerInfo = h.rootInfo(new MiStepHost.LiveTask(peer));
+                if (!h.ordinaryRoot(peerInfo, 6))
+                    throw new IllegalStateException("peer user or identity changed slot=" + i);
                 peers.add(new LiveTaskSwapDriver.Peer(new LiveSwapGeometry.Task(peer.taskId,
                         peer.taskToken, width, height, liveCellRect(geometry, i), liveCellRect(target, i)),
-                        peer.controller));
+                        peer.controller, XposedHelpers.getIntField(peerInfo, "userId")));
             }
             ticket.liveBackdrop = MiStepLiveBackdrop.create(hostSurface, h.wallpaperBackdrop, width, height,
                     // Include the h.main/side gap while its normal Host backing is hidden.
@@ -681,7 +688,7 @@ final class HostSwapController {
             oldSide.recoveryCandidate = true;
         }
         ticket.liveVisual = new MiStepHost.LiveSwapVisualLease(h.sideBackingViews[ticket.slot.index], ticket.slot.hint);
-        for (int i = 1; i < MiStepHost.SLOT_COUNT; i++) if (i != ticket.slot.index)
+        for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) if (i != ticket.slot.index)
             ticket.peerVisuals.add(new MiStepHost.LiveSwapVisualLease(h.sideBackingViews[i], h.slots[i].hint));
         if (!setLiveSwapInputBlocked(true)) {
             h.failPromotion(ticket, "transition input window unavailable"); return;
@@ -702,12 +709,16 @@ final class HostSwapController {
                                 XposedHelpers.callMethod(shellTransitions, "isIdle")))
                             throw new IllegalStateException("workspace or native transition still animating");
                         Object info = h.rootInfo(first);
-                        if (info == null) throw new IllegalStateException("live main task disappeared");
+                        Object sideInfo = h.rootInfo(new MiStepHost.LiveTask(ticket.slot));
+                        if (!h.ordinaryRoot(info, 1) || !h.ordinaryRoot(sideInfo, 6))
+                            throw new IllegalStateException("live main/side identity changed");
                         int user = XposedHelpers.getIntField(info, "userId");
+                        int sideUser = XposedHelpers.getIntField(sideInfo, "userId");
                         ticket.previousMainCandidate.userId = user;
-                        if (oldSide != null) oldSide.userId = user;
+                        if (oldSide != null) oldSide.userId = sideUser;
+                        ticket.liveMainUserId = sideUser;
                         h.traceSwapEvent("before-single-native-transition");
-                        LiveTaskSwapDriver.Flip request = new LiveTaskSwapDriver.Flip(a, b, user,
+                        LiveTaskSwapDriver.Flip request = new LiveTaskSwapDriver.Flip(a, b, user, sideUser,
                                 new Rect(0, 0, width, height), hostSurface, oldZoom, targetZoom,
                                 (zoom, done) -> applyLiveZoom(ticket, zoom, done),
                                 (zoom, restoring, done) -> applyLiveMainLayout(ticket, zoom, restoring, done),
@@ -737,7 +748,7 @@ final class HostSwapController {
         try {
             canvas.scale((float) h.wallpaperBackdrop.getWidth() / original.width,
                     (float) h.wallpaperBackdrop.getHeight() / original.height);
-            for (int i = 1; i < MiStepHost.SLOT_COUNT; i++) {
+            for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
                 MiStepHost.Slot slot = h.slots[i];
                 boolean revealed = (revealEmptySlots & (1 << i)) != 0;
                 if (slot.hint == null || (!revealed
@@ -822,11 +833,15 @@ final class HostSwapController {
                                 XposedHelpers.callMethod(shell, "isIdle")))
                             throw new IllegalStateException("workspace or native transition still animating");
                         Object info = h.rootInfo(new MiStepHost.LiveTask(ticket.slot));
-                        if (info == null) throw new IllegalStateException("live Home app disappeared");
+                        Object homeInfo = h.rootInfo(ticket.homeBeforeCover);
+                        if (!h.ordinaryRoot(info, 6) || !h.isHomeRoot(homeInfo) || h.windowModeOf(homeInfo) != 1)
+                            throw new IllegalStateException("live Home/app identity changed");
                         int user = XposedHelpers.getIntField(info, "userId");
+                        int homeUser = XposedHelpers.getIntField(homeInfo, "userId");
+                        ticket.liveMainUserId = user;
                         if (owned != null) owned.userId = user;
                         LiveTaskSwapDriver.Home request = new LiveTaskSwapDriver.Home(app,
-                                ticket.homeBeforeCover.id, ticket.homeBeforeCover.token, user,
+                                ticket.homeBeforeCover.id, ticket.homeBeforeCover.token, user, homeUser,
                                 new Rect(0, 0, width, height), hostSurface, zoom,
                                 new Object[]{ticket.slot.cellBackground}, ticket.liveBackdrop);
                         accepted = LiveTaskSwapDriver.startHome(h.ctx.getClassLoader(), h.transitions,
@@ -1037,7 +1052,8 @@ final class HostSwapController {
         if (ticket.nativeCollect && home == null) return PromotionFocusTransfer.Result.UNAVAILABLE;
         final int id = home == null ? ticket.taskId : home.id;
         final Object token = home == null ? ticket.token : home.token;
-        final int user = h.currentUserId();
+        final int user = ticket.liveMainUserId;
+        if (user < 0) return PromotionFocusTransfer.Result.UNAVAILABLE;
         Object service = XposedHelpers.callStaticMethod(
                 Class.forName("android.app.ActivityTaskManager"), "getService");
         java.util.List<?> roots = (java.util.List<?>) XposedHelpers.callMethod(service, "getAllRootTaskInfos");
@@ -1060,7 +1076,7 @@ final class HostSwapController {
                     return new PromotionFocusTransfer.State(XposedHelpers.getObjectField(info, "token"),
                             XposedHelpers.getIntField(info, "displayId"),
                             XposedHelpers.getIntField(info, "userId"), h.windowModeOf(info),
-                            XposedHelpers.getBooleanField(info, "isVisible"),
+                            h.mainTaskVisible(info),
                             XposedHelpers.getBooleanField(info, "isFocused"));
                 }
                 return null;

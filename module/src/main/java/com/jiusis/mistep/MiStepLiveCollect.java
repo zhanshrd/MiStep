@@ -20,7 +20,7 @@ final class MiStepLiveCollect implements MiStepLiveSwapSession.Scene {
     private final float scale;
     private final Object homeToken;
     private final Object collectedToken;
-    private final int userId;
+    private final int homeUserId;
     private final float mainScale, mainX, mainY;
     private Object homeSurface, homeTransitionRoot;
     private int rootX, rootY;
@@ -35,10 +35,17 @@ final class MiStepLiveCollect implements MiStepLiveSwapSession.Scene {
             Object homeToken, int userId, Rect logical, Object hostRoot, Object background,
             BooleanSupplier current, Consumer<Consumer<Boolean>> handoff,
             Consumer<MiStepLiveSwap.Result> done, Consumer<String> log) {
+        return start(loader, taskViews, controller, geometry, homeToken, userId, userId,
+                logical, hostRoot, background, current, handoff, done, log);
+    }
+    static boolean start(ClassLoader loader, Object taskViews, Object controller, LiveSwapGeometry.Task geometry,
+            Object homeToken, int appUserId, int homeUserId, Rect logical, Object hostRoot, Object background,
+            BooleanSupplier current, Consumer<Consumer<Boolean>> handoff,
+            Consumer<MiStepLiveSwap.Result> done, Consumer<String> log) {
         synchronized (ACTIVE) { if (ACTIVE.containsKey(controller)) return false; }
         MiStepLiveCollect run = null;
         try {
-            run = new MiStepLiveCollect(loader, taskViews, controller, geometry, homeToken, userId,
+            run = new MiStepLiveCollect(loader, taskViews, controller, geometry, homeToken, appUserId, homeUserId,
                     logical, hostRoot, background, current, handoff, done, log);
             if (!current.getAsBoolean() || !run.task.preflight()) return false;
             Object wct = run.task.windowTransaction(false, false);
@@ -56,11 +63,12 @@ final class MiStepLiveCollect implements MiStepLiveSwapSession.Scene {
         return false;
     }
     private MiStepLiveCollect(ClassLoader loader, Object taskViews, Object controller, LiveSwapGeometry.Task geometry,
-            Object homeToken, int userId, Rect logical, Object hostRoot, Object background,
+            Object homeToken, int appUserId, int homeUserId, Rect logical, Object hostRoot, Object background,
             BooleanSupplier current, Consumer<Consumer<Boolean>> handoff,
             Consumer<MiStepLiveSwap.Result> done, Consumer<String> log) throws Exception {
         this.controller = controller; this.hostRoot = hostRoot; this.background = background;
-        this.homeToken = homeToken; this.collectedToken = geometry.token; this.userId = userId;
+        if (appUserId < 0 || homeUserId < 0) throw new IllegalArgumentException("collect users missing");
+        this.homeToken = homeToken; this.collectedToken = geometry.token; this.homeUserId = homeUserId;
         mainScale = (float) (geometry.start.width / geometry.bufferWidth);
         if (Math.abs(mainScale - geometry.start.height / geometry.bufferHeight) > .003)
             throw new IllegalStateException("collect Home requires uniform main transform");
@@ -75,7 +83,7 @@ final class MiStepLiveCollect implements MiStepLiveSwapSession.Scene {
                 || XposedHelpers.getIntField(areaInfo, "displayId") != 0 || !MiStepLiveHomeTask.valid(hostRoot))
             throw new IllegalStateException("collect real parent unavailable");
         task = new MiStepLiveCollectTask(organizer, taskViews, controller, geometry.id, geometry.token,
-                homeToken, userId, logical, XposedHelpers.callMethod(area, "getDisplayAreaLeash", 0), log);
+                homeToken, appUserId, logical, XposedHelpers.callMethod(area, "getDisplayAreaLeash", 0), log);
         scale = (float) (geometry.end.width / geometry.bufferWidth);
         if (Math.abs(scale - geometry.end.height / geometry.bufferHeight) > .003)
             throw new IllegalStateException("collect requires uniform task buffer");
@@ -95,7 +103,8 @@ final class MiStepLiveCollect implements MiStepLiveSwapSession.Scene {
                 continue;
             }
             if (homeSurface != null || XposedHelpers.getIntField(home, "displayId") != 0
-                    || XposedHelpers.getIntField(home, "userId") != userId
+                    || XposedHelpers.getIntField(home, "userId") != homeUserId
+                    || Boolean.TRUE.equals(XposedHelpers.callMethod(home, "hasParentTask"))
                     || !Integer.valueOf(2).equals(XposedHelpers.callMethod(home, "getActivityType"))
                     || !Integer.valueOf(1).equals(XposedHelpers.callMethod(home, "getWindowingMode")))
                 throw new IllegalStateException("collect Home transition identity changed");

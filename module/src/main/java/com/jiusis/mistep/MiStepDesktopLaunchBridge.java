@@ -22,6 +22,7 @@ final class MiStepDesktopLaunchBridge {
         final long sequence;
         final ArrayList<Bundle> rows;
         final ArrayList<Bundle> recentsRows;
+        Bundle topInput;
         long lastAt;
         int lastTask = -1;
         Registry(IBinder owner, long sequence, ArrayList<Bundle> rows, ArrayList<Bundle> recentsRows) {
@@ -29,7 +30,10 @@ final class MiStepDesktopLaunchBridge {
         }
         public void binderDied() {
             synchronized (MiStepDesktopLaunchBridge.class) {
-                if (current == this) current = null;
+                if (current == this) {
+                    current = null;
+                    NativeRawInputBridge.updateTop(-1, 1);
+                }
             }
         }
     }
@@ -48,11 +52,36 @@ final class MiStepDesktopLaunchBridge {
                     || rows == null || rows.size() > 3 || recents == null || recents.size() > 3) return;
             if (current != null && current.owner.equals(owner) && sequence <= current.sequence) return;
             Registry next = new Registry(owner, sequence, new ArrayList<>(rows), new ArrayList<>(recents));
+            next.topInput = state.getBundle("topInput");
             owner.linkToDeath(next, 0);
             Registry old = current;
             current = next;
             if (old != null) old.owner.unlinkToDeath(old, 0);
         } catch (Throwable unavailable) { /* Reject an incomplete registration. */ }
+    }
+
+    /** Reuse the protected scene lease; never put TOP in desktop promotion rows. */
+    static void refreshTopInput(Object service) {
+        Registry state;
+        synchronized (MiStepDesktopLaunchBridge.class) { state = current; }
+        int uid = -1;
+        float scale = 1;
+        try {
+            synchronized (XposedHelpers.getObjectField(service, "mGlobalLock")) {
+                if (state != null && state.owner.isBinderAlive() && state.topInput != null) {
+                    uid = MiStepTopRawInput.uid(state.topInput, service.getClass().getClassLoader());
+                    if (uid >= 10000) scale = state.topInput.getFloat("scale", 1);
+                }
+            }
+        } catch (Throwable stale) { uid = -1; }
+        synchronized (MiStepDesktopLaunchBridge.class) {
+            if (current != state || state == null || !state.owner.isBinderAlive()) {
+                // A newer receiver owns its own update; do not erase it from an older call.
+                if (current != state) return;
+                uid = -1;
+            }
+            NativeRawInputBridge.updateTop(uid, scale);
+        }
     }
 
     /** The existing protected registry also identifies recents exceptions by exact token. */
@@ -84,7 +113,13 @@ final class MiStepDesktopLaunchBridge {
     }
 
     static boolean before(Context context, Object atms, Object[] args) {
+        return before(context, atms, args, (Integer) XposedHelpers.callStaticMethod(
+                UserHandle.class, "getUserId", Binder.getCallingUid()));
+    }
+
+    static boolean before(Context context, Object atms, Object[] args, int launchUser) {
         if (context == null || atms == null || args == null) return false;
+        if (launchUser < 0) return false;
         try {
             int uid = Binder.getCallingUid();
             String[] callers = context.getPackageManager().getPackagesForUid(uid);
@@ -107,8 +142,7 @@ final class MiStepDesktopLaunchBridge {
             Bundle found = null;
             for (Bundle row : state.rows) {
                 if (!pkg.equals(row.getString("package"))
-                        || row.getInt("userId", -1) != (Integer) XposedHelpers.callStaticMethod(
-                                UserHandle.class, "getUserId", uid)
+                        || row.getInt("userId", -1) != launchUser
                         || row.getInt("displayId", -1) != 0) continue;
                 if (found != null) return false;
                 found = row;

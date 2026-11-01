@@ -10,7 +10,7 @@ final class CornerSwipe {
             int width, int height, int rotation, int regionPx, int sweepPx,
             int maxVerticalDriftPx) {
         reset();
-        if (count != 1 || width < 640 || height <= 320 || x < 0 || x >= width
+        if (count != 1 || width < 640 || height <= 0 || x < 0 || x >= width
                 || y < 0 || y >= regionPx) return;
         if (x < regionPx) sign = 1;
         else if (x >= width - regionPx) sign = -1;

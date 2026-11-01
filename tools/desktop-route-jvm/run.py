@@ -77,11 +77,20 @@ public class DesktopRouteRegression {
   h=new DesktopRouteRegression();h.ctx.pm.packages=new String[]{"other"};check(!h.recent(7),"Recents untrusted caller rejected");
   h=new DesktopRouteRegression();h.register(new ArrayList<>());check(!h.recent(7),"inactive registry cannot route Recents");
   h=new DesktopRouteRegression();h.ctx.fail=true;check(!h.recent(7),"failed Recents handoff stays native");h.ctx.fail=false;check(h.recent(7)&&h.ctx.sent.size()==1,"retry after enqueue failure really dispatches");
+  h=new DesktopRouteRegression();h.task.info.userId=999;h.row.putInt("userId",999);h.register(new ArrayList<>(List.of(h.row)));
+  check(!h.route(),"owner icon cannot route a clone side task");
+  check(MiStepDesktopLaunchBridge.before(h.ctx,h.atms,new Object[]{"com.miui.home",h.entry},999),"explicit clone launcher user routes its own task");
+  check(h.ctx.sent.get(0).getBundleExtra("binding").getInt("userId")==999,"clone handoff retains user");
+  h=new DesktopRouteRegression();check(!MiStepDesktopLaunchBridge.before(h.ctx,h.atms,new Object[]{"com.miui.home",h.entry},999),"clone icon cannot route owner task");
+  check(!MiStepDesktopLaunchBridge.before(h.ctx,h.atms,new Object[]{"com.miui.home",h.entry},-1),"unknown launch user stays native");
   System.out.println("actual desktop route checks="+checks+" passed");
  }
 }
 '''
 }
+files['android/os/Bundle.java']=files['android/os/Bundle.java'].replace('Map<String,Object>m=', 'public Bundle getBundle(String k){return (Bundle)m.get(k);}public float getFloat(String k,float d){return m.containsKey(k)?(Float)m.get(k):d;} Map<String,Object>m=')
+files['com/jiusis/mistep/NativeRawInputBridge.java']='package com.jiusis.mistep;class NativeRawInputBridge {static void updateTop(int uid,float scale){}}'
+files['com/jiusis/mistep/MiStepTopRawInput.java']='package com.jiusis.mistep;import android.os.Bundle;class MiStepTopRawInput {static int uid(Bundle b,ClassLoader l){return -1;}}'
 for name, text in files.items():
     path=out/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(text,encoding='utf8')
 jdk=Path(os.environ["MISTEP_JAVA_BIN"])

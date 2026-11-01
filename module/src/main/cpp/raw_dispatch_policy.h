@@ -22,6 +22,11 @@ struct Zoom {
     int display_rotation = -1;
 };
 
+struct TopInput {
+    int uid = -1;
+    float scale = 1;
+};
+
 template <typename T> inline T read(const void* address, size_t offset) {
     T value;
     std::memcpy(&value, static_cast<const uint8_t*>(address) + offset, sizeof(T));
@@ -98,8 +103,10 @@ using Publish = int (*)(void*, void*, void*);
 // The original function signs and publishes this same temporary raw matrix.
 // Restore it even on a failed/retried publish; never touch the local matrix/samples.
 inline int publish(Publish original, void* dispatcher, void* connection, void* entry,
-        const Zoom& zoom, bool* remapped = nullptr) {
+        const Zoom& zoom, bool* remapped = nullptr, const TopInput& top = {},
+        bool top_uid_layout = false, bool* top_remapped = nullptr) {
     if (remapped) *remapped = false;
+    if (top_remapped) *top_remapped = false;
     if (zoom.scale > 0 && zoom.scale < 1 && entry != nullptr) {
         const void* event = read<const void*>(entry, 0x8);
         if (event != nullptr && read<int32_t>(event, 0xc) == 3
@@ -110,12 +117,18 @@ inline int publish(Publish original, void* dispatcher, void* connection, void* e
             const Transform local = read<Transform>(entry, 0x1c);
             const Transform raw = read<Transform>(entry, 0x44);
             Transform corrected;
-            if (corrected_raw(zoom, local, raw, corrected)) {
+            // targetUid +0x84 is verified on both exact-hash gated ROM profiles.
+            // A dialog has a moving local origin, so preserve raw's absolute origin.
+            const bool upper = top_uid_layout && top.uid >= 10000
+                    && read<int32_t>(entry, 0x84) == top.uid
+                    && corrected_raw({top.scale, 0, 0}, local, raw, corrected);
+            if (upper || corrected_raw(zoom, local, raw, corrected)) {
                 auto* target = static_cast<uint8_t*>(entry) + 0x44;
                 std::memcpy(target, &corrected, sizeof(corrected));
                 const int result = original(dispatcher, connection, entry);
                 std::memcpy(target, &raw, sizeof(raw));
                 if (remapped) *remapped = true;
+                if (top_remapped) *top_remapped = upper;
                 return result;
             }
         }

@@ -39,25 +39,26 @@ public class WorkspaceRegression {
  static class SideDismiss {boolean isTracking(){return false;}void settle(boolean b){}}
  SideDismiss sideDismiss;
  static int checks;static void check(boolean b,String m){checks++;if(!b)throw new AssertionError(m);}
- static class View {static final int VISIBLE=0,GONE=8;float alpha=1;void setAlpha(float v){alpha=v;}}
+ static class View {static final int VISIBLE=0,GONE=8;float alpha=1;int pickerCloses;void setAlpha(float v){alpha=v;}void closeQuickAppPicker(){pickerCloses++;}}
  static class Observer {Runnable frame;void registerFrameCommitCallback(Runnable r){frame=r;}}
  static class FrameLayout extends View {Observer observer=new Observer();boolean attached=true,hardware=true;int invalidates;
   boolean isAttachedToWindow(){return attached;}boolean isHardwareAccelerated(){return hardware;}Observer getViewTreeObserver(){return observer;}void invalidate(){invalidates++;}void draw(){Runnable r=observer.frame;observer.frame=null;if(r!=null)r.run();}}
  static class Queue {List<Runnable>q=new ArrayList<>();void post(Runnable r){q.add(r);}void postDelayed(Runnable r,long d){q.add(r);}void flush(){while(!q.isEmpty())q.remove(0).run();}}
  static class Controller {SurfaceControl surface=new SurfaceControl();Object token=new Object();}
- static class Slot {int taskId=1;Object taskToken;boolean occupied=true,parked,promoting,launching;Controller controller=new Controller();View hint=new View(),view=new View();Slot(){taskToken=controller.token;}}
+ static class Slot {int index=1;int taskId=1;Object taskToken;boolean occupied=true,parked,promoting,launching;Controller controller=new Controller();View hint=new View(),view=new View();Slot(){taskToken=controller.token;}}
  static class Bitmap {void recycle(){}}
  static class StatusBar {void restore(){}}
  static class Clipboard {void close(){}}static class MiStepClipboard {static Clipboard get(Object c){return new Clipboard();}}
  static class SystemClock {static long uptimeMillis(){return 10000;}}
  static class Promotion {boolean nativeSwap,cancelled;}
- static final int ACTIVE=1,RESUMING=2,SUSPENDING=3,SUSPENDED=4,SLOT_COUNT=4,SLOT_MAIN=0;static final long ZOOM_ANIM_MS=300;
- FrameLayout root=new FrameLayout();View topBar=new View(),topStripBacking=new View();View[]sideBackingViews={null,new View(),new View(),new View()};Slot[]slots={new Slot(),new Slot(),new Slot(),new Slot()};
+ static final int ACTIVE=1,RESUMING=2,SUSPENDING=3,SUSPENDED=4,SLOT_COUNT=4,SLOT_MAIN=0,SLOT_TOP=4;static final long ZOOM_ANIM_MS=300;
+ FrameLayout root=new FrameLayout();View topBar=new View(),topStripBacking=new View(),topTaskPane=new View();boolean topFace;View[]sideBackingViews={null,new View(),new View(),new View()};Slot[]slots={new Slot(),new Slot(),new Slot(),new Slot()};
  static class CellMotion{void finish(){}}
  Queue main=new Queue();Object ctx=new Object();CellMotion cellMotion;StatusBar statusBar=new StatusBar();Promotion promotion;Bitmap mainBackdrop,wallpaperBackdrop=new Bitmap();
   boolean screenOn=true,zoomed=true,suspendRequested,landscapeSuspended,transferBusy,workspaceEntering;int scene=ACTIVE,zoomWrites,parks,returns,ready;long sceneEpoch=1,workspaceGeneration,zoomAnimUntil;
  android.animation.ValueAnimator workspaceAnimator;float workspaceAlpha=1f;
  void writeZoomAnimated(boolean on){zoomWrites++;}void writeZoom(boolean on){zoomWrites++;}void setZoomState(boolean on){zoomed=on;}void scheduleMainCropClear(long d){}void publishDesktopSideTasks(){}
+ void resetTopForSuspend(){}
  void closeSwapPreview(){}void closeCellMovePreview(){}void restoreCarrierToMain(){}void hideIme(){}void log(String s){}void failPromotion(Promotion p,String s){}
  void returnUnboundOwnedCandidates(long epoch,Runnable r){returns++;r.run();}void parkNext(int i){parks++;}
  Object getSurfaceField(Object o,String n){return o==null?null:((Controller)o).surface;}
@@ -74,6 +75,7 @@ public class WorkspaceRegression {
   h=new WorkspaceRegression();h.beginWorkspaceEntry(null);h.scene=SUSPENDING;h.root.draw();h.main.flush();check(h.zoomWrites==0,"stale entry cannot shrink a closing workspace");
   h=new WorkspaceRegression();h.wallpaperBackdrop=null;h.beginWorkspaceEntry(null);check(h.root.observer.frame==null&&!h.main.q.isEmpty(),"entry waits for wallpaper instead of showing a black surround");h.wallpaperBackdrop=new Bitmap();h.main.flush();check(h.root.observer.frame!=null,"wallpaper readiness schedules real frame gate");
   h=new WorkspaceRegression();h.suspendSession("test");check(h.scene==SUSPENDING&&h.zoomWrites==1&&h.returns==0,"exit does not hand tasks back during real zoom");
+  check(h.topBar.pickerCloses==1,"exit closes the shortcut editor before task handback");
   Object owner=h.slots[1].taskToken;h.workspaceAnimator.tick(.5f);check(h.slots[1].controller.surface.alpha==.5f&&h.slots[1].taskToken==owner,"exit fades real content without changing owner");
   h.workspaceAnimator.end();check(h.returns==1&&h.parks==1&&h.workspaceAlpha==0,"task handback starts only after fade finishes");
   h=new WorkspaceRegression();h.playWorkspaceFade(true,0,()->{throw new AssertionError("stale entry completed");});var old=h.workspaceAnimator;old.tick(.4f);h.workspaceGeneration++;h.playWorkspaceFade(false,1,null);float beforeLate=h.workspaceAlpha;old.tick(.8f);old.end();check(h.workspaceAlpha==beforeLate,"cancelled animator cannot alter new exit");

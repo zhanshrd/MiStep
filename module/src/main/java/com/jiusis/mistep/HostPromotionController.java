@@ -131,7 +131,15 @@ final class HostPromotionController {
         XposedHelpers.callMethod(wct, "setAlwaysOnTop", token, false);
         XposedHelpers.callMethod(wct, "setFocusable", token, true);
         XposedHelpers.callMethod(wct, "setBounds", token, new Rect());
-        XposedHelpers.callMethod(wct, "setForceTranslucent", token, false);
+        if (ticket.slot.index == MiStepHost.SLOT_TOP) {
+            XposedHelpers.callMethod(wct, "setAppBounds", token, (Object) null);
+            XposedHelpers.callMethod(wct, "setScreenSizeDp", token, 0, 0);
+            XposedHelpers.callMethod(wct, "setSmallestScreenWidthDp", token, 0);
+            XposedHelpers.callMethod(wct, "setDensityDpi", token, 0);
+        }
+        // Keep the actual desktop/app below visible while the returning live surface is small.
+        // Surface scaling alone does not prevent WM from occluding that underlying task.
+        XposedHelpers.callMethod(wct, "setForceTranslucent", token, ticket.liveMainReveal);
         XposedHelpers.callMethod(wct, "setHidden", token, false);
         XposedHelpers.callMethod(wct, "setTaskTrimmableFromRecents", token, true);
         XposedHelpers.callMethod(wct, "reorder", token, !ticket.background);
@@ -217,8 +225,17 @@ final class HostPromotionController {
             try {
                 // Prepare every surface operation before changing listener ownership.
                 XposedHelpers.callMethod(area, "reparentToDisplayArea", 0, canonical, tx);
-                XposedHelpers.callMethod(tx, "setMatrix", canonical, 1f, 0f, 0f, 1f);
-                XposedHelpers.callMethod(tx, "setPosition", canonical, 0f, 0f);
+                boolean liveCenterReveal=ticket.liveMainReveal && h.topTransition!=null;
+                ticket.liveMainReveal=liveCenterReveal;
+                float initialScale=liveCenterReveal
+                        ?TopTaskReturnPolicy.CENTER_START_SCALE:1f;
+                float initialX=liveCenterReveal
+                        ?TopTaskReturnPolicy.centeredOffset(h.screenW,initialScale):0f;
+                float initialY=liveCenterReveal
+                        ?TopTaskReturnPolicy.centeredOffset(h.screenH,initialScale):0f;
+                XposedHelpers.callMethod(tx, "setMatrix", canonical,
+                        initialScale, 0f, 0f, initialScale);
+                XposedHelpers.callMethod(tx, "setPosition", canonical, initialX, initialY);
                 XposedHelpers.callMethod(tx, "setWindowCrop", canonical,
                         new Rect(0, 0, h.screenW, h.screenH));
                 XposedHelpers.callMethod(tx, "setAlpha", canonical, 1f);
@@ -233,6 +250,10 @@ final class HostPromotionController {
                     }
                 }
                 XposedHelpers.callMethod(tx, "apply");
+                if(liveCenterReveal) {
+                    ticket.liveRevealSurface=canonical;
+                    h.topTransition.setLiveSurface(canonical);
+                }
                 // Native removeListener hands off to fallback but does not notify the old owner.
                 // This native callback retires/release its own copied handle, never canonical.
                 if (owner == TaskHandoffPolicy.Owner.OUR_CONTROLLER) {
@@ -376,7 +397,7 @@ final class HostPromotionController {
         if (ticket.nativeCollect && home == null) { complete.run(); return; }
         final int focusId = home == null ? ticket.taskId : home.id;
         final Object focusToken = home == null ? ticket.token : home.token;
-        final int focusUser = h.currentUserId();
+        final int focusUser = ticket.liveMainUserId >= 0 ? ticket.liveMainUserId : h.currentUserId();
         if (h.scene != MiStepHost.ACTIVE || h.suspendRequested || !h.screenOn) {
             complete.run();
             return;
@@ -400,7 +421,7 @@ final class HostPromotionController {
                                         XposedHelpers.getObjectField(info, "token"),
                                         XposedHelpers.getIntField(info, "displayId"),
                                         XposedHelpers.getIntField(info, "userId"), h.windowModeOf(info),
-                                        XposedHelpers.getBooleanField(info, "isVisible"),
+                                        h.mainTaskVisible(info),
                                         XposedHelpers.getBooleanField(info, "isFocused"));
                             }
                             return null;
@@ -500,7 +521,8 @@ final class HostPromotionController {
                 Object rollback = Class.forName("android.window.WindowContainerTransaction")
                         .getDeclaredConstructor().newInstance();
                 XposedHelpers.callMethod(rollback, "setWindowingMode", ticket.token, 6);
-                XposedHelpers.callMethod(rollback, "setBounds", ticket.token, h.logicalBounds());
+                XposedHelpers.callMethod(rollback, "setBounds", ticket.token, h.logicalBounds(slot));
+                h.applyTopConfiguration(rollback, ticket.token, slot);
                 XposedHelpers.callMethod(rollback, "setForceTranslucent", ticket.token, true);
                 XposedHelpers.callMethod(rollback, "setAlwaysOnTop", ticket.token, true);
                 XposedHelpers.callMethod(rollback, "setFocusable", ticket.token, true);
@@ -549,6 +571,22 @@ final class HostPromotionController {
             }
         }
         return true;
+    }
+
+    /** A wedged live reveal must never leave the desktop translucent behind the returned app. */
+    void restoreTopMainOpacity(MiStepHost.Promotion ticket) {
+        if(!h.executeOnShell(()->{
+            try {
+                Object info=h.rootInfo(new MiStepHost.LiveTask(ticket.taskId,ticket.token,ticket.slot.pkg));
+                // A late completion must not change a newly adopted freeform task.
+                if(!h.ordinaryRoot(info,1))return;
+                Object wct=Class.forName("android.window.WindowContainerTransaction")
+                        .getDeclaredConstructor().newInstance();
+                XposedHelpers.callMethod(wct,"setForceTranslucent",ticket.token,false);
+                if(!h.applyWct("upper-live-main-opacity-restore",wct))
+                    MiStepHost.log("upper live main opacity restore not committed task="+ticket.taskId);
+            } catch(Throwable error) {MiStepHost.log("upper live main opacity restore: "+error);}
+        }))MiStepHost.log("upper live main opacity restore unavailable: no Shell queue");
     }
 
     void bindTask(MiStepHost.Slot slot, int taskId, Object token) {

@@ -38,6 +38,8 @@ final class MiStepSystemUiRotation {
         int type = XposedHelpers.getIntField(attrs, "type");
         if (type == 2011 || type == 2012 || imeWindow(window)) return true;
         if (!"com.android.systemui".equals(XposedHelpers.getObjectField(attrs, "packageName"))) return false;
+        if (type == 2017 && "MiStepQuickAppPicker".contentEquals(
+                (CharSequence) XposedHelpers.callMethod(attrs, "getTitle"))) return false;
         return type == 2000 || type == 2019 || type == 2040 || type == 2008 || type == 2014
                 || type == 2017 || type == 2020 || type == 2024;
     }

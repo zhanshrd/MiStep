@@ -60,6 +60,7 @@ public class DisplayRefreshRegression {
  int sideSegmentTop(int i){return 0;}int sideSegmentHeight(int i){return 0;}
  void applyWallpaperBackdrops(){}void reassertCarrier(){}void writeZoom(boolean value){writes++;}
  boolean executeOnShell(Runnable r){return true;}void applyFullscreenBounds(Slot s){}void reapplyScale(Slot s){}
+ int[] slotBounds(Slot slot){return layout.cellBounds(slot.index-1);}
  __METHOD__
  static DisplayRefreshRegression live(){return new DisplayRefreshRegression();}
  public static void main(String[] args){

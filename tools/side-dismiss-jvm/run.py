@@ -19,7 +19,7 @@ package com.jiusis.mistep;
 import java.util.function.Consumer;
 public class SideDismissRegression {
  static int checks; static void check(boolean b,String why){checks++;if(!b)throw new AssertionError(why);}
- static final int SLOT_MAIN=0,SLOT_COUNT=4,ACTIVE=1;
+ static final int SLOT_MAIN=0,SLOT_COUNT=4,CELL_SLOT_COUNT=4,ACTIVE=1;
  int scene=ACTIVE,taps,compactions,returns,clears;long sceneEpoch=1;
  boolean screenOn=true,keyguardLocked,transferBusy,mainOnRight,compactPending,front;
  Object promotion,cellMotion; Context ctx=new Context(); Slot[] slots={new Slot(),new Slot(),new Slot(),new Slot()};

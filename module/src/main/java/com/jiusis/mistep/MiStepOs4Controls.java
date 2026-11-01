@@ -86,7 +86,8 @@ final class MiStepOs4Controls {
         Object binding = inflate("QsTileItemViewBinding");
         ViewGroup root = (ViewGroup) XposedHelpers.callMethod(binding, "getRoot");
         Class<?> iconType = XposedHelpers.findClass("miui.systemui.controlcenter.qs.tileview.QSTileItemIconView", context.getClassLoader());
-        View icon = (View) XposedHelpers.newInstance(iconType, context, system, false, false);
+        View icon = (View) XposedHelpers.newInstance(iconType, MiStepNativeIconContext.wrap(context),
+                MiStepNativeIconContext.wrap(system), false, false);
         XposedHelpers.callMethod(root, "init", icon);
         root.setContentDescription(label);
         root.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
@@ -125,22 +126,13 @@ final class MiStepOs4Controls {
                 captionLp.topMargin = captionTop;
                 text.setLayoutParams(captionLp);
             }
-            TileStyle style = (TileStyle) root.getTag();
-            if (style != null && style.codeImage != null) {
-                FrameLayout.LayoutParams glyphLp =
-                        new FrameLayout.LayoutParams(dp(system, 36), dp(system, 36),
-                                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-                glyphLp.topMargin = top;
-                style.codeImage.setLayoutParams(glyphLp);
-                style.codeImage.bringToFront();
-            }
         });
         icon.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
         icon.setScaleX(1f);
         icon.setScaleY(1f);
         icon.setClickable(false);
         icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        root.setTag(new TileStyle(system, label, icon, frame, root, action, iconOnly));
+        root.setTag(new TileStyle(system, label, icon, frame, root, iconOnly));
         ((TileStyle) root.getTag()).apply(root, false);
         return root;
     }
@@ -165,44 +157,41 @@ final class MiStepOs4Controls {
         final View frame;
         final View root;
         final GradientDrawable material;
-        final View codeImage;
+        final View codeGlyph;
         final boolean iconOnly;
-        TileStyle(Context system, String label, View icon, View frame, View root,
-                Runnable action, boolean iconOnly) {
+        TileStyle(Context system, String label, View icon, View frame, View root, boolean iconOnly) {
             this.system = system; this.label = label; this.icon = icon; this.frame = frame;
             this.root = root;
             this.iconOnly = iconOnly;
             Object source = XposedHelpers.getObjectField(icon, "disabledBg");
             material = copyShape(source instanceof Drawable ? (Drawable) source : null, system);
-            if ("付款码".equals(label) || "乘车码".equals(label)) {
-                // Keep custom strokes outside the OEM QS image blend/animation pipeline.
-                codeImage = new MiStepCodeIcon.GlyphView(system, "乘车码".equals(label));
-                codeImage.setOnClickListener(v -> action.run());
-                codeImage.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-                // OEM QSTileItemIconView paints its own layers over child views.
-                // Draw our glyph as a later sibling above the frame instead.
-                ((ViewGroup) root).addView(codeImage, new FrameLayout.LayoutParams(
-                        dp(system, 36), dp(system, 36),
-                        Gravity.TOP | Gravity.CENTER_HORIZONTAL));
-            } else codeImage = null;
+            // These two MiStep actions have no matching stock QS artwork.
+            codeGlyph = "付款码".equals(label) || "乘车码".equals(label)
+                    ? new MiStepCodeIcon.GlyphView(system, "乘车码".equals(label)) : null;
+            if (codeGlyph != null) ((ViewGroup) root).addView(codeGlyph,
+                    new FrameLayout.LayoutParams(dp(system, 36), dp(system, 36),
+                            Gravity.TOP | Gravity.CENTER_HORIZONTAL));
         }
         void apply(View root, boolean active) {
             if (iconOnly) fitIconOnly();
             // Native blend tokens need the OEM panel blur provider. Our window supplies a
-            // standalone material behind the unchanged OEM view and glyph instead.
+            // standalone material behind the unchanged OEM view.
             material.setColor(active ? 0xff3478ed : 0xb25d6875);
             material.setCornerRadius(iconOnly ? Math.max(1, Math.min(root.getWidth(), root.getHeight())) / 2f : dp(system, 18));
             frame.setBackground(material);
             root.setBackground(null);
             root.setElevation(0);
-            icon.setVisibility(codeImage == null ? View.VISIBLE : View.INVISIBLE);
-            if (codeImage != null) {
-                codeImage.setVisibility(View.VISIBLE);
-                codeImage.bringToFront();
+            if (codeGlyph != null) {
+                // Only the action glyph is drawn: the unrelated stock fallback stays hidden.
+                icon.setVisibility(View.INVISIBLE);
+                codeGlyph.setVisibility(View.VISIBLE);
+                codeGlyph.bringToFront();
                 TextView text = (TextView) field(XposedHelpers.callMethod(root, "getBinding"), "tileLabel");
                 text.setTextColor(HyperOsStyle.textPrimary(system));
                 return;
             }
+            // Exactly one icon view; its State resolves the original OEM resources.
+            icon.setVisibility(View.VISIBLE);
             ImageView image = (ImageView) XposedHelpers.callMethod(icon, "getIcon");
             // The OEM child otherwise measures at its original full-size tile dimensions.
             // Fit the entire compound drawable inside our independent circular icon frame.
@@ -224,7 +213,8 @@ final class MiStepOs4Controls {
             image.setImageTintList(null);
             settleIcon(image.getDrawable());
             TextView text = (TextView) field(XposedHelpers.callMethod(root, "getBinding"), "tileLabel");
-            text.setTextColor("扫一扫".equals(label) ? HyperOsStyle.textPrimary(system) : 0xffffffff);
+            text.setTextColor("扫一扫".equals(label) || "付款码".equals(label)
+                    || "乘车码".equals(label) ? HyperOsStyle.textPrimary(system) : 0xffffffff);
         }
 
         void fitIconOnly() {
@@ -238,6 +228,8 @@ final class MiStepOs4Controls {
                 frame.setLayoutParams(lp);
             }
             material.setCornerRadius(size / 2f);
+            if (codeGlyph != null) codeGlyph.setLayoutParams(new FrameLayout.LayoutParams(
+                    dp(system, 36), dp(system, 36), Gravity.CENTER));
         }
     }
 
@@ -295,7 +287,9 @@ final class MiStepOs4Controls {
         final Context system;
         final boolean isVolume;
         final Drawable fill;
-        Slider(Context system, String title, String iconName) {
+        final Drawable normalIcon, mutedIcon;
+        private Boolean muted;
+        Slider(Context system, String title) {
             this.system = system;
             isVolume = "音量".equals(title);
             Object binding = inflate("ToggleSliderItemViewBinding");
@@ -356,9 +350,16 @@ final class MiStepOs4Controls {
             FrameLayout.LayoutParams iconLp = new FrameLayout.LayoutParams(dp(system, 22), dp(system, 22), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             iconLp.bottomMargin = dp(system, 12);
             icon.setLayoutParams(iconLp);
-            Context context = context();
-            int id = context.getResources().getIdentifier(iconName, "drawable", context.getPackageName());
-            if (id != 0) icon.setImageDrawable(context.getDrawable(id));
+            icon.setVisibility(View.VISIBLE);
+            icon.setAlpha(1f);
+            icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            Context plugin = context();
+            normalIcon = MiStepNativeIconContext.drawable(plugin,
+                    isVolume ? "ic_volume_slider_media_enabled" : "ic_brightness_slider",
+                    isVolume ? "ic_volume_slider_animate_icon" : "ic_brightness_slider_animate_icon");
+            mutedIcon = isVolume ? MiStepNativeIconContext.drawable(plugin,
+                    "ic_volume_slider_media_disabled", "ic_miui_volume_media_mute") : null;
+            updateIcon(false);
             icon.setImageTintList(android.content.res.ColorStateList.valueOf(0xff242930));
             // OEM sliders rotate 270 degrees and swap physical width/height (holder.updateSize).
             root.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> {
@@ -376,11 +377,13 @@ final class MiStepOs4Controls {
             slider.setProgress(value);
             updateProgressShape();
             text.setText(label);
-            if (isVolume) {
-                String name = value == 0 ? "ic_volume_media_mute" : "ic_volume_media";
-                int id = system.getResources().getIdentifier(name, "drawable", "com.android.systemui");
-                if (id != 0) icon.setImageDrawable(system.getDrawable(id));
-            }
+            if (isVolume) updateIcon(value == 0);
+        }
+        private void updateIcon(boolean silent) {
+            if (muted != null && muted == silent) return;
+            muted = silent;
+            Drawable drawable = silent && mutedIcon != null ? mutedIcon : normalIcon;
+            if (drawable != null) { icon.setImageDrawable(drawable); settleIcon(drawable); }
         }
         void updateProgressShape() { fill.invalidateSelf(); progress.invalidate(); }
         void release() {

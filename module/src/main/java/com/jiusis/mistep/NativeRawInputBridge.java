@@ -80,6 +80,14 @@ final class NativeRawInputBridge {
         return expected.equals(actual.toString());
     }
 
+    static void updateTop(int uid, float scale) {
+        if (!loaded) return;
+        try { updateTopNative(uid, scale); }
+        catch (Throwable error) { XposedBridge.log("MiStepProbe: top raw update unavailable " + error); }
+    }
+
+    private static native boolean updateTopNative(int uid, float scale);
+
     private static native boolean updateNative(float scale, float offsetY, float offsetX,
             int width, int height, int rotation);
 }

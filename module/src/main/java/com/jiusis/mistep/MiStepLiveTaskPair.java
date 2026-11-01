@@ -9,7 +9,7 @@ import de.robv.android.xposed.XposedHelpers;
 /** Task-specific ownership lease for the inspected 17PM Shell. Retains its original organizer. */
 final class MiStepLiveTaskPair {
     private final Object organizer, taskViews, controller, lock, firstToken, secondToken;
-    private final int firstId, secondId, userId;
+    private final int firstId, secondId, firstUserId, secondUserId;
     private final Object displayParent, sideParent;
     private final Rect logical;
     private final Consumer<String> log;
@@ -30,25 +30,32 @@ final class MiStepLiveTaskPair {
     MiStepLiveTaskPair(Object organizer, Object taskViews, Object controller,
             int firstId, Object firstToken, int secondId, Object secondToken, int userId,
             Object displayParent, Object sideParent, Rect logical, Consumer<String> log) {
+        this(organizer, taskViews, controller, firstId, firstToken, secondId, secondToken,
+                userId, userId, displayParent, sideParent, logical, log);
+    }
+    MiStepLiveTaskPair(Object organizer, Object taskViews, Object controller,
+            int firstId, Object firstToken, int secondId, Object secondToken, int firstUserId, int secondUserId,
+            Object displayParent, Object sideParent, Rect logical, Consumer<String> log) {
         if (firstId < 0 || secondId < 0 || firstId == secondId || firstToken == null
+                || firstUserId < 0 || secondUserId < 0
                 || secondToken == null || firstToken.equals(secondToken) || logical == null
                 || logical.width() <= 0 || logical.height() <= 0)
             throw new IllegalArgumentException("invalid single swap identity");
         this.organizer = organizer; this.taskViews = taskViews; this.controller = controller;
         this.firstId = firstId; this.firstToken = firstToken; this.secondId = secondId;
-        this.secondToken = secondToken; this.userId = userId;
+        this.secondToken = secondToken; this.firstUserId = firstUserId; this.secondUserId = secondUserId;
         this.displayParent = displayParent; this.sideParent = sideParent;
         this.logical = new Rect(logical); this.log = log;
         lock = XposedHelpers.getObjectField(organizer, "mLock");
     }
 
-    private Object info(int id, Object token, int mode) {
+    private Object info(int id, Object token, int expectedUser, int mode) {
         Object appeared = XposedHelpers.callMethod(XposedHelpers.getObjectField(organizer, "mTasks"), "get", id);
         if (appeared == null) throw new IllegalStateException("canonical task absent " + id);
         Object info = XposedHelpers.callMethod(appeared, "getTaskInfo");
         if (XposedHelpers.getIntField(info, "taskId") != id
                 || !token.equals(XposedHelpers.getObjectField(info, "token"))
-                || XposedHelpers.getIntField(info, "userId") != userId
+                || XposedHelpers.getIntField(info, "userId") != expectedUser
                 || XposedHelpers.getIntField(info, "displayId") != 0
                 || !Integer.valueOf(1).equals(XposedHelpers.callMethod(info, "getActivityType"))
                 || Boolean.TRUE.equals(XposedHelpers.callMethod(info, "hasParentTask"))
@@ -74,7 +81,7 @@ final class MiStepLiveTaskPair {
             try {
                 valid(displayParent); valid(sideParent);
                 if (!Boolean.TRUE.equals(XposedHelpers.getObjectField(controller, "mSurfaceCreated"))) return false;
-                Object a = info(firstId, firstToken, 1), b = info(secondId, secondToken, 6);
+                Object a = info(firstId, firstToken, firstUserId, 1), b = info(secondId, secondToken, secondUserId, 6);
                 Object fallback = XposedHelpers.callMethod(listeners(), "get", -2);
                 if (fallback == null || owner(a) != fallback || owner(b) != controller
                         || XposedHelpers.callMethod(listeners(), "get", firstId) != null
@@ -137,7 +144,7 @@ final class MiStepLiveTaskPair {
             });
             armed = true;
             XposedHelpers.callMethod(organizer, "addListenerForTaskId", temporaryFirstOwner, firstId);
-            if (owner(info(firstId, firstToken, 1)) != temporaryFirstOwner)
+            if (owner(info(firstId, firstToken, firstUserId, 1)) != temporaryFirstOwner)
                 throw new IllegalStateException("A lease was rejected by native owner");
         }
     }
@@ -217,7 +224,7 @@ final class MiStepLiveTaskPair {
     boolean originalRoles() {
         synchronized (lock) {
             try {
-                info(firstId, firstToken, 1); info(secondId, secondToken, 6);
+                info(firstId, firstToken, firstUserId, 1); info(secondId, secondToken, secondUserId, 6);
                 return !waitingCancel || originalInfoSeen;
             }
             catch (Throwable ignored) { return false; }
@@ -227,7 +234,7 @@ final class MiStepLiveTaskPair {
     /** Used only after Ready proved A6/B1; a new canonical A1/B6 cannot be the pre-WCT snapshot. */
     boolean rollbackRolesReady() {
         synchronized (lock) {
-            try { info(firstId, firstToken, 1); info(secondId, secondToken, 6); return true; }
+            try { info(firstId, firstToken, firstUserId, 1); info(secondId, secondToken, secondUserId, 6); return true; }
             catch (Throwable ignored) { return false; }
         }
     }
@@ -235,7 +242,7 @@ final class MiStepLiveTaskPair {
     /** Restore the original B controller after a running transition's inverse WCT was confirmed. */
     void restoreOriginal(Object tx, float sideScale) {
         synchronized (lock) {
-            Object a = info(firstId, firstToken, 1), b = info(secondId, secondToken, 6);
+            Object a = info(firstId, firstToken, firstUserId, 1), b = info(secondId, secondToken, secondUserId, 6);
             Object token = XposedHelpers.getObjectField(controller, "mTaskToken");
             if (firstToken.equals(token)) {
                 repositoryRegistered = false;
@@ -277,7 +284,7 @@ final class MiStepLiveTaskPair {
     }
 
     private void releaseOriginalLease() {
-        if (!retiredSecond && owner(info(firstId, firstToken, 1)) == temporaryFirstOwner)
+        if (!retiredSecond && owner(info(firstId, firstToken, firstUserId, 1)) == temporaryFirstOwner)
             XposedHelpers.callMethod(organizer, "removeListener", temporaryFirstOwner);
     }
 
@@ -314,8 +321,8 @@ final class MiStepLiveTaskPair {
                         || XposedHelpers.getIntField(secondChangeInfo, "taskId") != secondId
                         || XposedHelpers.getIntField(firstChangeInfo, "displayId") != 0
                         || XposedHelpers.getIntField(secondChangeInfo, "displayId") != 0
-                        || XposedHelpers.getIntField(firstChangeInfo, "userId") != userId
-                        || XposedHelpers.getIntField(secondChangeInfo, "userId") != userId
+                        || XposedHelpers.getIntField(firstChangeInfo, "userId") != firstUserId
+                        || XposedHelpers.getIntField(secondChangeInfo, "userId") != secondUserId
                         || !Integer.valueOf(6).equals(XposedHelpers.callMethod(firstChangeInfo, "getWindowingMode"))
                         || !Integer.valueOf(1).equals(XposedHelpers.callMethod(secondChangeInfo, "getWindowingMode"))) {
                     log.accept("live pair transition role mismatch A="
@@ -325,8 +332,8 @@ final class MiStepLiveTaskPair {
                 }
                 // Identity/layer checks use canonical surfaces, but do not re-read the old
                 // role from the organizer cache during the same callback.
-                info(firstId, firstToken, -1);
-                info(secondId, secondToken, -1);
+                info(firstId, firstToken, firstUserId, -1);
+                info(secondId, secondToken, secondUserId, -1);
                 valid(a); valid(b); valid(displayParent);
                 if (!XposedHelpers.callMethod(a, "getLayerId").equals(XposedHelpers.callMethod(canonical(firstId), "getLayerId"))
                         || !XposedHelpers.callMethod(b, "getLayerId").equals(XposedHelpers.callMethod(canonical(secondId), "getLayerId"))) return null;
@@ -340,7 +347,7 @@ final class MiStepLiveTaskPair {
         synchronized (lock) {
             // Role modes are established by the transition callback. During this method the
             // organizer cache may still lag one callback, so identity/owner checks are enough.
-            Object a = info(firstId, firstToken, -1), b = info(secondId, secondToken, -1);
+            Object a = info(firstId, firstToken, firstUserId, -1), b = info(secondId, secondToken, secondUserId, -1);
             if (!repositoryRegistered) {
                 XposedHelpers.callMethod(taskViews, "registerTaskView", controller);
                 repositoryRegistered = true;
@@ -390,8 +397,8 @@ final class MiStepLiveTaskPair {
     boolean sideOwned() {
         synchronized (lock) {
             try {
-                return owner(info(firstId, firstToken, 6)) == controller
-                        && owner(info(secondId, secondToken, 1)) != controller
+                return owner(info(firstId, firstToken, firstUserId, 6)) == controller
+                        && owner(info(secondId, secondToken, secondUserId, 1)) != controller
                         && firstToken.equals(XposedHelpers.getObjectField(controller, "mTaskToken"));
             } catch (Throwable ignored) { return false; }
         }
@@ -400,7 +407,7 @@ final class MiStepLiveTaskPair {
     /** Append final real-parent operations. Never applies or closes a Shell-owned transaction. */
     void finish(Object tx, float sideScale) {
         synchronized (lock) {
-            Object a = info(firstId, firstToken, 6), b = info(secondId, secondToken, 1);
+            Object a = info(firstId, firstToken, firstUserId, 6), b = info(secondId, secondToken, secondUserId, 1);
             if (!transferred || owner(a) != controller || owner(b) == controller)
                 throw new IllegalStateException("pair ownership changed at finish");
             if (!Boolean.TRUE.equals(XposedHelpers.getObjectField(controller, "mSurfaceCreated")))
@@ -426,7 +433,7 @@ final class MiStepLiveTaskPair {
     /** Bounded consumed/rejected/start failure cleanup follows the current canonical roles. */
     void recover(Object tx, float sideScale) {
         synchronized (lock) {
-            Object a = info(firstId, firstToken, -1), b = info(secondId, secondToken, -1);
+            Object a = info(firstId, firstToken, firstUserId, -1), b = info(secondId, secondToken, secondUserId, -1);
             int modeA = (Integer) XposedHelpers.callMethod(a, "getWindowingMode");
             int modeB = (Integer) XposedHelpers.callMethod(b, "getWindowingMode");
             if (modeA == 6 && modeB == 1) {

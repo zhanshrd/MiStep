@@ -73,7 +73,8 @@ final class MiStepLiveSwap64 {
             backdrop = (MiStepLiveBackdrop) (flip != null ? flip.backdrop : home.backdrop);
             if (flip != null) {
                 pair = new MiStepLiveTaskPair(organizer, taskViews, controller, flip.first.id, flip.first.token,
-                        flip.second.id, flip.second.token, flip.userId, displayParent, sideParent, flip.logical, log);
+                        flip.second.id, flip.second.token, flip.firstUserId, flip.secondUserId,
+                        displayParent, sideParent, flip.logical, log);
                 single = null;
                 tasks = new LiveSwapGeometry.Task[2 + flip.peers.length];
                 tasks[0] = flip.first; tasks[1] = flip.second;
@@ -110,7 +111,8 @@ final class MiStepLiveSwap64 {
             if (entry == null) throw new IllegalStateException("peer disappeared");
             Object info = XposedHelpers.callMethod(entry, "getTaskInfo");
             if (!peer.task.token.equals(XposedHelpers.getObjectField(info, "token"))
-                    || XposedHelpers.getIntField(info, "userId") != flip.userId
+                    || XposedHelpers.getIntField(info, "taskId") != peer.task.id
+                    || XposedHelpers.getIntField(info, "userId") != peer.userId
                     || XposedHelpers.getIntField(info, "displayId") != 0
                     || !Integer.valueOf(6).equals(XposedHelpers.callMethod(info, "getWindowingMode"))
                     || !Integer.valueOf(1).equals(XposedHelpers.callMethod(info, "getActivityType"))

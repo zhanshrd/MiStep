@@ -123,6 +123,19 @@ git diff 32555b4...upstream/main --stat    # 上游改动面
 
 远程：`origin` = zhanshrd/MiStep（本 fork），`upstream` = JIUSIS/MiStep（已配置，走 socks5h://127.0.0.1:10808 代理）。
 
+## 12. v1.0.1 上游移植（2026-11-01，移植基线 55172b5）
+
+**移植方式**：语义移植（非 merge——本 fork 的 MiStepHost 已拆分，结构不同）。
+- 整取 40 个无分歧文件（逐字节对账 = 与上游一致）+ 16 个新类 + cpp（updateTopNative）+ tests + tools。
+- 三方语义合并 4 个文件：MiStepHost（68 hunks）/ HostEntry（21 hunks）/ HostSwapController / HostPromotionController。
+- **有意分歧**：① 不采纳上游收窄的推荐作用域与 build.ps1 断言（本机 BUG-3 实测需 `system` 值，保留 4 作用域）；② 保留我们的 F-A7 catch 回补、zoom 自愈、看门狗、force-abandon、全部闸门；③ fork 版本线 1.2.0（1002000），简洁 marker。
+
+**逐行对账**：上游 700 个功能新增行逐行核对——HostEntry 0 未匹配；MiStepHost 首轮 86 条未匹配中 48 条为 h. 前缀/跨类归属/可见性放宽的审计局限，**5 处真漏网已补**（retained-leash 裁剪、applyFullscreenBounds、applySlotScale 的 TOP 视口适配）。
+
+**特性清单核对**（对照官方 v1.0.1 更新说明逐项）：顶部横屏窗口 ✓ 双指翻面+控制区第三页 ✓ 快捷应用自定义（长按=毛玻璃选择框，取代旧版长按拖选；固定顺序=选择顺序）✓ 应用分身 ✓ 全屏防误触入口 ✓ 歌词译文排列 ✓ 剪贴板清空复现修复 ✓ 控制中心原生图标 ✓ 剪贴板样式 ✓。
+
+**真机冒烟欠账**（§9 豁免延续）：TOP 窗口收放、双指翻面、分身同收、全屏防误触入口、全链路回归。
+
 **等着的预告**（作者已宣布、尚未上传源码，2026-10-31 用户转述）：顶部横向区域（topStrip 顶条带）也将能容纳一个「框」（副格）。开源后移植时注意：该特性落在 `MiStepTopBar` / `MiStepLayout`（topStrip 布局）/ `HotZoneGesture`（顶条触摸）与我们的顶栏控制中心切换逻辑交界处，本 fork 顶栏结构已深度改造（控制中心↔音乐面板切换、状态栏租约），**不可整文件覆盖，按 §11 手册语义移植 + 重开评审**。
 
 ## 10. R3 评审台账（全量重读 + 审计点复核，134 文件 / ~25.1k 行）

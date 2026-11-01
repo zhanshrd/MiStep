@@ -22,7 +22,22 @@ public final class DesktopIconLaunchPolicyTest {
                 new String[]{"com.example.app", "com.example.app"}, new boolean[]{true, true}));
         index(-1, DesktopIconLaunchPolicy.uniqueSideSlot("com.example.app",
                 new String[]{"com.example.app"}, new boolean[]{false}));
-        System.out.println("DesktopIconLaunchPolicyTest PASS 9");
+        index(0, DesktopIconLaunchPolicy.uniqueSideSlot("app", 0,
+                new String[]{"app", "app"}, new int[]{0, 999}, new boolean[]{true, true}));
+        index(1, DesktopIconLaunchPolicy.uniqueSideSlot("app", 999,
+                new String[]{"app", "app"}, new int[]{0, 999}, new boolean[]{true, true}));
+        index(-1, DesktopIconLaunchPolicy.uniqueSideSlot("app", 0,
+                new String[]{"app"}, new int[]{999}, new boolean[]{true}));
+        index(-1, DesktopIconLaunchPolicy.uniqueSideSlot("app", 999,
+                new String[]{"app", "app"}, new int[]{999, 999}, new boolean[]{true, true}));
+        index(999, DesktopIconLaunchPolicy.launchUser("startActivityAsUser",
+                new Class<?>[]{Object.class,int.class,int.class,boolean.class},
+                new Object[]{null,0,999,true}, 0));
+        index(0, DesktopIconLaunchPolicy.launchUser("startActivity", null, null, 0));
+        index(-1, DesktopIconLaunchPolicy.launchUser("startActivityAsUser",
+                new Class<?>[]{int.class}, new Object[]{-2}, 0));
+        index(-1, DesktopIconLaunchPolicy.launchUser("unknown", null, null, 0));
+        System.out.println("DesktopIconLaunchPolicyTest PASS 17");
     }
 
     private static void expect(String expected, String actual) {

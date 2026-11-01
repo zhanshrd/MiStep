@@ -121,6 +121,42 @@ final class MediaLyrics {
         for(int i=0;i<times.length;i++){times[i]=unique.get(i).time;lines[i]=unique.get(i).text;}
         return new MediaLyrics(times,lines,"");
     }
+    static String combineTranslation(String original,String translation) {
+        if(original==null||original.isEmpty())return "";
+        if(translation==null||translation.isEmpty())return original;
+        MediaLyrics source=parse(original),translated=parse(translation);
+        if(source.times.length==0||translated.times.length==0)return original+"\n"+translation;
+        ArrayList<Line> combined=new ArrayList<>();
+        for(int i=0;i<source.times.length;i++)combined.add(new Line(source.times[i],source.lines[i]));
+        for(int i=0;i<translated.times.length;i++) {
+            String text=translated.lines[i];
+            if(text.isEmpty())continue;
+            int nearest=-1;
+            long distance=Long.MAX_VALUE;
+            for(int j=0;j<source.times.length;j++) {
+                if(source.lines[j].isEmpty())continue;
+                long candidate=Math.abs(source.times[j]-translated.times[i]);
+                if(candidate<distance) {distance=candidate;nearest=j;}
+            }
+            if(nearest<0)combined.add(new Line(translated.times[i],text));
+            else {
+                String previous=combined.get(nearest).text;
+                if(!("\n"+previous+"\n").contains("\n"+text+"\n"))
+                    combined.get(nearest).text=limit(previous.isEmpty()?text:previous+"\n"+text);
+            }
+        }
+        combined.sort(Comparator.comparingLong(line->line.time));
+        StringBuilder result=new StringBuilder();
+        for(Line line:combined) {
+            for(String text:line.text.split("\\r?\\n")) {
+                if(text.isEmpty())continue;
+                long time=Math.max(0,line.time);
+                result.append('[').append(String.format(Locale.ROOT,"%02d:%02d.%03d",
+                        time/60000,(time/1000)%60,time%1000)).append(']').append(text).append('\n');
+            }
+        }
+        return result.toString();
+    }
     private static String limit(String text) {
         int n=Math.min(512,text.length());
         if (n<text.length() && n>0 && Character.isHighSurrogate(text.charAt(n-1))) n--;
@@ -141,22 +177,24 @@ final class MediaLyrics {
             int count=Math.min(wanted,rows.length);
             return new Window(String.join("\n",java.util.Arrays.copyOf(rows,count)),count==1?0:Math.min(count-1,count/2),count);
         }
-        ArrayList<Integer> visible=new ArrayList<>();
-        for(int i=0;i<lines.length&&visible.size()<4096;i++)if(!lines[i].isEmpty())visible.add(i);
-        if(visible.isEmpty())return new Window("",0,0);
+        ArrayList<String> visible=new ArrayList<>();
         int at=index(Math.max(0,position));
         int currentVisible=0;
-        for(int i=0;i<visible.size();i++) {
-            if(visible.get(i)<=at)currentVisible=i;
-            else break;
+        for(int i=0;i<lines.length&&visible.size()<4096;i++) {
+            int first=visible.size();
+            for(String row:lines[i].split("\\r?\\n")) {
+                if(!row.isEmpty()&&visible.size()<4096)visible.add(row);
+            }
+            if(i<=at&&visible.size()>first)currentVisible=first;
         }
+        if(visible.isEmpty())return new Window("",0,0);
         int count=Math.min(wanted,visible.size());
         int start=Math.max(0,currentVisible-count/2);
         if(start+count>visible.size())start=visible.size()-count;
         StringBuilder text=new StringBuilder();
         for(int i=0;i<count;i++) {
             if(i>0)text.append('\n');
-            text.append(lines[visible.get(start+i)]);
+            text.append(visible.get(start+i));
         }
         return new Window(text.toString(),currentVisible-start,count);
     }

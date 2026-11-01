@@ -21,23 +21,32 @@ mistep::Publish original_publish;
 std::atomic<bool> installed{false};
 std::atomic<int> diagnostic_count{0};
 std::atomic<int> rotation_diagnostic_count{0};
+std::atomic<bool> top_uid_layout{false};
+std::atomic<int> top_diagnostic_count{0};
 pthread_mutex_t config_lock = PTHREAD_MUTEX_INITIALIZER;
 mistep::Zoom active_zoom;
+mistep::TopInput active_top;
 
 int replacement_publish(void* dispatcher, void* connection, void* entry) {
     pthread_mutex_lock(&config_lock);
     const mistep::Zoom zoom = active_zoom;
+    const mistep::TopInput top = active_top;
     pthread_mutex_unlock(&config_lock);
     bool remapped = false;
+    bool top_remapped = false;
     const auto local = entry == nullptr ? mistep::Transform{} : mistep::read<mistep::Transform>(entry, 0x1c);
     const int result = mistep::publish(original_publish, dispatcher, connection, entry,
-            zoom, &remapped);
-    if (remapped && diagnostic_count.fetch_add(1, std::memory_order_relaxed) < 6) {
+            zoom, &remapped, top, top_uid_layout.load(std::memory_order_acquire), &top_remapped);
+    if (top_remapped && top_diagnostic_count.fetch_add(1, std::memory_order_relaxed) < 6) {
+        __android_log_print(ANDROID_LOG_INFO, "MiStepRawInput",
+                "signed top raw inverse uid=%d scale=%f result=%d", top.uid, top.scale, result);
+    }
+    if (remapped && !top_remapped && diagnostic_count.fetch_add(1, std::memory_order_relaxed) < 6) {
         __android_log_print(ANDROID_LOG_INFO, "MiStepRawInput",
                 "signed raw inverse display=0 scale=%f y=%f x=%f result=%d",
                 zoom.scale, zoom.offset_y, zoom.offset_x, result);
     }
-    if (remapped && std::fabs(local.m[0]) < .01f
+    if (remapped && !top_remapped && std::fabs(local.m[0]) < .01f
             && rotation_diagnostic_count.fetch_add(1, std::memory_order_relaxed) < 8) {
         __android_log_print(ANDROID_LOG_INFO, "MiStepRawInput",
                 "fixed raw axes basis=%f,%f,%f,%f display=%d bounds=%dx%d",
@@ -77,6 +86,8 @@ int find_and_hook(dl_phdr_info* info, size_t, void*) {
     const int result = hook_function(address, reinterpret_cast<void*>(replacement_publish),
             reinterpret_cast<void**>(&original_publish));
     installed.store(result == 0 && original_publish != nullptr, std::memory_order_release);
+    top_uid_layout.store(installed.load() && (rva == 0x431a70 || rva == 0x420434),
+            std::memory_order_release);
     __android_log_print(ANDROID_LOG_INFO, "MiStepRawInput",
             "publish hook installed=%d result=%d profile=%s",
             installed.load(), result, profile.name);
@@ -126,6 +137,20 @@ Java_com_jiusis_mistep_NativeRawInputBridge_updateNative(JNIEnv*, jclass,
         jfloat scale, jfloat offset_y, jfloat offset_x, jint width, jint height, jint rotation) {
     pthread_mutex_lock(&config_lock);
     active_zoom = {scale, offset_y, offset_x, width, height, rotation};
+    if (!(scale > 0 && scale < 1)) active_top = {};
     pthread_mutex_unlock(&config_lock);
     return installed.load(std::memory_order_acquire) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_jiusis_mistep_NativeRawInputBridge_updateTopNative(JNIEnv*, jclass,
+        jint uid, jfloat scale) {
+    pthread_mutex_lock(&config_lock);
+    active_top = top_uid_layout.load(std::memory_order_acquire)
+            && active_zoom.scale > 0 && active_zoom.scale < 1
+            && uid >= 10000 && std::isfinite(scale) && scale > 0 && scale < 1
+            ? mistep::TopInput{uid, scale} : mistep::TopInput{};
+    pthread_mutex_unlock(&config_lock);
+    return installed.load(std::memory_order_acquire)
+            && top_uid_layout.load(std::memory_order_acquire) ? JNI_TRUE : JNI_FALSE;
 }

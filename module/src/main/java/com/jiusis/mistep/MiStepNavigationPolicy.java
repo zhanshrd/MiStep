@@ -4,6 +4,8 @@ final class MiStepNavigationPolicy {
     private MiStepNavigationPolicy() {}
 
     static boolean shouldSuspend(String reason) {
-        return "homekey".equals(reason) || "recentapps".equals(reason);
+        // Recents is also the native freeform entry. Keep the existing workspace
+        // while choosing a floating task, as for gesture navigation.
+        return "homekey".equals(reason);
     }
 }

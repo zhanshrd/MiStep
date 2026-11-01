@@ -90,6 +90,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             return;
         }
         if ("com.xiaomi.type".equals(lpparam.packageName)) {
+            // Optional keyboard policy only; ordinary app layout/input uses the system hooks.
             hookMiTypeAutoFloating(lpparam.classLoader);
             return;
         }
@@ -98,7 +99,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             return;
         }
         final ClassLoader cl = lpparam.classLoader;
-        log("=== attached to " + SYSTEMUI + " build=1.1.0 release ===");
+        log("=== attached to " + SYSTEMUI + " build=1.2.0 release ===");
         try {
             NativeMultiWindowUnlock.install(cl, false);
             MiStepSystemActions.install(cl);
@@ -106,6 +107,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             MiStepIslandMonitorInput.install(cl, () -> sContext);
             MiStepStatusBarSampling.install(cl);
             MiStepStatusBar.install(cl);
+            MiStepTopNativeCaption.install(cl);
             MiStepPanelInput.install(cl);
             MiStepMainUiConfiguration.install(cl);
             MiStepNotificationLaunch.install(cl, () -> sContext);
@@ -130,7 +132,7 @@ public class HostEntry implements IXposedHookLoadPackage {
      * by the keyboard itself.
      */
     private static void hookMiTypeAutoFloating(ClassLoader cl) {
-        log("=== attached to com.xiaomi.type build=1.1.0 release ===");
+        log("=== attached to com.xiaomi.type build=1.2.0 release ===");
         try {
             Class<?> service = XposedHelpers.findClass("com.mi.ime.MiInputMethodService", cl);
             XposedHelpers.findAndHookMethod(service, "handleSpacePressureAutoFloating",
@@ -256,7 +258,7 @@ public class HostEntry implements IXposedHookLoadPackage {
      * 与锤子Mi Step的 MagnificationSpecSmt / applyZoomedMatrixSmt 是同一机制的官方版本。
      */
     private void hookSystemServer(ClassLoader cl) {
-        log("=== attached to system_server (android) build=1.1.0 release ===");
+        log("=== attached to system_server (android) build=1.2.0 release ===");
         MiStepRecents.install(cl);
         NativeRawInputBridge.install();
         try {
@@ -564,6 +566,7 @@ public class HostEntry implements IXposedHookLoadPackage {
                     }
                     if (MiStepDesktopLaunchBridge.ACTION.equals(intent.getAction())) {
                         MiStepDesktopLaunchBridge.update(intent);
+                        MiStepDesktopLaunchBridge.refreshTopInput(service);
                         return;
                     }
                     if ("com.jiusis.mistep.TRANSFER_TOUCH".equals(intent.getAction())) {
@@ -1162,6 +1165,24 @@ public class HostEntry implements IXposedHookLoadPackage {
                 }
             });
             Class<?> window = XposedHelpers.findClass("com.android.server.wm.WindowState", cl);
+            XposedHelpers.findAndHookMethod(window, "getSurfaceTouchableRegion",
+                    android.graphics.Region.class, WindowManager.LayoutParams.class,
+                    new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    ZoomTarget target = sZoomTarget;
+                    if (p.hasThrowable() || !sZoomed || !sFullscreenRotationActive
+                            || target == null || target.display != sDisplayContent
+                            || !Thread.holdsLock(target.globalLock)) return;
+                    try {
+                        MiStepMainPanelTouchRegion.crop(p.thisObject, target.display,
+                                (android.graphics.Region) p.args[0],
+                                (WindowManager.LayoutParams) p.args[1]);
+                    } catch (Throwable error) {
+                        log("main panel touch boundary unavailable: " + error);
+                    }
+                }
+            });
+            log("main notification shade modal touch limited to its own surface");
             XposedBridge.hookAllMethods(window, "prepareSurfaces", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
                     updateMainSystemUiRotation(p.thisObject);
@@ -1360,6 +1381,30 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     /** Hold the workspace portrait; app transforms must never announce display rotation. */
     private void installFixedMainRotationHooks(ClassLoader cl) {
+        try {
+            Class<?> activityRecord = XposedHelpers.findClass(
+                    "com.android.server.wm.ActivityRecord", cl);
+            XposedBridge.hookAllMethods(activityRecord, "resolveOverrideConfiguration",
+                    new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (p.hasThrowable() || !sZoomed || !sFullscreenRotationActive
+                            || p.args.length != 1
+                            || !(p.args[0] instanceof android.content.res.Configuration)) return;
+                    try {
+                        if (XposedHelpers.getObjectField(p.thisObject, "mDisplayContent")
+                                != sDisplayContent) return;
+                        Object task = XposedHelpers.callMethod(p.thisObject, "getTask");
+                        MiStepTopConfiguration.apply(p.thisObject, task,
+                                (android.content.res.Configuration) p.args[0]);
+                    } catch (Throwable error) {
+                        log("upper Activity configuration unavailable: " + error);
+                    }
+                }
+            });
+            log("upper Activity configuration follows full task viewport");
+        } catch (Throwable error) {
+            log("upper Activity configuration hook unavailable: " + error);
+        }
         try {
             Class<?> displayContent = XposedHelpers.findClass(
                     "com.android.server.wm.DisplayContent", cl);
@@ -1576,6 +1621,15 @@ public class HostEntry implements IXposedHookLoadPackage {
             Object task = XposedHelpers.callMethod(activity, "getTask");
             int windowingMode = task == null ? 1
                     : (Integer) XposedHelpers.callMethod(task, "getWindowingMode");
+            if (isUpperLandscapeTask(task)) {
+                if (XposedHelpers.callMethod(task,"topRunningActivity")==activity) {
+                    RotationResolution upper=resolveTaskRotationLocked(display,activity,task,windowingMode,source);
+                    recordTaskWindowState(activity,upper.overrideOrientation,upper.resolvedRotation,
+                            upper.taskRotation,6,source+" upper-landscape");
+                }
+                releaseTaskRotationLocked(activity,"upper task uses native landscape bounds");
+                return Boolean.FALSE;
+            }
             if (windowingMode == FullscreenRotationPolicy.WINDOWING_MODE_FREEFORM) {
                 // HyperOS owns native freeform configuration, surfaces and rotation.
                 // Never turn its orientation callback into our fullscreen/TaskView path.
@@ -1818,6 +1872,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             state.update(-1, configurationOrientation, requestedOrientation,
                     resolvedRotation == -1 ? taskRotation : resolvedRotation,
                     windowingMode, windowingMode == 1, true, taskRotation);
+            sendTopTaskDirection(task,taskId,requestedOrientation,resolvedRotation,taskRotation,windowingMode);
             log("task window state task=" + taskId + " mode=" + windowingMode
                     + " configOrientation=" + configurationOrientation
                     + " request=" + requestedOrientation + " resolved=" + resolvedRotation
@@ -1825,6 +1880,44 @@ public class HostEntry implements IXposedHookLoadPackage {
         } catch (Throwable error) {
             log("task window state unavailable: " + error);
         }
+    }
+
+    private final java.util.Map<Object,String> topTaskSignals=new java.util.WeakHashMap<>();
+    private static long topWorkspaceGeneration;
+
+    private void sendTopTaskDirection(Object task,int id,int request,int resolved,int rotation,int mode) {
+        if(!sZoomed) {topTaskSignals.clear();return;}
+        if(task==null || (mode!=1 && !isUpperLandscapeTask(task)))return;
+        try {
+            Object info=XposedHelpers.callMethod(task,"getTaskInfo");
+            int user=XposedHelpers.getIntField(info,"userId");
+            Object token=XposedHelpers.getObjectField(info,"token");
+            boolean landscape=FullscreenRotationPolicy.requestsLandscape(request)
+                    || FullscreenRotationPolicy.usesSensorOrUserRotation(request) && (rotation==1 || rotation==3);
+            boolean focused=XposedHelpers.getBooleanField(info,"isFocused");
+            String signature=topWorkspaceGeneration+":"+user+":"+mode+":"+landscape+":"+focused;
+            if(signature.equals(topTaskSignals.get(task)))return;
+            topTaskSignals.put(task,signature);
+            Context context=(Context)(sSystemContext!=null?sSystemContext:sWmsContext);
+            Handler bridge=sZoomBridgeHandler;
+            if(context==null || bridge==null || !(token instanceof android.os.Parcelable))return;
+            Intent signal=new Intent(MiStepHost.TOP_TASK_STATE_ACTION).setPackage(SYSTEMUI)
+                    .putExtra("task",id).putExtra("user",user).putExtra("token",(android.os.Parcelable)token)
+                    .putExtra("landscape",landscape);
+            bridge.post(()->{
+                try {context.sendBroadcast(signal,android.Manifest.permission.WRITE_SECURE_SETTINGS);}
+                catch(Throwable error){log("upper direction bridge: "+error);}
+            });
+        } catch(Throwable error) {log("upper task direction unavailable: "+error);}
+    }
+
+    /** Only our translucent mode6 role with a wide root opts out of local portrait rotation. */
+    private static boolean isUpperLandscapeTask(Object task) {
+        try {
+            if(!MiStepSideRoleChange.isSide(task))return false;
+            android.graphics.Rect bounds=(android.graphics.Rect)XposedHelpers.callMethod(task,"getBounds");
+            return bounds!=null && bounds.width()>bounds.height();
+        } catch(Throwable unavailable) {return false;}
     }
 
     private void captureTaskWindowState(Object display, Object activity, String source) {
@@ -1944,14 +2037,16 @@ public class HostEntry implements IXposedHookLoadPackage {
                     try {
                         Object original = p.getResult();
                         Object lease = MiStepDesktopLaunchBridge.recentsLease(original);
-                        if (lease == null || !MiStepDesktopLaunchBridge.recentsLeaseAlive(lease)
+                        boolean upperFallback="getNextFocusableRootTask".equals(p.method.getName()) && isUpperLandscapeTask(original);
+                        if ((!upperFallback && (lease == null || !MiStepDesktopLaunchBridge.recentsLeaseAlive(lease)))
                                 || XposedHelpers.callMethod(original, "getDisplayContent") != sDisplayContent) return;
                         Object ignored = p.args.length >= 2 && Boolean.TRUE.equals(p.args[1]) ? p.args[0] : null;
                         boolean excludeMode = p.args.length == 4 && Boolean.TRUE.equals(p.args[2]);
                         int mode = excludeMode ? (Integer) p.args[3] : 0;
                         Object target = WorkspaceFocus.next(p.thisObject, ignored, excludeMode, mode, task -> {
                             Object binding = MiStepDesktopLaunchBridge.recentsLease(task);
-                            return binding != null && MiStepDesktopLaunchBridge.recentsLeaseAlive(binding);
+                            return isUpperLandscapeTask(task)
+                                    || binding != null && MiStepDesktopLaunchBridge.recentsLeaseAlive(binding);
                         });
                         // No replacement means WM keeps its native fallback; never return a hidden task.
                         if (target != null) p.setResult(target);
@@ -2275,7 +2370,8 @@ public class HostEntry implements IXposedHookLoadPackage {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         boolean handled = fromRecents
                                 ? MiStepDesktopLaunchBridge.beforeRecents((Context) sSystemContext, p.thisObject, p.args)
-                                : MiStepDesktopLaunchBridge.before((Context) sSystemContext, p.thisObject, p.args);
+                                : MiStepDesktopLaunchBridge.before((Context) sSystemContext, p.thisObject, p.args,
+                                        desktopLaunchUser(method, p.args));
                         if (handled) {
                             p.setObjectExtra("mistepHostLaunch", true);
                             p.setResult(2); // ActivityManager.START_TASK_TO_FRONT
@@ -2286,7 +2382,7 @@ public class HostEntry implements IXposedHookLoadPackage {
                         if (p.getThrowable() != null) return;
                         Object result = p.getResult();
                         if (result instanceof Integer && (Integer) result < 0) return;
-                        forwardDesktopIconLaunch(p.args);
+                        forwardDesktopIconLaunch(p.args, desktopLaunchUser(method, p.args));
                     }
                 });
                 hooked++;
@@ -2298,10 +2394,17 @@ public class HostEntry implements IXposedHookLoadPackage {
     }
 
     private static volatile String sLastDesktopLaunchPackage;
+    private static volatile int sLastDesktopLaunchUser = -1;
     private static volatile long sLastDesktopLaunchAt;
 
-    private static void forwardDesktopIconLaunch(Object[] args) {
-        if (args == null) return;
+    private static int desktopLaunchUser(java.lang.reflect.Method method, Object[] args) {
+        int callerUser = (Integer) XposedHelpers.callStaticMethod(android.os.UserHandle.class,
+                "getUserId", android.os.Binder.getCallingUid());
+        return DesktopIconLaunchPolicy.launchUser(method.getName(), method.getParameterTypes(), args, callerUser);
+    }
+
+    private static void forwardDesktopIconLaunch(Object[] args, int launchUser) {
+        if (args == null || launchUser < 0) return;
         String callerPackage = null;
         android.content.Intent launch = null;
         for (Object arg : args) {
@@ -2320,8 +2423,10 @@ public class HostEntry implements IXposedHookLoadPackage {
         if (pkg == null) return;
         long now = android.os.SystemClock.uptimeMillis();
         synchronized (HostEntry.class) {
-            if (pkg.equals(sLastDesktopLaunchPackage) && now - sLastDesktopLaunchAt < 350L) return;
+            if (pkg.equals(sLastDesktopLaunchPackage) && launchUser == sLastDesktopLaunchUser
+                    && now - sLastDesktopLaunchAt < 350L) return;
             sLastDesktopLaunchPackage = pkg;
+            sLastDesktopLaunchUser = launchUser;
             sLastDesktopLaunchAt = now;
         }
         try {
@@ -2329,9 +2434,9 @@ public class HostEntry implements IXposedHookLoadPackage {
             if (context == null) return;
             android.content.Intent signal = new android.content.Intent(DESKTOP_ICON_LAUNCH_ACTION)
                     .setPackage(SYSTEMUI)
-                    .putExtra("package", pkg);
+                    .putExtra("package", pkg).putExtra("userId", launchUser);
             context.sendBroadcast(signal);
-            log("desktop icon launch forwarded package=" + pkg);
+            log("desktop icon launch forwarded package=" + pkg + " user=" + launchUser);
         } catch (Throwable error) {
             log("desktop icon launch forward failed: " + error);
         }
@@ -2441,11 +2546,14 @@ public class HostEntry implements IXposedHookLoadPackage {
         int previousLandscapeState = sNativeLandscapeState;
         sNativeLandscapeState = NativeLandscapePolicy.onZoom(
                 sNativeLandscapeState, scale);
-        if (scale != 1f) beginFixedMainRotationLocked(dc);
-        else endFixedMainRotationLocked(dc);
-        // shouldMagnify is consulted synchronously while the new spec traverses children.
+        // Rotation refresh can synchronously call back into activity orientation.
+        // Publish the incoming workspace state before it runs, so entering from a
+        // fullscreen landscape app cannot request native-fullscreen suspension.
         sZoomed = scale != 1f;
+        if(sZoomed && !previous)topWorkspaceGeneration++;
         try {
+            if (sZoomed) beginFixedMainRotationLocked(dc);
+            else endFixedMainRotationLocked(dc);
             if (commit != null) {
                 Object pending = XposedHelpers.callMethod(dc, "getPendingTransaction");
                 commit.transactionId = ((Number) XposedHelpers.callMethod(pending, "getId")).longValue();
@@ -2890,6 +2998,9 @@ public class HostEntry implements IXposedHookLoadPackage {
                         MiStepHost.onLandscapeMode(intent.getBooleanExtra("fullscreen", false));
                         return;
                     }
+                    if(MiStepHost.TOP_TASK_STATE_ACTION.equals(action)) {
+                        MiStepHost.onTopTaskState(intent);return;
+                    }
                     log("broadcast " + action + " -> toggle");
                     toggle.run();
                 }
@@ -2898,6 +3009,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             filter.addAction("com.jiusis.mistep.TOGGLE");
             filter.addAction("com.jiusis.mistep.DEBUG");
             filter.addAction(MiStepHost.LANDSCAPE_MODE_ACTION);
+            filter.addAction(MiStepHost.TOP_TASK_STATE_ACTION);
             sContext.registerReceiver(receiver, filter, android.Manifest.permission.WRITE_SECURE_SETTINGS,
                     null, android.content.Context.RECEIVER_EXPORTED);
             log("broadcast trigger armed: TOGGLE / DEBUG");
@@ -2910,9 +3022,10 @@ public class HostEntry implements IXposedHookLoadPackage {
                 public void onReceive(android.content.Context context, android.content.Intent intent) {
                     if (android.content.Intent.ACTION_CLOSE_SYSTEM_DIALOGS.equals(intent.getAction())) {
                         String reason = intent.getStringExtra("reason");
+                        log("native system dialogs close reason=" + reason);
                         if (MiStepNavigationPolicy.shouldSuspend(reason))
                             MiStepHost.onSystemNavigation(reason);
-                        else if ("gestureNav".equals(reason))
+                        else if ("gestureNav".equals(reason) || "recentapps".equals(reason))
                             log("native gesture navigation leaves Mi Step active");
                         return;
                     }

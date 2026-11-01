@@ -15,12 +15,12 @@ package com.jiusis.mistep;
 import android.view.SurfaceControl;
 import de.robv.android.xposed.XposedHelpers;
 public class CellVisibilityRegression {
- static int checks;
+ static int checks;static final int SLOT_TOP=4;boolean topFace;
  static void check(boolean b,String why){checks++;if(!b)throw new AssertionError(why);}
  float workspaceAlpha=1f;Object cellMotion;Promotion promotion;boolean owns=true;
  static class Promotion{boolean nativeSwap=true,cancelled;}
  static class View{float alpha;void setAlpha(float a){alpha=a;}}
- static class Slot{boolean occupied,parked,promoting,launching;int taskId=42;Object taskToken=new Object();View view=new View();Object controller=new SurfaceControl();}
+ static class Slot{int index=1;boolean occupied,parked,promoting,launching;int taskId=42;Object taskToken=new Object();View view=new View();Object controller=new SurfaceControl();}
  Object getSurfaceField(Object c,String f){return c;}
  boolean controllerOwns(Slot s,int id,Object token){return owns;}
  static void closeSurfaceObject(Object o,String m){if(o!=null)XposedHelpers.callMethod(o,m);}
@@ -49,6 +49,9 @@ public class CellVisibilityRegression {
   h.workspaceAlpha=.45f;h.prepareCellSurface(s);check(surface.alpha==.45f,"preparation retains workspace fade");
   SurfaceControl.ops.clear();surface.valid=false;s.view.alpha=0;h.prepareCellSurface(s);
   check(s.view.alpha==1&&SurfaceControl.ops.isEmpty(),"future surface can open hole without invalid native transaction");
+  surface.valid=true;s.occupied=true;s.index=SLOT_TOP;h.workspaceAlpha=1f;
+  h.updateCellSurfaceVisibility(s);check(s.view.alpha==0&&!surface.shown,"closed upper face hides actual task surface");
+  h.topFace=true;h.updateCellSurfaceVisibility(s);check(s.view.alpha==1&&surface.shown,"settled upper face shows live task surface");
   System.out.println("Actual Host cell visibility checks="+checks+" passed");
  }
 }

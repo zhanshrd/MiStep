@@ -12,6 +12,7 @@ def member(signature):
         depth += (source[end]=='{')-(source[end]=='}'); end+=1
     return source[start:end]
 methods = '\n'.join(member(s) for s in ('    private void finishLiveResult(',
+            '    private boolean mainTaskVisible(',
             '    private PromotionFocusTransfer.Result requestLiveMainFocus(',
             '    private void finishPromotionFocus('))
 files = {
@@ -23,7 +24,7 @@ public class LiveFocusRegression {
  static int checks;static void check(boolean v,String s){checks++;if(!v)throw new AssertionError(s);}
  static class MiStepLiveSwap {static class Result {boolean rolesConfirmed,sideOwned,succeeded;Result(boolean side,boolean roles){sideOwned=side;rolesConfirmed=roles;succeeded=true;}}}
  static class LiveTask {int id;Object token;LiveTask(int i,Object t){id=i;token=t;}}
- static class Promotion {int taskId=101;Object token="app";boolean nativeCollect,nativeHome,cancelled,liveMainFocusPrepared;PromotionFocusTransfer.Result liveMainFocusResult;LiveTask collectionHome;List<Object>otherSideTokens=new ArrayList<>();}
+ static class Promotion {int taskId=101,liveMainUserId=0;Object token="app";boolean nativeCollect,nativeHome,cancelled,liveMainFocusPrepared;PromotionFocusTransfer.Result liveMainFocusResult;LiveTask collectionHome;List<Object>otherSideTokens=new ArrayList<>();}
  static class Queue {List<Runnable> posts=new ArrayList<>();int delays;void post(Runnable r){posts.add(r);}void postDelayed(Runnable r,long delay){delays++;posts.add(r);}void flush(){while(!posts.isEmpty())posts.remove(0).run();}}
  static class XposedHelpers {
   static Object callStaticMethod(Class<?>c,String n,Object...args){try{return c.getMethod(n).invoke(null);}catch(Exception e){throw new RuntimeException(e);}}
@@ -36,6 +37,7 @@ public class LiveFocusRegression {
  Promotion promotion;long sceneEpoch=1;int scene=ACTIVE;static final int ACTIVE=0;boolean suspendRequested,screenOn=true;int shellCalls,completed;Queue main=new Queue(),shell=new Queue();
  boolean externalPromotionCurrent(Promotion t){return promotion==t&&!t.cancelled&&scene==ACTIVE&&!suspendRequested&&screenOn;}
  boolean ordinaryRoot(Object o,int mode){Info i=(Info)o;return i.mode==mode&&i.type==1;}boolean isHomeRoot(Object o){return ((Info)o).type==2;}int windowModeOf(Object o){return ((Info)o).mode;}int currentUserId(){return 0;}void log(String s){}
+ Iterable<Integer> supportedTaskUsers(){return Arrays.asList(0,999);}
  boolean executeOnShell(Runnable r){shellCalls++;shell.post(r);return true;}
  void finishLiveCollect(Promotion t,MiStepLiveSwap.Result r){finishPromotionFocus(t,()->completed++,0);}void finishLiveHome(Promotion t,MiStepLiveSwap.Result r){finishPromotionFocus(t,()->completed++,0);}void finishLiveSwap(Promotion t,MiStepLiveSwap.Result r){finishPromotionFocus(t,()->completed++,0);}
  __METHODS__
@@ -45,6 +47,7 @@ public class LiveFocusRegression {
   check(h.completed==1&&h.shellCalls==0&&h.main.delays==0,"live final UI must not queue another Shell turn or 120ms poll");
  }
  public static void main(String[]args)throws Exception{
+  var cloneService=new Service();var cloneInfo=new Info(101,"app");cloneInfo.userId=999;cloneInfo.isVisible=false;cloneInfo.isFocused=true;cloneService.roots.add(cloneInfo);var cloneHost=fixture(cloneService);cloneHost.promotion.liveMainUserId=999;cloneHost.finishLiveResult(cloneHost.promotion,new MiStepLiveSwap.Result(true,true));fast(cloneHost,cloneService,0);check(cloneHost.promotion.liveMainFocusResult==PromotionFocusTransfer.Result.FOCUSED,"focused clone false-visible rejected");
   var s=new Service();s.roots.add(new Info(101,"app"));var h=fixture(s);h.finishLiveResult(h.promotion,new MiStepLiveSwap.Result(true,true));fast(h,s,1);check(s.last==101&&h.promotion.liveMainFocusResult==PromotionFocusTransfer.Result.REQUESTED,"exact new main requested, not claimed observed");
   s=new Service();var i=new Info(101,"app");i.isFocused=true;s.roots.add(i);h=fixture(s);h.finishLiveResult(h.promotion,new MiStepLiveSwap.Result(true,true));fast(h,s,0);
   s=new Service();i=new Info(1,"home");i.type=2;s.roots.add(i);i=new Info(101,"app");i.mode=6;i.isFocused=true;s.roots.add(i);h=fixture(s);h.promotion.nativeCollect=true;h.promotion.collectionHome=new LiveTask(1,"home");h.finishLiveResult(h.promotion,new MiStepLiveSwap.Result(true,true));fast(h,s,1);check(s.last==1,"collected side cannot retain main focus");
@@ -62,7 +65,7 @@ paths=[]
 for name,text in files.items():
     p=out/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text,encoding='utf-8');paths.append(str(p))
 jdk=Path(os.environ["MISTEP_JAVA_BIN"])
-paths += [str(src/'PromotionFocusTransfer.java'),str(root/'tests/PromotionFocusTransferTest.java')]
+paths += [str(src/'PromotionFocusTransfer.java'),str(src/'TaskUserPolicy.java'),str(root/'tests/PromotionFocusTransferTest.java')]
 subprocess.run([str(jdk/'javac.exe'),'-encoding','UTF-8','--release','17','-d',str(out),*paths],check=True)
 for name in ('PromotionFocusTransferTest','LiveFocusRegression'):
     subprocess.run([str(jdk/'java.exe'),'-cp',str(out),'com.jiusis.mistep.'+name],check=True)

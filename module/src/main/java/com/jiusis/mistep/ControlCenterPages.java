@@ -2,6 +2,9 @@ package com.jiusis.mistep;
 
 /** Axis locking keeps the pager away from vertical sliders and the native music seek bar. */
 final class ControlCenterPages {
+    private final int pageCount;
+    ControlCenterPages() { this(2); }
+    ControlCenterPages(int pageCount) { this.pageCount=Math.max(1,pageCount); }
     private float downX, downY, width, travel, slop, origin;
     private int page;
     boolean dragging, vertical, blocked;
@@ -23,14 +26,14 @@ final class ControlCenterPages {
             if (Math.abs(dy)>slop && Math.abs(dy)>=Math.abs(dx)) vertical=true;
             else if (Math.abs(dx)>slop && Math.abs(dx)>Math.abs(dy)*1.25f) dragging=true;
         }
-        return dragging ? Math.max(0, Math.min(travel, origin-dx)) : origin;
+        return dragging ? Math.max(0, Math.min(travel*(pageCount-1), origin-dx)) : origin;
     }
     int finish(float x, float velocity, float minimumVelocity, boolean cancel) {
         if (cancel || !dragging) return page;
         float dx=x-downX;
         if (Math.abs(dx)>slop*2 && Math.abs(velocity)>minimumVelocity)
-            return velocity<0 ? 1 : 0;
-        if (Math.abs(dx)>width*.18f) return dx<0 ? 1 : 0;
+            return Math.max(0,Math.min(pageCount-1,page+(velocity<0?1:-1)));
+        if (Math.abs(dx)>width*.18f) return Math.max(0,Math.min(pageCount-1,page+(dx<0?1:-1)));
         return page;
     }
 }

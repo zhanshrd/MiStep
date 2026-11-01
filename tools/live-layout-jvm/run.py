@@ -28,7 +28,7 @@ package com.jiusis.mistep;
 public class LiveLayoutRegression {
  static int checks;
  static void check(boolean value,String reason){checks++;if(!value)throw new AssertionError(reason);}
- static final int SLOT_COUNT=4;
+ static final int SLOT_COUNT=4,CELL_SLOT_COUNT=4;
  static class MiStepStatusBarSampling{static int refreshes;static void geometryChanged(){refreshes++;}}
  static class View {
   Object params=new FrameLayout.LayoutParams();int layouts,invalidates;
@@ -39,15 +39,16 @@ public class LiveLayoutRegression {
   static class LayoutParams {int leftMargin,topMargin,width,height;}
  }
  static class Bar {boolean right;int changes;void setMainOnRight(boolean value){right=value;changes++;}}
- static class Slot {int[] rect;Object token=new Object(),controller=new Object();int applied,touch;}
+ static class Slot {int index;int[] rect;Object token=new Object(),controller=new Object();int applied,touch;}
  final Slot[] slots=new Slot[SLOT_COUNT];final View[] sideBackingViews=new View[SLOT_COUNT];
  int screenW=1200,screenH=2608,wallpapers,zoomWrites;boolean mainOnRight;
  MiStepLayout layout=MiStepLayout.of(screenW,screenH,false,2.75f);FrameLayout root=new FrameLayout();Bar topBar=new Bar();
- LiveLayoutRegression(){for(int i=1;i<SLOT_COUNT;i++){slots[i]=new Slot();sideBackingViews[i]=new View();slots[i].rect=layout.cellBounds(i-1);}}
+ LiveLayoutRegression(){for(int i=1;i<SLOT_COUNT;i++){slots[i]=new Slot();slots[i].index=i;sideBackingViews[i]=new View();slots[i].rect=layout.cellBounds(i-1);}}
  void log(String value){}void applyWallpaperBackdrops(){wallpapers++;}
  int sideSegmentTop(int index){return layout.cellY[index-1];}
  int sideSegmentHeight(int index){return layout.cellHeight[index-1];}
  void applyRect(Slot slot){slot.applied++;}void updateTouchRegion(Slot slot){slot.touch++;}
+ int[] slotBounds(Slot slot){return layout.cellBounds(slot.index-1);}
  __METHOD__
  void oneDirection(boolean right){
   Object[] tokens=new Object[SLOT_COUNT],controllers=new Object[SLOT_COUNT];
