@@ -63,7 +63,7 @@ public final class MiStepHost {
     static final int SLOT_COUNT = CELL_SLOT_COUNT + 1;
     static final String TOP_TASK_STATE_ACTION = "com.jiusis.mistep.TOP_TASK_STATE";
     private static final long LAUNCH_TIMEOUT_MS = 4000L;
-    private static final long SIDE_PROMOTION_TIMEOUT_MS = 3500L;
+    static final long SIDE_PROMOTION_TIMEOUT_MS = 3500L;
 
     private static volatile MiStepHost sInstance;
 
@@ -121,6 +121,7 @@ public final class MiStepHost {
     MiStepTopBar topBar;
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
+    final HostAdoptionController adoption;
     private View sideBacking;
     /** 侧栏按格分段的不透明底板；承载格需要把它藏起来让下面的真实任务画面透出来。 */
     final View[] sideBackingViews = new View[SLOT_COUNT];
@@ -139,7 +140,7 @@ public final class MiStepHost {
     boolean landscapeSuspended;
     boolean transferBusy;
     private boolean overlayRefreshScheduled;
-    private static boolean boundsHooksReady;
+    static boolean boundsHooksReady;
     private static boolean surfaceHooksReady;
     private Object surfaceObserver;
     private volatile boolean traceNextSwap;
@@ -221,7 +222,7 @@ public final class MiStepHost {
         public void position(int value) { index = value; }
     }
 
-    private static final class PendingSidePromotion {
+    static final class PendingSidePromotion {
         final Slot slot;
         final int taskId;
         final Object token;
@@ -450,6 +451,7 @@ public final class MiStepHost {
         promotionController = new HostPromotionController(this);
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
+        adoption = new HostAdoptionController(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
         installRetainedSurfaces(ctx.getClassLoader());
         for (int i = 0; i < SLOT_COUNT; i++) {
@@ -562,43 +564,7 @@ public final class MiStepHost {
         h.main.post(() -> h.swapWithMain(slot));
     }
 
-    /** Keep the original notification dispatch until this exact side owner is released. */
-    static boolean promoteForNotification(String pkg, int userId, Runnable dispatch) {
-        MiStepHost h = sInstance;
-        if (h == null || dispatch == null || pkg == null || Looper.myLooper() != h.main.getLooper()
-                || h.scene != ACTIVE || !h.screenOn || h.keyguardLocked
-                || !h.supportsTaskUser(userId) || h.promotion != null || h.transferBusy) return false;
-        Slot match = null;
-        for (Slot slot : h.slots) {
-            if (slot.index <= SLOT_MAIN || slot.index >= CELL_SLOT_COUNT || !slot.occupied || slot.parked || slot.frozen
-                    || slot.carrier || slot.windowMode != 6 || !pkg.equals(slot.pkg)
-                    || !h.mayWriteSideSurface(slot)
-                    || !h.controllerOwns(slot, slot.taskId, slot.taskToken)) continue;
-            try {
-                Object info = XposedHelpers.getObjectField(slot.controller, "mTaskInfo");
-                if (XposedHelpers.getIntField(info, "taskId") != slot.taskId
-                        || XposedHelpers.getIntField(info, "userId") != userId) continue;
-            } catch (Throwable stale) { continue; }
-            if (match != null) return false;
-            match = slot;
-        }
-        if (match == null) return false;
-        h.swapWithMain(match.index);
-        Promotion ticket = h.promotion;
-        if (ticket == null || ticket.cancelled || ticket.slot != match) return false;
-        ticket.notificationLaunch = dispatch;
-        log("notification waits for same-task promotion task=" + ticket.taskId + " package=" + pkg);
-        return true;
-    }
 
-    void resumeNotificationLaunch(Promotion ticket) {
-        Runnable dispatch = ticket.notificationLaunch;
-        ticket.notificationLaunch = null;
-        if (dispatch != null) {
-            log("notification resumes original dispatch task=" + ticket.taskId);
-            main.post(dispatch);
-        }
-    }
 
     /** Arm passive instrumentation only; it never starts a swap or turns on a POC. */
     public static void debugTraceNextSwap() {
@@ -1403,91 +1369,13 @@ TopTaskGeometry topGeometry() {
         return home;
     }
 
-    private Object homeForCollection(LiveTask task) throws Exception {
+    Object homeForCollection(LiveTask task) throws Exception {
         return existingHomeForCollection(task).token;
     }
 
-    void adoptExisting(Slot slot, LiveTask task, Runnable success, Consumer<String> failure) {
-        adoptExisting(slot, task, false, success, failure);
-    }
 
-    void adoptExisting(Slot slot, LiveTask task, boolean collectFromMain,
-            Runnable success, Consumer<String> failure) {
-        if (!isActive(slot) || !boundsHooksReady || transferBusy || slot.frozen || slot.controller == null) {
-            failure.accept("adoption busy/unavailable");
-            return;
-        }
-        transferBusy = true;
-        slot.promoting = true;
-        slot.modeGuardUntil = SystemClock.uptimeMillis() + 2500L;
-        slot.modeRepairAttempts = 0;
-        slot.parked = false;
-        slot.retiredTaskId = -1;
-        prepareCellSurface(slot);
-        final long epoch = sceneEpoch;
-        if (!executeOnShell(() -> {
-            boolean claimed = false;
-            NativeObservation observation = null;
-            try {
-                Object core = rootInfo(task);
-                if (core == null && absentFromShellAndController(slot, task)) {
-                    main.post(() -> {
-                        transferBusy = false;
-                        slot.promoting = false;
-                        if (slot.taskId == task.id && task.token.equals(slot.taskToken)) clearSlot(slot);
-                        failure.accept("task confirmed gone from Core/Shell/controller");
-                    });
-                    return;
-                }
-                if (!ordinaryRoot(core, 1) || (collectFromMain && !XposedHelpers.getBooleanField(core, "isVisible")))
-                    throw new IllegalStateException("required fullscreen source no longer available");
-                Object controller = slot.controller;
-                resetIdleTaskView(slot);
-                if (XposedHelpers.getObjectField(controller, "mTaskToken") != null)
-                    throw new IllegalStateException("destination controller is occupied");
-                if (!Boolean.TRUE.equals(XposedHelpers.getObjectField(controller, "mSurfaceCreated"))
-                        || getSurfaceField(controller, "mSurfaceControl") == null)
-                    throw new IllegalStateException("destination surface unavailable");
-                Object organizer = XposedHelpers.getObjectField(controller, "mTaskOrganizer");
-                Object lock = XposedHelpers.getObjectField(organizer, "mLock");
-                synchronized (lock) {
-                    Object appeared = ((android.util.SparseArray<?>) XposedHelpers.getObjectField(organizer, "mTasks")).get(task.id);
-                    if (appeared == null) throw new IllegalStateException("canonical task not in existing organizer");
-                    Object info = XposedHelpers.callMethod(appeared, "getTaskInfo");
-                    Object canonical = XposedHelpers.callMethod(appeared, "getLeash");
-                    Object fallback = ((android.util.SparseArray<?>) XposedHelpers.getObjectField(organizer, "mTaskListeners")).get(-2);
-                    Object explicit = ((android.util.SparseArray<?>) XposedHelpers.getObjectField(organizer, "mTaskListeners")).get(task.id);
-                    if (!task.matches(info) || !ordinaryRoot(info, 1) || explicit != null
-                            || fallback == null || XposedHelpers.callMethod(organizer, "getTaskListener", info, false) != fallback
-                            || canonical == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(canonical, "isValid")))
-                        throw new IllegalStateException("canonical identity/fullscreen ownership gate rejected");
-                    Object wct = Class.forName("android.window.WindowContainerTransaction").getDeclaredConstructor().newInstance();
-                    XposedHelpers.callMethod(wct, "setWindowingMode", task.token, 6);
-                    XposedHelpers.callMethod(wct, "setBounds", task.token, logicalBounds(slot));
-                    applyTopConfiguration(wct, task.token, slot);
-                    XposedHelpers.callMethod(wct, "setForceTranslucent", task.token, true);
-                    XposedHelpers.callMethod(wct, "setAlwaysOnTop", task.token, true);
-                    XposedHelpers.callMethod(wct, "setFocusable", task.token, true);
-                    XposedHelpers.callMethod(wct, "setHidden", task.token, false);
-                    if (collectFromMain) XposedHelpers.callMethod(wct, "reorder", homeForCollection(task), true);
-                    XposedHelpers.callMethod(wct, "reorder", task.token, true);
-                    // Existing listener is retired by the organizer, never globally replaced.
-                    claimed = true;
-                    XposedHelpers.callMethod(organizer, "addListenerForTaskId", controller, task.id);
-                    observation = observeNativeCommit(task.token,
-                            () -> checkAdoption(slot, task, epoch, 0, success, failure));
-                    XposedHelpers.callMethod(transitions, "startRootTask", controller, info, canonical, wct);
-                    log("adopt existing task=" + task.id + " into slot=" + slot.index + " logical=" + logicalBounds(slot));
-                }
-            } catch (Throwable error) {
-                cancelNativeObservation(observation);
-                final boolean changed = claimed;
-                main.post(() -> adoptionFailed(slot, task, changed, "adopt: " + error, failure));
-            }
-        })) adoptionFailed(slot, task, false, "no Shell queue", failure);
-    }
 
-    private void checkAdoption(Slot slot, LiveTask task, long epoch, int attempt,
+    void checkAdoption(Slot slot, LiveTask task, long epoch, int attempt,
             Runnable success, Consumer<String> failure) {
         if (!isActive(slot) || epoch != sceneEpoch) {
             adoptionFailed(slot, task, true, "scene changed during adoption", failure);
@@ -1538,166 +1426,11 @@ TopTaskGeometry topGeometry() {
         })) adoptionFailed(slot, task, true, "no Shell queue for confirmation", failure);
     }
 
-    /** A failed claim is handed back to the same native owner, never removed/restarted. */
-    private void adoptionFailed(Slot slot, LiveTask task, boolean claimed, String error, Consumer<String> failure) {
-        transferBusy = false;
-        slot.launching = false;
-        if (!claimed) {
-            slot.promoting = slot.frozen;
-            if (slot.occupied && slot.taskId == task.id && task.token.equals(slot.taskToken))
-                slot.parked = true;
-            updateHint(slot);
-            failure.accept(error);
-            return;
-        }
-        bindTask(slot, task.id, task.token);
-        slot.pkg = task.pkg;
-        slot.occupied = true;
-        returnToSystem(slot, false, () -> {
-            clearSlot(slot);
-            failure.accept(error + "; handed back alive");
-        }, rollback -> {
-            // Do not clear a still-owned controller or let a later selection overwrite it.
-            slot.frozen = true;
-            slot.promoting = true;
-            log("adoption rollback incomplete; frozen live task=" + task.id + ": " + rollback);
-            failure.accept(error + "; binding frozen");
-        });
-    }
 
-    void returnToSystem(Slot slot, boolean front, Runnable success, Consumer<String> failure) {
-        returnToSystem(slot,front,false,success,failure);
-    }
 
-    void returnToSystem(Slot slot, boolean front, boolean liveMainReveal,
-            Runnable success, Consumer<String> failure) {
-        Promotion ticket = new Promotion(slot, new Slot[0]);
-        ticket.background = !front;
-        ticket.liveMainReveal = liveMainReveal;
-        if(liveMainReveal && topCtrl.topTransition!=null) {
-            topCtrl.topTransition.setNativeRestore(()->{
-                ticket.liveMainReveal=false;
-                promotionController.restoreTopMainOpacity(ticket);
-            });
-        }
-        ticket.sceneEpoch = sceneEpoch;
-        ticket.bindingEpoch = slot.taskEpoch;
-        slot.promoting = true;
-        transferBusy = true;
-        recycleBuffered(slot);
-        if (!executeOnShell(() -> {
-            NativeObservation observation = null;
-            try {
-                if (!returnTicketCurrent(ticket)) throw new IllegalStateException("stale return ticket");
-                LiveTask identity = new LiveTask(ticket.taskId, ticket.token, slot.pkg);
-                Object core = rootInfo(identity);
-                if (core == null) {
-                    if (!absentFromShellAndController(slot, identity))
-                        throw new IllegalStateException("task missing from roots but still alive in Shell/controller");
-                    main.post(() -> {
-                        if (!returnTicketCurrent(ticket)) return;
-                        transferBusy = false; clearSlot(slot); success.run();
-                    });
-                    return;
-                }
-                Object current = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
-                if (current == null && ordinaryRoot(core, 1)) {
-                    main.post(() -> checkReturned(slot, ticket, 0, success, failure));
-                    return;
-                }
-                if (!ticket.token.equals(current))
-                    throw new IllegalStateException("return controller identity changed");
-                observation = observeNativeCommit(ticket.token, () -> checkReturned(slot, ticket, 0, success, failure));
-                if (!applyWct("return-live-task", fullscreenExitTransaction(ticket)))
-                    throw new IllegalStateException("return transaction failed");
-            } catch (Throwable error) {
-                cancelNativeObservation(observation);
-                main.post(() -> {
-                    transferBusy = false;
-                    slot.promoting = slot.frozen;
-                    failure.accept(error.toString());
-                });
-            }
-         })) { transferBusy = false; slot.promoting = slot.frozen; failure.accept("no Shell queue"); }
-    }
 
-    private boolean returnTicketCurrent(Promotion ticket) {
-        Slot slot = ticket.slot;
-        return isActive(slot) && sceneEpoch == ticket.sceneEpoch && slot.taskEpoch == ticket.bindingEpoch
-                && slot.taskId == ticket.taskId && ticket.token.equals(slot.taskToken);
-    }
 
-    /** Root enumeration alone does not prove death: child/moved tasks remain in Shell. */
-    private boolean absentFromShellAndController(Slot slot, LiveTask task) {
-        Object organizer = XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
-        synchronized (XposedHelpers.getObjectField(organizer, "mLock")) {
-            Object appeared = ((android.util.SparseArray<?>) XposedHelpers.getObjectField(organizer, "mTasks")).get(task.id);
-            if (appeared != null && task.matches(XposedHelpers.callMethod(appeared, "getTaskInfo"))) return false;
-            Object current = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
-            Object pending = XposedHelpers.getObjectField(slot.controller, "mPendingInfo");
-            return !task.token.equals(current) && (pending == null || !task.matches(pending));
-        }
-    }
 
-    private void checkReturned(Slot slot, Promotion ticket, int attempt, Runnable success, Consumer<String> failure) {
-        if (!returnTicketCurrent(ticket)) {
-            transferBusy = false;
-            failure.accept("stale return ticket; no new binding touched");
-            return;
-        }
-        if (!executeOnShell(() -> {
-            boolean ready = false, gone = false;
-            String detail;
-            try {
-                if (!returnTicketCurrent(ticket)) throw new IllegalStateException("stale return on Shell queue");
-                LiveTask identity = new LiveTask(ticket.taskId, ticket.token, slot.pkg);
-                Object core = rootInfo(identity);
-                if (core == null) {
-                    gone = absentFromShellAndController(slot, identity);
-                    ready = gone;
-                } else if (ordinaryRoot(core, 1)) {
-                    handoffPromotedTask(ticket);
-                    ready = ticket.handoffComplete
-                            && XposedHelpers.getObjectField(slot.controller, "mTaskToken") == null;
-                }
-                detail = "native handback=" + ready + " gone=" + gone;
-            } catch (Throwable error) { detail = error.toString(); }
-            final boolean done = ready, removed = gone;
-            final String result = detail;
-            main.post(() -> {
-                if (!returnTicketCurrent(ticket)) {
-                    transferBusy = false;
-                    failure.accept("stale return completion; no new binding touched");
-                    return;
-                }
-                if (done) {
-                    ownedTasks.remove(ticket.token);
-                    if (removed) clearSlot(slot);
-                    else {
-                        slot.promoting = false;
-                        slot.frozen = false;
-                        slot.parked = true;
-                        slot.taskVisible = false;
-                        slot.scaleSurface = null;
-                        slot.scaleTaskId = Integer.MIN_VALUE;
-                        slot.scaleApplied = -1f;
-                        updateHint(slot);
-                    }
-                    transferBusy = false;
-                    removeCellBackground(slot);
-                    log("returned task id=" + ticket.taskId + " gone=" + removed + " front=" + !ticket.background);
-                    success.run();
-                } else if (attempt < 2 && !ticket.handoffAttempted) {
-                    main.postDelayed(() -> checkReturned(slot, ticket, attempt + 1, success, failure), 500L);
-                } else {
-                    transferBusy = false;
-                    slot.frozen |= ticket.handoffAttempted;
-                    slot.promoting = slot.frozen;
-                    failure.accept(result);
-                }
-            });
-        })) { transferBusy = false; failure.accept("no Shell queue for handback"); }
-    }
 
     private static final class RenderBinding {
         final Slot slot;
@@ -2768,35 +2501,6 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void preannounceDesktopLaunch(android.os.Bundle binding) {
-        if (binding == null || scene != ACTIVE || !screenOn || keyguardLocked
-                || binding.getLong("scene", -1L) != sceneEpoch) return;
-        int taskId = binding.getInt("taskId", -1);
-        android.os.IBinder token = binding.getBinder("task");
-        for (Slot slot : slots) {
-            if (slot.index <= 0 || !slot.occupied || slot.parked || slot.frozen
-                    || slot.taskId != taskId || slot.taskToken == null
-                    || slot.taskEpoch != binding.getLong("binding", -1L)
-                    || !java.util.Objects.equals(slot.pkg, binding.getString("package"))) continue;
-            try {
-                if (!java.util.Objects.equals(token, XposedHelpers.callMethod(slot.taskToken, "asBinder"))) return;
-                log("desktop launch preannounced exact task=" + taskId + " slot=" + slot.index);
-                if (binding.getBoolean("hostRoute", false)) {
-                    if (SystemClock.uptimeMillis() > binding.getLong("deadline", 0L)) {
-                        log("desktop host route expired without changing task=" + taskId); return;
-                    }
-                    if (slot.windowMode != 6 || !mayWriteSideSurface(slot)) return;
-                    if (transferBusy || promotion != null || slot.promoting || slot.launching) {
-                        main.postDelayed(() -> preannounceDesktopLaunch(binding), 32L);
-                    } else {
-                        log("desktop host route uses real promotion task=" + taskId);
-                        onSlotTapped(slot.index);
-                    }
-                } else queueSidePromotion(slot, true);
-            } catch (Throwable unavailable) { log("desktop preannouncement rejected: " + unavailable); }
-            return;
-        }
-    }
 
     /** Publish only confirmed bindings; system_server rechecks each native task before use. */
     void publishDesktopSideTasks() {
@@ -2890,142 +2594,11 @@ TopTaskGeometry topGeometry() {
         queueSidePromotion(match, true);
     }
 
-    private boolean sideTaskMatchesUser(Slot slot, int user) {
-        if (user < 0 || slot == null || !slot.occupied || slot.parked || slot.frozen
-                || slot.controller == null || slot.taskToken == null) return false;
-        try {
-            Object info = XposedHelpers.getObjectField(slot.controller, "mTaskInfo");
-            return controllerOwns(slot, slot.taskId, slot.taskToken)
-                    && XposedHelpers.getIntField(info, "userId") == user;
-        } catch (Throwable unavailable) { return false; }
-    }
 
-    private void queueSidePromotion(Slot slot, boolean desktopLaunch) {
-        if (slot == null || slot.index <= SLOT_MAIN || !isActive(slot)
-                || !slot.occupied || slot.taskId < 0 || slot.taskToken == null
-                || slot.parked || slot.frozen || slot.launching) return;
-        PendingSidePromotion pending = slot.pendingSidePromotion;
-        if (pending != null && pending.taskId == slot.taskId
-                && pending.token.equals(slot.taskToken)
-                && pending.bindingEpoch == slot.taskEpoch
-                && pending.sceneEpoch == sceneEpoch) {
-            pending.desktopLaunch |= desktopLaunch;
-            return;
-        }
-        pending = new PendingSidePromotion(slot, sceneEpoch, desktopLaunch,
-                SystemClock.uptimeMillis() + SIDE_PROMOTION_TIMEOUT_MS);
-        slot.pendingSidePromotion = pending;
-        retrySidePromotion(pending);
-    }
 
-    private void retrySidePromotion(PendingSidePromotion request) {
-        Slot slot = request.slot;
-        if (slot.pendingSidePromotion != request) return;
-        boolean sameTask = scene == ACTIVE && isActive(slot) && slot.occupied
-                && !slot.parked && !slot.frozen && !slot.launching
-                && SidePromotionPolicy.sameBinding(request.taskId, request.token,
-                        request.sceneEpoch, request.bindingEpoch, request.pkg,
-                        slot.taskId, slot.taskToken, sceneEpoch, slot.taskEpoch, slot.pkg);
-        if (!sameTask) {
-            slot.pendingSidePromotion = null;
-            log("pending side promotion cancelled: task binding changed slot=" + slot.index);
-            return;
-        }
-        if (promotion != null && promotion.slot == slot
-                && promotion.taskId == request.taskId && request.token.equals(promotion.token)) {
-            slot.pendingSidePromotion = null;
-            return;
-        }
-        if (slot.modeAdmissionPending && !request.desktopLaunch) {
-            slot.pendingSidePromotion = null;
-            return;
-        }
-        long now = SystemClock.uptimeMillis();
-        long wait = SidePromotionPolicy.retryDelay(now, request.deadline,
-                slot.modeGuardUntil, promotion != null || transferBusy || slot.promoting
-                        || slot.windowMode != 1);
-        if (wait < 0L || request.attempts >= 40) {
-            slot.pendingSidePromotion = null;
-            log("pending side promotion expired slot=" + slot.index + " task=" + request.taskId
-                    + " mode=" + slot.windowMode + " attempts=" + request.attempts);
-            if (slot.windowMode == 6) reapplyScale(slot);
-            return;
-        }
-        if (wait == 0L) {
-            slot.pendingSidePromotion = null;
-            log("pending side promotion execute slot=" + slot.index + " task=" + request.taskId
-                    + " desktop=" + request.desktopLaunch + " mode=" + slot.windowMode);
-            // The system has already made this task fullscreen. Submitting another
-            // fullscreen TaskView pending here repeats prepareOpen/updateBounds and
-            // suppresses the original Launcher transition. Observe that transition.
-            beginExternalPromotion(request);
-            return;
-        }
-        request.attempts++;
-        main.postDelayed(() -> retrySidePromotion(request), wait);
-    }
 
-    private void beginExternalPromotion(PendingSidePromotion request) {
-        Slot slot = request.slot;
-        if (promotion != null || transferBusy || !isActive(slot)
-                || !SidePromotionPolicy.sameBinding(request.taskId, request.token,
-                        request.sceneEpoch, request.bindingEpoch, request.pkg,
-                        slot.taskId, slot.taskToken, sceneEpoch, slot.taskEpoch, slot.pkg)
-                || slot.windowMode != 1) return;
-        Promotion ticket = new Promotion(slot, slots);
-        ticket.sceneEpoch = sceneEpoch;
-        ticket.bindingEpoch = slot.taskEpoch;
-        ticket.externalLaunch = true;
-        ticket.previousMainOnRight = mainOnRight;
-        ticket.targetMainOnRight = mainOnRight;
-        promotion = ticket;
-        slot.promoting = true;
-        recycleBuffered(slot);
-        MiStepClipboard.get(ctx).close();
-        statusBar.hideFor(ticket, () -> {
-            if (promotion == ticket && !ticket.cancelled)
-                failPromotion(ticket, "external promotion status-bar lease expired");
-        });
-        if (!executeOnShell(() -> {
-            try {
-                if (!externalPromotionCurrent(ticket)) return;
-                ticket.homeBeforeCover = existingHomeTask();
-                traceSwap(ticket);
-                observeNativeCommit(ticket.token, () -> afterExternalTransitionIdle(ticket));
-                log("observe external fullscreen task=" + ticket.taskId
-                        + "; retain original launch, no second fullscreen pending");
-            } catch (Throwable error) {
-                main.post(() -> failPromotion(ticket, "external prepare: " + error));
-            }
-        })) failPromotion(ticket, "external promotion Shell executor unavailable");
-    }
 
-    boolean externalPromotionCurrent(Promotion ticket) {
-        return promotion == ticket && !ticket.cancelled && !ticket.cancelRequested && scene == ACTIVE
-                && screenOn && !keyguardLocked
-                && sceneEpoch == ticket.sceneEpoch && isActive(ticket.slot)
-                && ticket.slot.taskEpoch == ticket.bindingEpoch
-                && ticket.slot.taskId == ticket.taskId
-                && ticket.token.equals(ticket.slot.taskToken);
-    }
 
-    private void afterExternalTransitionIdle(Promotion ticket) {
-        if (!externalPromotionCurrent(ticket)) return;
-        if (!executeOnShell(() -> {
-            try {
-                if (!externalPromotionCurrent(ticket)) return;
-                Object shellTransitions = XposedHelpers.getObjectField(transitions, "mTransitions");
-                // The exact target ROM queues this until pending transitions and all
-                // tracks are idle. Its finish observer runs before finishT.apply.
-                XposedHelpers.callMethod(shellTransitions, "runOnIdle", (Runnable) () ->
-                        main.post(() -> {
-                            if (externalPromotionCurrent(ticket)) checkPromotion(ticket, 0);
-                        }));
-            } catch (Throwable error) {
-                main.post(() -> failPromotion(ticket, "external transition idle unavailable: " + error));
-            }
-        })) failPromotion(ticket, "external transition Shell queue unavailable");
-    }
 
     private void scheduleSideSurfaceRestore(Slot slot, int taskId, Object token,
             long bindingEpoch, long epoch) {
@@ -3470,6 +3043,34 @@ TopTaskGeometry topGeometry() {
 
     // ---------------------------------------------------------------- 点击 / 交换
 
+    void adoptExisting(Slot slot, LiveTask task, Runnable success, Consumer<String> failure) { adoption.adoptExisting(slot, task, success, failure); }
+    void adoptExisting(Slot slot, LiveTask task, boolean collectFromMain,
+            Runnable success, Consumer<String> failure) { adoption.adoptExisting(slot, task, collectFromMain, success, failure); }
+    void adoptionFailed(Slot slot, LiveTask task, boolean claimed, String error, Consumer<String> failure) { adoption.adoptionFailed(slot, task, claimed, error, failure); }
+    void returnToSystem(Slot slot, boolean front, Runnable success, Consumer<String> failure) { adoption.returnToSystem(slot, front, success, failure); }
+    void returnToSystem(Slot slot, boolean front, boolean liveMainReveal,
+            Runnable success, Consumer<String> failure) { adoption.returnToSystem(slot, front, liveMainReveal, success, failure); }
+    boolean returnTicketCurrent(Promotion ticket) { return adoption.returnTicketCurrent(ticket); }
+    boolean absentFromShellAndController(Slot slot, LiveTask task) { return adoption.absentFromShellAndController(slot, task); }
+    void checkReturned(Slot slot, Promotion ticket, int attempt, Runnable success, Consumer<String> failure) { adoption.checkReturned(slot, ticket, attempt, success, failure); }
+    void promoteExternalLaunch(Slot slot) { adoption.promoteExternalLaunch(slot); }
+    void promoteUnsupportedSide(Slot slot) { adoption.promoteUnsupportedSide(slot); }
+    void scheduleSideModeResolution(Slot slot, int taskId) { adoption.scheduleSideModeResolution(slot, taskId); }
+    void repairSideWindowMode(Slot slot, int taskId) { adoption.repairSideWindowMode(slot, taskId); }
+    void releaseNativeFreeformSide(Slot slot, int taskId, Object token) { adoption.releaseNativeFreeformSide(slot, taskId, token); }
+    static boolean promoteForNotification(String pkg, int userId, Runnable dispatch) {
+        MiStepHost hh = current();
+        if (hh == null) return false;
+        return hh.adoption.promoteForNotification(pkg, userId, dispatch);
+    }
+    void resumeNotificationLaunch(Promotion ticket) { adoption.resumeNotificationLaunch(ticket); }
+    void queueSidePromotion(Slot slot, boolean desktopLaunch) { adoption.queueSidePromotion(slot, desktopLaunch); }
+    void retrySidePromotion(PendingSidePromotion request) { adoption.retrySidePromotion(request); }
+    void beginExternalPromotion(PendingSidePromotion request) { adoption.beginExternalPromotion(request); }
+    boolean externalPromotionCurrent(Promotion ticket) { return adoption.externalPromotionCurrent(ticket); }
+    void afterExternalTransitionIdle(Promotion ticket) { adoption.afterExternalTransitionIdle(ticket); }
+    void preannounceDesktopLaunch(android.os.Bundle binding) { adoption.preannounceDesktopLaunch(binding); }
+    boolean sideTaskMatchesUser(Slot slot, int user) { return adoption.sideTaskMatchesUser(slot, user); }
     void launchWhenReady(int slot, String pkg, int attempt) { lifecycle.launchWhenReady(slot, pkg, attempt); }
     void toggleVisibility() { lifecycle.toggleVisibility(); }
     void suspendSession(String reason) { lifecycle.suspendSession(reason); }
@@ -3488,7 +3089,7 @@ TopTaskGeometry topGeometry() {
     void refreshKeyguardPrivacy() { lifecycle.refreshKeyguardPrivacy(); }
     void leaveKeyguardPrivacy() { lifecycle.leaveKeyguardPrivacy(); }
 
-    private void onSlotTapped(int slotIndex) {
+    void onSlotTapped(int slotIndex) {
         if(slotIndex==SLOT_TOP) { topCtrl.releaseTopTask(true,true,null); return; }
         swapController.onSlotTapped(slotIndex);
     }
@@ -3608,7 +3209,7 @@ TopTaskGeometry topGeometry() {
                 && root.getVisibility() == View.VISIBLE;
     }
 
-    private void postForSlot(Slot slot, Consumer<Slot> callback) {
+    void postForSlot(Slot slot, Consumer<Slot> callback) {
         main.post(() -> { if (isActive(slot)) callback.accept(slot); });
     }
 
@@ -3701,76 +3302,9 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void promoteExternalLaunch(Slot slot) {
-        if (slot == null || slot.index <= SLOT_MAIN || !isActive(slot)) return;
-        log("external launcher launch detected slot=" + slot.index
-                + " task=" + slot.taskId + " mode=" + slot.windowMode + "; promote");
-        queueSidePromotion(slot, false);
-    }
 
-    /**
-     * Some system apps reject WINDOWING_MODE_MULTI_WINDOW and remain fullscreen.
-     * Keep their task alive by opening it in the main pane instead of forcing a mode
-     * change, which makes the framework destroy the task.
-     */
-    private void promoteUnsupportedSide(Slot slot) {
-        if (slot == null || slot.index <= SLOT_MAIN || !isActive(slot)
-                || slot.promoting || promotion != null || transferBusy) return;
-        String pkg = slot.pkg == null ? "" : slot.pkg;
-        slot.modeAdmissionPending = false;
-        log("side mode unsupported slot=" + slot.index + " task=" + slot.taskId
-                + " mode=" + slot.windowMode + " pkg=" + pkg + "; open in main");
-        android.widget.Toast.makeText(ctx, "该应用不支持副格，已在主区打开",
-                android.widget.Toast.LENGTH_SHORT).show();
-        slot.modeGuardUntil = 0L;
-        onSlotTapped(slot.index);
-    }
 
-    private void scheduleSideModeResolution(Slot slot, int taskId) {
-        long delay = Math.max(220L,
-                slot.modeGuardUntil - SystemClock.uptimeMillis() + 150L);
-        main.postDelayed(() -> {
-            if (!isActive(slot) || slot.taskId != taskId || slot.promoting
-                    || slot.launching || slot.parked || !slot.occupied) return;
-            if (slot.windowMode == 6) {
-                slot.modeAdmissionPending = false;
-                slot.modeRepairAttempts = 0;
-                reapplyScale(slot);
-            } else if (slot.windowMode == 1 && slot.modeAdmissionPending) {
-                repairSideWindowMode(slot, taskId);
-            }
-        }, delay);
-    }
 
-    private void repairSideWindowMode(Slot slot, int taskId) {
-        if (!isActive(slot) || slot.taskId != taskId || slot.promoting
-                || slot.launching || slot.parked || !slot.modeAdmissionPending) return;
-        long now = SystemClock.uptimeMillis();
-        if (now < slot.modeGuardUntil) return;
-        if (slot.modeRepairAttempts >= 2) {
-            promoteUnsupportedSide(slot);
-            return;
-        }
-        slot.modeRepairAttempts++;
-        slot.modeGuardUntil = now + 850L;
-        try {
-            Object wct = Class.forName("android.window.WindowContainerTransaction")
-                    .getDeclaredConstructor().newInstance();
-            XposedHelpers.callMethod(wct, "setWindowingMode", slot.taskToken, 6);
-            XposedHelpers.callMethod(wct, "setBounds", slot.taskToken, logicalBounds());
-            XposedHelpers.callMethod(wct, "setForceTranslucent", slot.taskToken, true);
-            XposedHelpers.callMethod(wct, "setAlwaysOnTop", slot.taskToken, true);
-            XposedHelpers.callMethod(wct, "setFocusable", slot.taskToken, true);
-            XposedHelpers.callMethod(wct, "setHidden", slot.taskToken, false);
-            XposedHelpers.callMethod(wct, "reorder", slot.taskToken, true);
-            boolean applied = applyWct("initial-side-mode-repair-" + slot.modeRepairAttempts, wct);
-            log("initial side mode repair slot=" + slot.index + " task=" + taskId
-                    + " attempt=" + slot.modeRepairAttempts + " applied=" + applied);
-        } catch (Throwable error) {
-            log("initial side mode repair failed slot=" + slot.index + ": " + error);
-        }
-        main.postDelayed(() -> scheduleSideModeResolution(slot, taskId), 900L);
-    }
 
     /** 与气泡同原语：IStatusBarService.hideCurrentInputMethodForBubbles(displayId)（BC L776）。 */
     void hideIme() {
@@ -4061,39 +3595,6 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void releaseNativeFreeformSide(Slot slot, int taskId, Object token) {
-        if (slot.nativeReleasePending) return;
-        final long binding = slot.taskEpoch;
-        final Object controller = slot.controller;
-        slot.nativeReleasePending = true;
-        slot.frozen = true;
-        slot.windowMode = 5;
-        slot.pendingSidePromotion = null;
-        recycleBuffered(slot);
-        if (!executeOnShell(() -> {
-            boolean released = false;
-            try {
-                if (slot.taskEpoch == binding && slot.taskId == taskId && token.equals(slot.taskToken))
-                    released = MiStepNativeSideRelease.release(controller, transitions, taskId, token);
-            } catch (Throwable error) { log("native side release task=" + taskId + " failed: " + error); }
-            final boolean done = released;
-            postForSlot(slot, owner -> {
-                if (owner.taskEpoch != binding || owner.taskId != taskId
-                        || !token.equals(owner.taskToken) || owner.controller != controller) return;
-                owner.nativeReleasePending = false;
-                owner.frozen = false;
-                if (done) {
-                    ownedTasks.remove(token);
-                    clearSlot(owner);
-                    compactCells();
-                    log("native freeform released side task=" + taskId + "; slot cleared, task retained");
-                }
-            });
-        })) {
-            slot.nativeReleasePending = false;
-            slot.frozen = false;
-        }
-    }
 
     private void onTaskVisibility(int slotIndex, int taskId, boolean visible) {
         Slot slot = slots[slotIndex];
