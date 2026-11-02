@@ -240,7 +240,7 @@ final class HostEntryZoom {
                     HostEntry.sLiveZoomIssued = issued;
                     HostEntry.sLiveZoomCommit = commit;
                     target.dispatch.takeOver(target, scale, y, x);
-                    target.owner.cancelZoomAnimation(target);
+                    HostEntry.cancelZoomAnimation(target);
                     // Logical WM parents already have their final roles, while the real
                     // leashes still animate under Host. Applying this traversal's clear
                     // operations now exposes an identity/fullscreen task for one frame.
@@ -252,7 +252,7 @@ final class HostEntryZoom {
                         LiveSwapZoom.closeReplay(staged);
                         throw new IllegalStateException("live zoom surface scope already active");
                     }
-                    try { target.owner.applyDisplayZoomLocked(target, scale, y, x, commit); }
+                    try { HostEntry.applyDisplayZoomLocked(target, scale, y, x, commit); }
                     finally {
                         HostEntry.sLiveSwapZoomSurfaces.finish(target.display, staged);
                         LiveSwapZoom.closeReplay(staged);

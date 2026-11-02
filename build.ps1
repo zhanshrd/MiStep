@@ -35,8 +35,13 @@ if (-not $Unsigned) {
 $ns = 'http://schemas.android.com/apk/res/android'
 if ($manifest.manifest.GetAttribute('versionName',$ns) -ne $version.name -or
     $manifest.manifest.GetAttribute('versionCode',$ns) -ne [string]$version.code) { throw 'Version metadata mismatch.' }
-$entry = Get-Content -LiteralPath (Join-Path $src 'java\com\jiusis\mistep\HostEntry.java') -Raw
-if ([regex]::Matches($entry,[regex]::Escape($version.runtimeMarker)).Count -ne 3) { throw 'Runtime markers mismatch.' }
+$entryDir = Join-Path $src 'java\com\jiusis\mistep'
+$markerCount = 0
+Get-ChildItem -LiteralPath $entryDir -Filter '*.java' | ForEach-Object {
+    $markerCount += [regex]::Matches((Get-Content -LiteralPath $_.FullName -Raw),
+        [regex]::Escape($version.runtimeMarker)).Count
+}
+if ($markerCount -ne 3) { throw 'Runtime markers mismatch.' }
 New-Item -ItemType Directory -Force -Path $out,$dist,(Join-Path $out 'classes'),(Join-Path $out 'native'),(Join-Path $out 'dex') | Out-Null
 $env:JAVA_HOME = $JavaHome
 $env:MISTEP_JAVA_BIN = $javaBin

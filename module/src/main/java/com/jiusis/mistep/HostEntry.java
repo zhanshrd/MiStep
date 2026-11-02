@@ -60,27 +60,27 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     private static final String TAG = "MiStepProbe";
     static final String SYSTEMUI = "com.android.systemui";
-    private static final String DESKTOP_ICON_LAUNCH_ACTION =
+    static final String DESKTOP_ICON_LAUNCH_ACTION =
             "com.jiusis.mistep.DESKTOP_ICON_LAUNCH";
     private static final long LAUNCH_DELAY_MS = 12_000L;   // 等开机稳定
-    private static final long AFTER_ADD_MS = 2_500L;       // 等 TaskView 表面就绪再启动
+    static final long AFTER_ADD_MS = 2_500L;       // 等 TaskView 表面就绪再启动
 
     /** 试验方框的位置与尺寸（后面要换成自适应布局）。 */
-    private static final int BOX_W = 600;
-    private static final int BOX_H = 900;
-    private static final int BOX_X = 40;
-    private static final int BOX_Y = 520;
+    static final int BOX_W = 600;
+    static final int BOX_H = 900;
+    static final int BOX_X = 40;
+    static final int BOX_Y = 520;
 
-    private static final String TARGET_PKG = "com.android.settings";
+    static final String TARGET_PKG = "com.android.settings";
 
-    private static volatile Context sContext;
-    private static volatile Object sTaskViewFactory;
-    private static volatile Object sTaskViewTransitions;
-    private static volatile Executor sShellExecutor;
+    static volatile Context sContext;
+    static volatile Object sTaskViewFactory;
+    static volatile Object sTaskViewTransitions;
+    static volatile Executor sShellExecutor;
     private static volatile boolean sStarted;
 
-    private static View sWindowRoot;
-    private static Object sTaskView;
+    static View sWindowRoot;
+    static Object sTaskView;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -210,20 +210,18 @@ public class HostEntry implements IXposedHookLoadPackage {
             new java.util.WeakHashMap<>();
     static java.lang.reflect.Method sTaskRotationResolver;
     static boolean sUpdatingTaskRotation;
-    private static final java.util.Map<Object, String> sGestureSurfaces =
+    static final java.util.Map<Object, String> sGestureSurfaces =
             new java.util.WeakHashMap<>();
 
     static void setHostZoomed(boolean zoomed) { HostEntryZoom.setHostZoomed(zoomed); }
 
     static final class ZoomTarget {
-        final HostEntry owner;
         final Object display;
         final Object globalLock;
         final Handler handler;
         final ZoomDispatch dispatch;
 
-        ZoomTarget(HostEntry owner, Object display, Object globalLock, Handler handler) {
-            this.owner = owner;
+        ZoomTarget(Object display, Object globalLock, Handler handler) {
             this.display = display;
             this.globalLock = java.util.Objects.requireNonNull(globalLock);
             this.handler = handler;
@@ -231,8 +229,8 @@ public class HostEntry implements IXposedHookLoadPackage {
                     (identity, scale, offsetY, offsetX) -> {
                         if (sZoomTarget == identity) {
                             // 静态状态请求优先于动画：先取消动画，避免结束回调把旧目标写回去。
-                            owner.cancelZoomAnimation(this);
-                            owner.applyDisplayZoomLocked(this, scale, offsetY, offsetX);
+                            cancelZoomAnimation(this);
+                            applyDisplayZoomLocked(this, scale, offsetY, offsetX);
                         }
                     }, error -> {
                         log("WM zoom request stopped; no same-state retry: " + error);
@@ -244,7 +242,7 @@ public class HostEntry implements IXposedHookLoadPackage {
         void submitAnim(ZoomAnimCommand.Plan plan, String key) {
             handler.post(() -> {
                 if (sZoomTarget != this) return;
-                owner.startZoomAnimation(this, plan, key);
+                startZoomAnimation(this, plan, key);
             });
         }
     }
@@ -255,231 +253,7 @@ public class HostEntry implements IXposedHookLoadPackage {
      * DisplayContent.applyMagnificationSpec(scale/offset) —— 目标机自带的整屏缩放原语，
      * 与锤子Mi Step的 MagnificationSpecSmt / applyZoomedMatrixSmt 是同一机制的官方版本。
      */
-    private void hookSystemServer(ClassLoader cl) {
-        log("=== attached to system_server (android) build=1.2.0 release ===");
-        MiStepRecents.install(cl);
-        NativeRawInputBridge.install();
-        try {
-            Class<?> dc = XposedHelpers.findClass("com.android.server.wm.DisplayContent", cl);
-            XposedBridge.hookAllMethods(dc, "configureSurfaces", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    Object self = param.thisObject;
-                    try {
-                        Object type = XposedHelpers.callMethod(self, "getDisplayId");
-                        if (type instanceof Integer && ((Integer) type).intValue() != 0) {
-                            return;
-                        }
-                        sDisplayContent = self;
-                        Object service = XposedHelpers.getObjectField(self, "mWmService");
-                        Object lock = XposedHelpers.getObjectField(service, "mGlobalLock");
-                        Object handler = XposedHelpers.getObjectField(service, "mH");
-                        if (!(handler instanceof Handler)) {
-                            throw new IllegalStateException("WMS.mH is not a Handler");
-                        }
-                        // configureSurfaces creates a new display surface even for the same DC.
-                        // New identity invalidates deduplication after a real surface rebuild.
-                        cancelZoomAnimation(null);
-                        sZoomAnimKey = null;
-                        sZoomTarget = new ZoomTarget(HostEntry.this, self, lock, (Handler) handler);
-                        armZoomBridge(service);
-                        dispatchCurrentZoom();
-                        log("captured DisplayContent(display 0) with WM handler/global lock -> " + self);
-                    } catch (Throwable t) {
-                        sZoomTarget = null;
-                        log("capture DisplayContent failed: " + t);
-                    }
-                }
-            });
-            log("DisplayContent#configureSurfaces hooked");
-        } catch (Throwable t) {
-            log("hookSystemServer hook failed: " + t);
-            return;
-        }
-        MiStepRecentsInput.install(cl, () -> sZoomed
-                ? new float[]{sZoomScale, sZoomOffset, sZoomOffsetX} : null);
-        MiStepWallpaperScale.install(cl, () -> {
-            ZoomTarget target = sZoomTarget;
-            return sZoomed && target != null && target.display == sDisplayContent
-                    ? target.display : null;
-        });
-        installMagnificationSurfaceTracking(cl);
-        hookMagnificationReplayAfterTransition(cl);
-        installNativeFreeformCoexistence(cl);
-        installFixedMainRotationHooks(cl);
-        installMainSystemUiRotation(cl);
-        installFixedMainTouchableCropHook(cl);
-        installSideSystemBarPolicy(cl);
-        installWorkspaceFocus(cl);
-        installWorkspaceRunningTasks(cl);
-        // Use WM's own visual AND input-window magnification path for system input UI.
-        // The target normally excludes IME and conditionally excludes the navigation bar.
-        // Do not change accessibility settings or pretend that a mouse is connected.
-        try {
-            Class<?> window = XposedHelpers.findClass("com.android.server.wm.WindowState", cl);
-            XposedHelpers.findAndHookMethod(window, "shouldMagnify", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (!sZoomed || sDisplayContent == null) return;
-                    try {
-                        if (XposedHelpers.callMethod(p.thisObject, "getDisplayContent") != sDisplayContent) return;
-                        Object task = XposedHelpers.callMethod(p.thisObject, "getTask");
-                        WindowManager.LayoutParams attrs = (WindowManager.LayoutParams)
-                                XposedHelpers.getObjectField(p.thisObject, "mAttrs");
-                        if (task == null && (attrs.type == 2011 || attrs.type == 2012)) {
-                            Object target = XposedHelpers.callMethod(sDisplayContent, "getImeInputTarget");
-                            Object window = target == null ? null
-                                    : XposedHelpers.callMethod(target, "getWindowState");
-                            task = window == null ? null : XposedHelpers.callMethod(window, "getTask");
-                        }
-                        // Native freeforms inherit the same WM parent transform as main apps.
-                        // Their canonical leash retains the OEM's own mini/freeform scale.
-                        int flags = XposedHelpers.getIntField(attrs, "privateFlags");
-                        // Native gesture windows keep the ROM's own magnification policy.
-                        if (InputMagnificationPolicy.shouldForceMagnification(attrs.type, flags,
-                                attrs.packageName, attrs.getTitle()))
-                            p.setResult(Boolean.TRUE);
-                    } catch (Throwable error) { log("input UI magnification skipped: " + error); }
-                }
-            });
-            log("scoped IME/navigation magnification admitted on default display");
-        } catch (Throwable error) { log("input UI magnification unavailable: " + error); }
-        try {
-            Class<?> window = XposedHelpers.findClass("com.android.server.wm.WindowState", cl);
-            XposedHelpers.findAndHookMethod(window, "canBeImeLayeringTarget",
-                    new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (!sZoomed || !Boolean.TRUE.equals(p.getResult())) return;
-                    try {
-                        Object task = XposedHelpers.callMethod(p.thisObject, "getTask");
-                        if (task != null
-                                && Integer.valueOf(6).equals(XposedHelpers.callMethod(
-                                        task, "getWindowingMode"))
-                                && Boolean.TRUE.equals(XposedHelpers.callMethod(
-                                        task, "isForceTranslucent"))) {
-                            p.setResult(Boolean.FALSE);
-                        }
-                    } catch (Throwable error) {
-                        log("side IME exclusion skipped: " + error);
-                    }
-                }
-            });
-            log("side TaskViews excluded from IME layering while zoomed");
-        } catch (Throwable error) { log("side IME exclusion unavailable: " + error); }
-        try {
-            Class<?> spy = XposedHelpers.findClass("com.android.server.input.GestureMonitorSpyWindow", cl);
-            XposedBridge.hookAllConstructors(spy, new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (p.args.length != 7 || !Integer.valueOf(0).equals(p.args[2])) return;
-                    String name = String.valueOf(p.args[1]);
-                    try {
-                        Context context = (Context) sSystemContext;
-                        String[] packages = context == null ? null
-                                : context.getPackageManager().getPackagesForUid((Integer) p.args[4]);
-                        String kind = NativeFreeformPolicy.gestureKind((Integer) p.args[2],
-                                name, (Integer) p.args[4], packages);
-                        if (kind == null) return;
-                        Object surface = XposedHelpers.getObjectField(p.thisObject, "mInputSurface");
-                        synchronized (sGestureSurfaces) {
-                            sGestureSurfaces.put(surface, kind);
-                        }
-                        ZoomTarget target = sZoomTarget;
-                        if (target != null) target.handler.post(() -> {
-                            synchronized (target.globalLock) {
-                                if (sZoomTarget == target)
-                                    applyGestureSurfacesLocked(target, sZoomScale,
-                                            sZoomOffset, sZoomOffsetX);
-                            }
-                        });
-                        log("captured gesture monitor name=" + name + " pid=" + p.args[3]
-                                + " uid=" + p.args[4] + " packages="
-                                + (packages == null ? "unknown" : java.util.Arrays.toString(packages)));
-                        if ("return".equals(kind)) {
-                            StackTraceElement[] frames = Thread.currentThread().getStackTrace();
-                            StringBuilder callers = new StringBuilder();
-                            for (int i = 1; i < frames.length && i < 9; i++) {
-                                if (callers.length() > 0) callers.append(" <- ");
-                                callers.append(frames[i].getClassName()).append('.')
-                                        .append(frames[i].getMethodName());
-                            }
-                            log("return gesture monitor creator " + callers);
-                        }
-                    } catch (Throwable error) { log("navigation surface admission skipped: " + error); }
-                }
-            });
-        } catch (Throwable error) { log("navigation input geometry unavailable: " + error); }
-        // Keep the non-resizable override inside Mi Step-owned side tasks. A process-wide
-        // override also changes Home and unrelated windowing decisions.
-        try {
-            Class<?> taskCls = XposedHelpers.findClass("com.android.server.wm.Task", cl);
-            XposedBridge.hookAllMethods(taskCls, "isResizeable", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (!sFullscreenRotationActive) return;
-                    try {
-                        if (isMiStepSideTask(param.thisObject)) param.setResult(Boolean.TRUE);
-                    } catch (Throwable error) {
-                        log("scoped resizeability check skipped: " + error);
-                    }
-                }
-            });
-            log("Task#isResizeable override scoped to active Mi Step side tasks");
-        } catch (Throwable t) {
-            log("Task#isResizeable hook failed: " + t);
-        }
-        try {
-            Class<?> at = XposedHelpers.findClass("android.app.ActivityThread", cl);
-            Object thread = XposedHelpers.callStaticMethod(at, "currentActivityThread");
-            Object ctx = thread == null ? null
-                    : XposedHelpers.callMethod(thread, "getSystemContext");
-            sSystemContext = ctx;
-            log("system context -> " + ctx);
-        } catch (Throwable t) {
-            log("system context failed: " + t);
-        }
-        installDesktopIconLaunchBridge(cl);
-        // 文件只作备用；所有通道共享有时限的最新请求，读取失败不能撤销有效广播。
-        //   mistep-zoom 内容 "scale offsetY offsetX"（如 "0.7472 622 273"），"1 0 0" = 还原；
-        //   动画行为 "anim <scale> <offsetY> <offsetX> <durationMs>"，从当前 spec 起步。
-        // SystemUI 私有文件用 FileObserver 即时触发（宿主自己写，用于呼出动画与后续交换动画）；
-        // 250ms 轮询只作兜底，并保留 adb/root 写 /data/system/mistep-zoom 的调试通道。
-        try {
-            Thread watcher = new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    while (!Thread.currentThread().isInterrupted()) {
-                        try {
-                            java.io.File f1 = new java.io.File("/data/system/mistep-zoom");
-                            java.io.File f2 = new java.io.File(
-                                    "/data/user_de/0/com.android.systemui/files/mistep-zoom");
-                            java.io.File f = f1;
-                            if (f2.exists() && (!f1.exists()
-                                    || f2.lastModified() > f1.lastModified())) {
-                                f = f2;
-                            }
-                            readAndDispatchZoom(f);
-                            Thread.sleep(250L);
-                        } catch (InterruptedException stopped) {
-                            Thread.currentThread().interrupt();
-                            return;
-                        } catch (Throwable t) {
-                            try {
-                                Thread.sleep(2000L);
-                            } catch (InterruptedException ignored) {
-                                Thread.currentThread().interrupt();
-                                return;
-                            }
-                        }
-                    }
-                }
-            }, "mistep-zoom-watch");
-            watcher.setDaemon(true);
-            watcher.start();
-            log("ZOOM lease watcher armed; transforms only on locked WMS handler");
-        } catch (Throwable t) {
-            log("ZOOM watcher failed: " + t);
-        }
-        installZoomFileObserver();
-    }
+    private void hookSystemServer(ClassLoader cl) { HostEntrySupport.INSTANCE.hookSystemServer(cl); }
 
     static volatile boolean sZoomBridgeArmed;
     static volatile android.content.Context sWmsContext;
@@ -556,70 +330,7 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     static void receiveLiveZoom(Context context, Intent intent) { HostEntryZoom.receiveLiveZoom(context, intent); }
     /** Transfer the existing physical gesture; InputDispatcher maps task coordinates once. */
-    static void transferSideTouch(Intent intent) {
-        ZoomTarget target = sZoomTarget;
-        android.os.Bundle tokens = intent.getBundleExtra("tokens");
-        if (target == null || tokens == null) return;
-        android.os.IBinder hostToken = tokens.getBinder("host");
-        android.os.IBinder taskToken = tokens.getBinder("task");
-        int taskId = intent.getIntExtra("taskId", -1);
-        long eventTime = intent.getLongExtra("eventTime", 0L);
-        target.handler.post(() -> {
-            long age = android.os.SystemClock.uptimeMillis() - eventTime;
-            if (sZoomTarget != target || sZoomScale >= 1f || age < 0 || age > 500
-                    || hostToken == null || taskToken == null || taskId < 0) return;
-            try {
-                Object from;
-                Object to;
-                Object input;
-                synchronized (target.globalLock) {
-                    Object service = XposedHelpers.getObjectField(target.display, "mWmService");
-                    java.util.Map<?, ?> windows = (java.util.Map<?, ?>)
-                            XposedHelpers.getObjectField(service, "mWindowMap");
-                    Object host = windows.get(hostToken);
-                    if (host == null) return;
-                    WindowManager.LayoutParams attrs = (WindowManager.LayoutParams)
-                            XposedHelpers.getObjectField(host, "mAttrs");
-                    if (!"MiStepHost".contentEquals(attrs.getTitle())
-                            || !SYSTEMUI.equals(attrs.packageName)
-                            || !Boolean.TRUE.equals(XposedHelpers.callMethod(host, "isVisible"))) return;
-                    Class<?> container = XposedHelpers.findClass(
-                            "com.android.server.wm.WindowContainer", target.display.getClass().getClassLoader());
-                    Object task = XposedHelpers.callStaticMethod(container, "fromBinder", taskToken);
-                    if (task == null || XposedHelpers.getIntField(task, "mTaskId") != taskId
-                            || !Integer.valueOf(6).equals(XposedHelpers.callMethod(task, "getWindowingMode"))
-                            || XposedHelpers.callMethod(task, "getDisplayContent") != target.display) return;
-                    Object[] app = {null};
-                    Consumer<Object> pick = window -> {
-                        if (app[0] != null) return;
-                        WindowManager.LayoutParams wa = (WindowManager.LayoutParams)
-                                XposedHelpers.getObjectField(window, "mAttrs");
-                        if ((wa.type == WindowManager.LayoutParams.TYPE_BASE_APPLICATION
-                                || wa.type == WindowManager.LayoutParams.TYPE_APPLICATION)
-                                && Boolean.TRUE.equals(XposedHelpers.callMethod(window, "isVisible"))
-                                && XposedHelpers.getObjectField(window, "mInputChannelToken") != null) {
-                            app[0] = window;
-                        }
-                    };
-                    XposedHelpers.callMethod(task, "forAllWindows", pick, true);
-                    if (app[0] == null) return;
-                    from = XposedHelpers.getObjectField(host, "mInputChannelToken");
-                    to = XposedHelpers.getObjectField(app[0], "mInputChannelToken");
-                    input = XposedHelpers.getObjectField(service, "mInputManager");
-                }
-                if (from == null || to == null) return;
-                Object result;
-                try {
-                    result = XposedHelpers.callMethod(input, "transferTouchGesture", from, to, true);
-                } catch (NoSuchMethodError olderApi) {
-                    result = XposedHelpers.callMethod(input, "transferTouchGesture", from, to);
-                }
-                log("side touch transferred task=" + taskId + " result=" + result + " age=" + age);
-            } catch (Throwable error) {
-                log("side touch transfer failed task=" + taskId + ": " + error);
-            }
-        });
-    }
+    static void transferSideTouch(Intent intent) { HostEntrySupport.transferSideTouch(intent); }
     /** watcher 与 FileObserver 共用：读文件、按租约解析、投递到 WM handler。 */
     static void readAndDispatchZoom(java.io.File f) { HostEntryZoom.readAndDispatchZoom(f); }
 
@@ -637,7 +348,7 @@ public class HostEntry implements IXposedHookLoadPackage {
     static void scheduleZoomDivergenceCheck(ZoomTarget target, float[] desired) { HostEntryZoom.scheduleZoomDivergenceCheck(target, desired); }
 
     /** Preserve active WM magnification after Shell resets its transition targets. */
-    private void hookMagnificationReplayAfterTransition(ClassLoader cl) { HostEntryZoom.INSTANCE.hookMagnificationReplayAfterTransition(cl); }
+    static void hookMagnificationReplayAfterTransition(ClassLoader cl) { HostEntryZoom.INSTANCE.hookMagnificationReplayAfterTransition(cl); }
 
     static void finishNativeFreeformStart(ZoomTarget target, Object start) { HostEntryNativeFreeform.finishNativeFreeformStart(target, start); }
 
@@ -652,86 +363,9 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     static void publishMainUiConfiguration(Object app) { HostEntryRotation.publishMainUiConfiguration(app); }
 
-    private void installMainSystemUiRotation(ClassLoader cl) { HostEntryRotation.INSTANCE.installMainSystemUiRotation(cl); }
+    static void installMainSystemUiRotation(ClassLoader cl) { HostEntryRotation.INSTANCE.installMainSystemUiRotation(cl); }
 
-    private void installMagnificationSurfaceTracking(ClassLoader cl) {
-        try {
-            Class<?> container = XposedHelpers.findClass("com.android.server.wm.WindowContainer", cl);
-            Class<?> transaction = XposedHelpers.findClass("android.view.SurfaceControl$Transaction", cl);
-            Class<?> spec = XposedHelpers.findClass("android.view.MagnificationSpec", cl);
-            XposedHelpers.findAndHookMethod(container, "applyMagnificationSpec", transaction,
-                    spec, new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    ZoomTarget target = sZoomTarget;
-                    if (!sZoomed || target == null || target.display != sDisplayContent
-                            || !Thread.holdsLock(target.globalLock)) return;
-                    try {
-                        boolean finalSnapshot = Boolean.TRUE.equals(sFinalMagnificationSnapshot.get());
-                        // Even an empty concurrent transition builds a display-wide finish.
-                        // Only Home's own delayed finish may restore children below its Root.
-                        boolean homeFinish = finalSnapshot && HomeTransitionMagnification.hasInfo(
-                                sMagnificationFinishInfo.get());
-                        if (!homeFinish && HomeTransitionMagnification.owns(
-                                p.thisObject, target.display)) {
-                            p.setObjectExtra("mistep.sideMagnification", Boolean.TRUE);
-                            p.setResult(null);
-                            return;
-                        }
-                        if (MiStepSideMagnification.ownsGeometry(p.thisObject, target.display)) {
-                            p.setObjectExtra("mistep.sideMagnification", Boolean.TRUE);
-                            p.setResult(null);
-                            return;
-                        }
-                        p.args[0] = sNativeFreeformStart.route(p.thisObject, target.display,
-                                p.args[0], Boolean.TRUE.equals(sFinalMagnificationSnapshot.get()));
-                        p.args[0] = sLiveSwapZoomSurfaces.route(p.thisObject, target.display,
-                                p.args[0], Boolean.TRUE.equals(sFinalMagnificationSnapshot.get()));
-                        java.util.Map<Object, Object> tracked = sMagnifiedSurfaces;
-                        if (!homeFinish && HomeTransitionMagnification.activeOn(target.display)) {
-                            tracked = new java.util.IdentityHashMap<>(tracked);
-                            tracked.entrySet().removeIf(entry ->
-                                    HomeTransitionMagnification.owns(entry.getKey(), target.display));
-                        }
-                        MiStepMagnificationTree.prepare(p.thisObject, target.display,
-                                p.args[0], p.args[1], tracked);
-                    } catch (Throwable error) {
-                        log("magnification replay surface cleanup skipped: " + error);
-                    }
-                }
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (!p.hasThrowable()
-                            && !Boolean.TRUE.equals(p.getObjectExtra("mistep.sideMagnification")))
-                        rememberMagnifiedSurface(p.thisObject, p.args[1]);
-                }
-            });
-            XposedHelpers.findAndHookMethod(container, "clearMagnificationSpec", transaction,
-                    new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    ZoomTarget target = sZoomTarget;
-                    if (!sZoomed || target == null || target.display != sDisplayContent
-                            || !Thread.holdsLock(target.globalLock)) return;
-                    try {
-                        // Native clear recurses before apply. Skipping apply alone lets
-                        // an older WM spec reset the TaskView leash to identity first.
-                        boolean homeFinish = Boolean.TRUE.equals(sFinalMagnificationSnapshot.get())
-                                && HomeTransitionMagnification.hasInfo(sMagnificationFinishInfo.get());
-                        if (!homeFinish
-                                && HomeTransitionMagnification.owns(p.thisObject, target.display)) {
-                            p.setResult(null);
-                            return;
-                        }
-                        if (MiStepSideMagnification.ownsGeometry(p.thisObject, target.display))
-                            p.setResult(null);
-                    } catch (Throwable error) {
-                        log("side magnification clear guard unavailable: " + error);
-                    }
-                }
-            });
-            log("WM magnification surface identities tracked for exit reconciliation");
-        } catch (Throwable error) {
-            log("WM magnification surface tracking unavailable: " + error);
-        }
-    }
+    private void installMagnificationSurfaceTracking(ClassLoader cl) { HostEntrySupport.INSTANCE.installMagnificationSurfaceTracking(cl); }
 
     static void rememberMagnifiedSurface(Object container, Object spec) { HostEntryZoom.rememberMagnifiedSurface(container, spec); }
 
@@ -741,10 +375,10 @@ public class HostEntry implements IXposedHookLoadPackage {
     static void installZoomFileObserver() { HostEntryZoom.installZoomFileObserver(); }
 
     /** Hold the workspace portrait; app transforms must never announce display rotation. */
-    private void installFixedMainRotationHooks(ClassLoader cl) { HostEntryRotation.INSTANCE.installFixedMainRotationHooks(cl); }
+    static void installFixedMainRotationHooks(ClassLoader cl) { HostEntryRotation.INSTANCE.installFixedMainRotationHooks(cl); }
 
     /** Root-task bounds remain in display orientation while our main token is rotated. */
-    private void installFixedMainTouchableCropHook(ClassLoader cl) { HostEntryRotation.INSTANCE.installFixedMainTouchableCropHook(cl); }
+    static void installFixedMainTouchableCropHook(ClassLoader cl) { HostEntryRotation.INSTANCE.installFixedMainTouchableCropHook(cl); }
 
     static boolean cropFixedMainTouchableRegion(Object window,            android.graphics.Region region) { return HostEntryRotation.cropFixedMainTouchableRegion(window, region); }
 
@@ -800,89 +434,14 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     static boolean isMiStepSideTask(Object task) { return HostEntryRotation.isMiStepSideTask(task); }
 
-    private static final ThreadLocal<Boolean> sReadingWorkspaceFocus = new ThreadLocal<>();
-    private static final ThreadLocal<Boolean> sWorkspaceLauncherTaskQuery = new ThreadLocal<>();
+    static final ThreadLocal<Boolean> sReadingWorkspaceFocus = new ThreadLocal<>();
+    static final ThreadLocal<Boolean> sWorkspaceLauncherTaskQuery = new ThreadLocal<>();
 
-    private void installWorkspaceRunningTasks(ClassLoader cl) {
-        try {
-            Class<?> running = XposedHelpers.findClass("com.android.server.wm.RunningTasks", cl);
-            Class<?> taskClass = XposedHelpers.findClass("com.android.server.wm.Task", cl);
-            // The ROM passes the original caller at argument 5, before clearing Binder identity.
-            for (java.lang.reflect.Method method : running.getDeclaredMethods()) {
-                if (!method.getName().equals("getTasks") || method.getParameterCount() != 7
-                        || method.getParameterTypes()[5] != int.class) continue;
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        p.setObjectExtra("mistepPreviousTaskQuery", sWorkspaceLauncherTaskQuery.get());
-                        boolean launcher = false;
-                        try {
-                            Context context = (Context) sSystemContext;
-                            String[] packages = context == null ? null : context.getPackageManager()
-                                    .getPackagesForUid((Integer) p.args[5]);
-                            launcher = packages != null
-                                    && java.util.Arrays.asList(packages).contains("com.miui.home");
-                        } catch (Throwable unavailable) { /* Preserve native queries on lookup failure. */ }
-                        sWorkspaceLauncherTaskQuery.set(sZoomed && launcher);
-                    }
-                    @Override protected void afterHookedMethod(MethodHookParam p) {
-                        Boolean previous = (Boolean) p.getObjectExtra("mistepPreviousTaskQuery");
-                        if (previous == null) sWorkspaceLauncherTaskQuery.remove();
-                        else sWorkspaceLauncherTaskQuery.set(previous);
-                    }
-                });
-            }
-            XposedHelpers.findAndHookMethod(running, "accept", taskClass, new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    if (!sZoomed || !Boolean.TRUE.equals(sWorkspaceLauncherTaskQuery.get())) return;
-                    try {
-                        Object task = p.args[0];
-                        if (XposedHelpers.callMethod(task, "getDisplayContent") != sDisplayContent) return;
-                        Object lease = MiStepDesktopLaunchBridge.recentsLease(task);
-                        if (lease != null && MiStepDesktopLaunchBridge.recentsLeaseAlive(lease))
-                            p.setResult(null);
-                    } catch (Throwable unavailable) { /* An uncertain task remains a native candidate. */ }
-                }
-            });
-            log("workspace Launcher running-task scan skips exact side leases before maxNum");
-        } catch (Throwable unavailable) { log("workspace running-task hook unavailable: " + unavailable); }
-    }
+    private void installWorkspaceRunningTasks(ClassLoader cl) { HostEntrySupport.INSTANCE.installWorkspaceRunningTasks(cl); }
 
-    private void installWorkspaceFocus(ClassLoader cl) {
-        try {
-            Class<?> area = XposedHelpers.findClass("com.android.server.wm.TaskDisplayArea", cl);
-            XC_MethodHook selection = new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (!sZoomed || p.hasThrowable() || p.getResult() == null
-                            || Boolean.TRUE.equals(sReadingWorkspaceFocus.get())) return;
-                    sReadingWorkspaceFocus.set(Boolean.TRUE);
-                    try {
-                        Object original = p.getResult();
-                        Object lease = MiStepDesktopLaunchBridge.recentsLease(original);
-                        boolean upperFallback="getNextFocusableRootTask".equals(p.method.getName()) && isUpperLandscapeTask(original);
-                        if ((!upperFallback && (lease == null || !MiStepDesktopLaunchBridge.recentsLeaseAlive(lease)))
-                                || XposedHelpers.callMethod(original, "getDisplayContent") != sDisplayContent) return;
-                        Object ignored = p.args.length >= 2 && Boolean.TRUE.equals(p.args[1]) ? p.args[0] : null;
-                        boolean excludeMode = p.args.length == 4 && Boolean.TRUE.equals(p.args[2]);
-                        int mode = excludeMode ? (Integer) p.args[3] : 0;
-                        Object target = WorkspaceFocus.next(p.thisObject, ignored, excludeMode, mode, task -> {
-                            Object binding = MiStepDesktopLaunchBridge.recentsLease(task);
-                            return isUpperLandscapeTask(task)
-                                    || binding != null && MiStepDesktopLaunchBridge.recentsLeaseAlive(binding);
-                        });
-                        // No replacement means WM keeps its native fallback; never return a hidden task.
-                        if (target != null) p.setResult(target);
-                    } catch (Throwable unavailable) {
-                        log("workspace focus selection unavailable: " + unavailable);
-                    } finally { sReadingWorkspaceFocus.remove(); }
-                }
-            };
-            XposedBridge.hookAllMethods(area, "getFocusedRootTask", selection);
-            XposedBridge.hookAllMethods(area, "getNextFocusableRootTask", selection);
-            log("workspace native focus selection skips exact side-task leases");
-        } catch (Throwable unavailable) { log("workspace focus hook unavailable: " + unavailable); }
-    }
+    private void installWorkspaceFocus(ClassLoader cl) { HostEntrySupport.INSTANCE.installWorkspaceFocus(cl); }
 
-    private void installNativeFreeformCoexistence(ClassLoader cl) { HostEntryNativeFreeform.INSTANCE.installNativeFreeformCoexistence(cl); }
+    static void installNativeFreeformCoexistence(ClassLoader cl) { HostEntryNativeFreeform.INSTANCE.installNativeFreeformCoexistence(cl); }
 
     static Object sNativeFreeformLayerAnchor;
     static Object sNativeFreeformPinManager;
@@ -916,129 +475,17 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     static void restoreNativeHostLayer(Object host, NativeHostLayer state, Object transaction) { HostEntryNativeFreeform.restoreNativeHostLayer(host, state, transaction); }
 
-    private void installSideSystemBarPolicy(ClassLoader cl) {
-        try {
-            Class<?> windowState = XposedHelpers.findClass(
-                    "com.android.server.wm.WindowState", cl);
-            XposedBridge.hookAllMethods(windowState, "getSystemUiVisibility",
-                    new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (!sFullscreenRotationActive || !(p.getResult() instanceof Integer)) return;
-                    try {
-                        Object task = XposedHelpers.callMethod(p.thisObject, "getTask");
-                        if (!isMiStepSideTask(task)) return;
-                        int original = (Integer) p.getResult();
-                        int visible = SystemBarVisibilityPolicy.forSideTask(original);
-                        if (visible != original) p.setResult(visible);
-                    } catch (Throwable error) {
-                        log("side task system-bar policy skipped: " + error);
-                    }
-                }
-            });
-            XposedHelpers.findAndHookMethod(windowState, "canAffectSystemUiFlags", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (!sZoomed || !Boolean.TRUE.equals(p.getResult())) return;
-                    try {
-                        if (XposedHelpers.callMethod(p.thisObject, "getDisplayContent") != sDisplayContent) return;
-                        Object task = XposedHelpers.callMethod(p.thisObject, "getTask");
-                        Object lease = MiStepDesktopLaunchBridge.recentsLease(task);
-                        if (lease != null && MiStepDesktopLaunchBridge.recentsLeaseAlive(lease))
-                            p.setResult(Boolean.FALSE);
-                    } catch (Throwable stale) { /* Preserve the native decision for unrelated windows. */ }
-                }
-            });
-            log("side task fullscreen system-ui flags isolated from display bars");
-        } catch (Throwable error) {
-            log("side task system-bar policy unavailable: " + error);
-        }
-    }
+    private void installSideSystemBarPolicy(ClassLoader cl) { HostEntrySupport.INSTANCE.installSideSystemBarPolicy(cl); }
 
-    private void installDesktopIconLaunchBridge(ClassLoader cl) {
-        try {
-            Class<?> atms = XposedHelpers.findClass(
-                    "com.android.server.wm.ActivityTaskManagerService", cl);
-            int hooked = 0;
-            for (java.lang.reflect.Method method : atms.getDeclaredMethods()) {
-                String name = method.getName();
-                final boolean fromRecents = name.equals("startActivityFromRecents");
-                if (!(fromRecents || name.equals("startActivity") || name.equals("startActivityAsUser")
-                        || name.equals("startActivityAsUserWithFeature"))) continue;
-                method.setAccessible(true);
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        boolean handled = fromRecents
-                                ? MiStepDesktopLaunchBridge.beforeRecents((Context) sSystemContext, p.thisObject, p.args)
-                                : MiStepDesktopLaunchBridge.before((Context) sSystemContext, p.thisObject, p.args,
-                                        desktopLaunchUser(method, p.args));
-                        if (handled) {
-                            p.setObjectExtra("mistepHostLaunch", true);
-                            p.setResult(2); // ActivityManager.START_TASK_TO_FRONT
-                        }
-                    }
-                    @Override protected void afterHookedMethod(MethodHookParam p) {
-                        if (fromRecents || Boolean.TRUE.equals(p.getObjectExtra("mistepHostLaunch"))) return;
-                        if (p.getThrowable() != null) return;
-                        Object result = p.getResult();
-                        if (result instanceof Integer && (Integer) result < 0) return;
-                        forwardDesktopIconLaunch(p.args, desktopLaunchUser(method, p.args));
-                    }
-                });
-                hooked++;
-            }
-            log("desktop icon launch bridge hooked ATMS methods=" + hooked);
-        } catch (Throwable error) {
-            log("desktop icon launch bridge unavailable: " + error);
-        }
-    }
+    private void installDesktopIconLaunchBridge(ClassLoader cl) { HostEntrySupport.INSTANCE.installDesktopIconLaunchBridge(cl); }
 
-    private static volatile String sLastDesktopLaunchPackage;
-    private static volatile int sLastDesktopLaunchUser = -1;
-    private static volatile long sLastDesktopLaunchAt;
+    static volatile String sLastDesktopLaunchPackage;
+    static volatile int sLastDesktopLaunchUser = -1;
+    static volatile long sLastDesktopLaunchAt;
 
-    private static int desktopLaunchUser(java.lang.reflect.Method method, Object[] args) {
-        int callerUser = (Integer) XposedHelpers.callStaticMethod(android.os.UserHandle.class,
-                "getUserId", android.os.Binder.getCallingUid());
-        return DesktopIconLaunchPolicy.launchUser(method.getName(), method.getParameterTypes(), args, callerUser);
-    }
+    static int desktopLaunchUser(java.lang.reflect.Method method, Object[] args) { return HostEntrySupport.desktopLaunchUser(method, args); }
 
-    private static void forwardDesktopIconLaunch(Object[] args, int launchUser) {
-        if (args == null || launchUser < 0) return;
-        String callerPackage = null;
-        android.content.Intent launch = null;
-        for (Object arg : args) {
-            if (arg instanceof String && "com.miui.home".equals(arg)) {
-                callerPackage = (String) arg;
-            } else if (arg instanceof android.content.Intent) {
-                launch = (android.content.Intent) arg;
-            }
-        }
-        String pkg = DesktopIconLaunchPolicy.packageForLauncherEntry(
-                callerPackage,
-                launch == null ? null : launch.getAction(),
-                launch != null && launch.hasCategory(android.content.Intent.CATEGORY_LAUNCHER),
-                launch == null || launch.getComponent() == null
-                        ? null : launch.getComponent().getPackageName());
-        if (pkg == null) return;
-        long now = android.os.SystemClock.uptimeMillis();
-        synchronized (HostEntry.class) {
-            if (pkg.equals(sLastDesktopLaunchPackage) && launchUser == sLastDesktopLaunchUser
-                    && now - sLastDesktopLaunchAt < 350L) return;
-            sLastDesktopLaunchPackage = pkg;
-            sLastDesktopLaunchUser = launchUser;
-            sLastDesktopLaunchAt = now;
-        }
-        try {
-            Context context = (Context) sSystemContext;
-            if (context == null) return;
-            android.content.Intent signal = new android.content.Intent(DESKTOP_ICON_LAUNCH_ACTION)
-                    .setPackage(SYSTEMUI)
-                    .putExtra("package", pkg).putExtra("userId", launchUser);
-            context.sendBroadcast(signal);
-            log("desktop icon launch forwarded package=" + pkg + " user=" + launchUser);
-        } catch (Throwable error) {
-            log("desktop icon launch forward failed: " + error);
-        }
-    }
+    static void forwardDesktopIconLaunch(Object[] args, int launchUser) { HostEntrySupport.forwardDesktopIconLaunch(args, launchUser); }
 
     private boolean isSystemRotationLocked(Object display) { return HostEntryRotation.INSTANCE.isSystemRotationLocked(display); }
 
@@ -1048,9 +495,9 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     static void recomputeDisplayOrientationLocked(Object display, String reason) { HostEntryRotation.recomputeDisplayOrientationLocked(display, reason); }
 
-    void applyDisplayZoomLocked(ZoomTarget target, float scale,            float offsetY, float offsetX) throws Throwable { HostEntryZoom.INSTANCE.applyDisplayZoomLocked(target, scale, offsetY, offsetX); }
+    static void applyDisplayZoomLocked(ZoomTarget target, float scale,            float offsetY, float offsetX) throws Throwable { HostEntryZoom.INSTANCE.applyDisplayZoomLocked(target, scale, offsetY, offsetX); }
 
-    void applyDisplayZoomLocked(ZoomTarget target, float scale,            float offsetY, float offsetX, ZoomCommit commit) throws Throwable { HostEntryZoom.INSTANCE.applyDisplayZoomLocked(target, scale, offsetY, offsetX, commit); }
+    static void applyDisplayZoomLocked(ZoomTarget target, float scale,            float offsetY, float offsetX, ZoomCommit commit) throws Throwable { HostEntryZoom.INSTANCE.applyDisplayZoomLocked(target, scale, offsetY, offsetX, commit); }
 
     /**
      * 整屏缩放动画：从当前生效 spec 插值到目标 spec，每帧仍在 WMS.mH 上、
@@ -1061,10 +508,10 @@ public class HostEntry implements IXposedHookLoadPackage {
      * POC 边界：本批只验证“逐帧整屏缩放”在目标机是否平滑、无崩溃；尚未接入
      * 主副交换动画，也不与宿主桥接动画同步。
      */
-    private void startZoomAnimation(ZoomTarget target, ZoomAnimCommand.Plan plan, String key) { HostEntryZoom.INSTANCE.startZoomAnimation(target, plan, key); }
+    private static void startZoomAnimation(ZoomTarget target, ZoomAnimCommand.Plan plan, String key) { HostEntryZoom.INSTANCE.startZoomAnimation(target, plan, key); }
 
     /** 只能在 WM handler 上取消；其它线程转发过去，不做 inline 调用。 */
-    void cancelZoomAnimation(ZoomTarget target) { HostEntryZoom.INSTANCE.cancelZoomAnimation(target); }
+    static void cancelZoomAnimation(ZoomTarget target) { HostEntryZoom.INSTANCE.cancelZoomAnimation(target); }
 
     static void applyGestureSurfacesLocked(ZoomTarget target, float scale,
             float offsetY, float offsetX) {
@@ -1106,171 +553,25 @@ public class HostEntry implements IXposedHookLoadPackage {
         finally { if (tx != null) try { XposedHelpers.callMethod(tx, "close"); } catch (Throwable ignored) {} }
     }
 
-    private void hookApplication(ClassLoader cl) {
-        try {
-            Class<?> c = XposedHelpers.findClass("com.android.systemui.SystemUIService", cl);
-            XposedBridge.hookAllMethods(c, "onCreate", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    Object self = param.thisObject;
-                    if (self instanceof Context) {
-                        sContext = (Context) self;
-                        MiStepClipboard.start(sContext);
-                        MiStepSystemActions.start(sContext, cl);
-                        MiStepWarmup.start(sContext, cl);
-                        log("captured Context -> " + sContext);
-                        scheduleStart();
-                    }
-                }
-            });
-            log("hooked SystemUIService#onCreate");
-        } catch (Throwable t) {
-            log("could not hook SystemUIService: " + t);
-        }
-    }
+    private void hookApplication(ClassLoader cl) { HostEntrySupport.INSTANCE.hookApplication(cl); }
 
-    private void hookBackGestureDiagnostics(ClassLoader cl) {
-        try {
-            Class<?> receiver = XposedHelpers.findClass(
-                    "com.android.systemui.navigationbar.gestural.DisplayBackGestureHandlerImpl$inputEventReceiver$1", cl);
-            XposedBridge.hookAllMethods(receiver, "onInputEvent", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    if (p.args.length == 1 && p.args[0] instanceof android.view.MotionEvent)
-                        logBackEvent("DisplayBackGestureHandler", (android.view.MotionEvent) p.args[0]);
-                }
-            });
-            log("DisplayBackGestureHandler input diagnostics installed");
-        } catch (Throwable error) {
-            log("DisplayBackGestureHandler input diagnostics unavailable: " + error);
-        }
-        try {
-            Class<?> panel = XposedHelpers.findClass(
-                    "com.android.systemui.navigationbar.gestural.BackPanelController", cl);
-            XposedBridge.hookAllMethods(panel, "onMotionEvent", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    if (p.args.length == 1 && p.args[0] instanceof android.view.MotionEvent)
-                        logBackEvent("BackPanelController", (android.view.MotionEvent) p.args[0]);
-                }
-            });
-            log("BackPanelController input diagnostics installed");
-        } catch (Throwable error) {
-            log("BackPanelController input diagnostics unavailable: " + error);
-        }
-    }
+    private void hookBackGestureDiagnostics(ClassLoader cl) { HostEntrySupport.INSTANCE.hookBackGestureDiagnostics(cl); }
 
     /**
      * MIUI computes the app open/close animation rectangle before SurfaceControl playback.
      * Keep that temporary visual rectangle inside Mi Step's main pane; task bounds and the
      * normal full-screen launcher animation are left untouched.
      */
-    private void hookTransitionBounds(ClassLoader cl) {
-        // Native windows now share the main parent coordinate system.
-        // Physical/main conversion and pre-return position suppression are unnecessary.
-        try {
-            Class<?> util = XposedHelpers.findClass(
-                    "com.android.wm.shell.common.transition.MiuiTransitionHandlerUtil", cl);
-            XposedBridge.hookAllMethods(util, "getAnimBounds", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam param) {
-                    Object result = param.getResult();
-                    Rect main = MiStepHost.activeMainBounds();
-                    if (!(result instanceof Rect) || main == null || param.args == null
-                            || param.args.length < 2
-                            || !MiStepHost.shouldClampAnimationBounds(
-                                    param.args[0], param.args[1])) return;
-                    Rect original = (Rect) result;
-                    Rect clipped = TransitionBounds.clamp(original, main);
-                    if (clipped == original || clipped.equals(original)) return;
-                    param.setResult(clipped);
-                    log("transition animation clipped " + original + " -> " + clipped
-                            + " main=" + main);
-                }
-            });
-            log("MIUI transition animation bounds clamped to active main pane");
-        } catch (Throwable error) {
-            log("transition animation clamp unavailable: " + error);
-        }
-
-    }
+    private void hookTransitionBounds(ClassLoader cl) { HostEntrySupport.INSTANCE.hookTransitionBounds(cl); }
 
 
-    private static void logBackEvent(String source, android.view.MotionEvent event) {
-        int action = event.getActionMasked();
-        if (action != android.view.MotionEvent.ACTION_DOWN
-                && action != android.view.MotionEvent.ACTION_UP
-                && action != android.view.MotionEvent.ACTION_CANCEL) return;
-        int display = -1;
-        try { display = (Integer) XposedHelpers.callMethod(event, "getDisplayId"); }
-        catch (Throwable ignored) {}
-        log("back event source=" + source + " action=" + action + " display=" + display
-                + " local=" + event.getX() + "," + event.getY()
-                + " raw=" + event.getRawX() + "," + event.getRawY()
-                + " hostZoom=" + sHostZoomed);
-    }
+    static void logBackEvent(String source, android.view.MotionEvent event) { HostEntrySupport.logBackEvent(source, event); }
 
-    private void hookRecentsWallpaper(ClassLoader cl) {
-        try {
-            Class<?> util = XposedHelpers.findClass("com.android.wm.shell.shared.TransitionUtil", cl);
-            XposedBridge.hookAllMethods(util, "newTarget", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (p.hasThrowable() || p.args.length != 5 || p.getResult() == null
-                            || !(p.args[4] instanceof java.util.Map)) return;
-                    try {
-                        if (MiStepRecentsWallpaper.stage(p.args[2], p.args[0],
-                                XposedHelpers.getObjectField(p.getResult(), "leash"), p.args[3],
-                                MiStepHost.activeMainTransform(), MiStepHost.activeMainBounds(),
-                                (java.util.Map) p.args[4]))
-                            log("Recents wallpaper capture fill staged behind workspace wallpaper");
-                    } catch (Throwable error) {
-                        log("Recents wallpaper capture unchanged: " + error);
-                    }
-                }
-            });
-        } catch (Throwable error) { log("Recents wallpaper hook unavailable: " + error); }
-    }
+    private void hookRecentsWallpaper(ClassLoader cl) { HostEntrySupport.INSTANCE.hookRecentsWallpaper(cl); }
 
-    private void hookShellProviders(ClassLoader cl) {
-        Class<?> module;
-        try {
-            module = XposedHelpers.findClass("com.android.wm.shell.dagger.WMShellBaseModule", cl);
-        } catch (Throwable t) {
-            log("WMShellBaseModule not found");
-            return;
-        }
-        int hooked = 0;
-        for (final Method m : module.getDeclaredMethods()) {
-            if (!m.getReturnType().getName().contains("TaskView")
-                    && !m.getName().startsWith("provideTaskView")) {
-                continue;
-            }
-            try {
-                XposedBridge.hookMethod(m, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        Object r = param.getResult();
-                        String n = m.getName();
-                        if ("provideTaskViewTransitions".equals(n)) {
-                            sTaskViewTransitions = r;
-                        } else if ("provideTaskViewFactoryController".equals(n)) {
-                            Object[] args = param.args;
-                            if (args != null && args.length > 1 && args[1] instanceof Executor) {
-                                sShellExecutor = (Executor) args[1];
-                                log("captured ShellExecutor -> " + sShellExecutor);
-                            }
-                        } else if ("provideTaskViewFactory".equals(n) && r instanceof Optional) {
-                            sTaskViewFactory = ((Optional<?>) r).orElse(null);
-                            log("captured TaskViewFactory -> " + sTaskViewFactory);
-                        }
-                    }
-                });
-                hooked++;
-            } catch (Throwable t) {
-                log("hook failed for " + m.getName() + ": " + t);
-            }
-        }
-        log("provider hooks installed: " + hooked);
-    }
+    private void hookShellProviders(ClassLoader cl) { HostEntrySupport.INSTANCE.hookShellProviders(cl); }
 
-    private void scheduleStart() {
+    static void scheduleStart() {
         if (sStarted) {
             return;
         }
@@ -1301,87 +602,7 @@ public class HostEntry implements IXposedHookLoadPackage {
     }
 
     /** v0.7.0：角部热区 + 广播触发；首次触发再启动宿主，之后切换显示。 */
-    private void installTriggers() {
-        final Runnable toggle = new Runnable() {
-            @Override
-            public void run() {
-                if (!MiStepEntryGuard.canOpen(sContext)) return;
-                try {
-                    MiStepHost.toggleOrStart(sContext, sShellExecutor, sTaskViewFactory, sTaskViewTransitions);
-                } catch (Throwable t) {
-                    log("toggle FAILED: " + t);
-                    XposedBridge.log(t);
-                }
-            }
-        };
-        HotZoneGesture.install(sContext, toggle);
-        try {
-            android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
-                @Override
-                public void onReceive(android.content.Context context, android.content.Intent intent) {
-                    String action = intent.getAction();
-                    if ("com.jiusis.mistep.DEBUG".equals(action)) {
-                        handleDebugBroadcast(intent);
-                        return;
-                    }
-                    if (MiStepHost.LANDSCAPE_MODE_ACTION.equals(action)) {
-                        MiStepHost.onLandscapeMode(intent.getBooleanExtra("fullscreen", false));
-                        return;
-                    }
-                    if(MiStepHost.TOP_TASK_STATE_ACTION.equals(action)) {
-                        MiStepHost.onTopTaskState(intent);return;
-                    }
-                    log("broadcast " + action + " -> toggle");
-                    toggle.run();
-                }
-            };
-            android.content.IntentFilter filter = new android.content.IntentFilter();
-            filter.addAction("com.jiusis.mistep.TOGGLE");
-            filter.addAction("com.jiusis.mistep.DEBUG");
-            filter.addAction(MiStepHost.LANDSCAPE_MODE_ACTION);
-            filter.addAction(MiStepHost.TOP_TASK_STATE_ACTION);
-            sContext.registerReceiver(receiver, filter, android.Manifest.permission.WRITE_SECURE_SETTINGS,
-                    null, android.content.Context.RECEIVER_EXPORTED);
-            log("broadcast trigger armed: TOGGLE / DEBUG");
-        } catch (Throwable t) {
-            log("broadcast trigger failed: " + t);
-        }
-        try {
-            android.content.BroadcastReceiver screenReceiver = new android.content.BroadcastReceiver() {
-                @Override
-                public void onReceive(android.content.Context context, android.content.Intent intent) {
-                    if (android.content.Intent.ACTION_CLOSE_SYSTEM_DIALOGS.equals(intent.getAction())) {
-                        String reason = intent.getStringExtra("reason");
-                        log("native system dialogs close reason=" + reason);
-                        if (MiStepNavigationPolicy.shouldSuspend(reason))
-                            MiStepHost.onSystemNavigation(reason);
-                        else if ("gestureNav".equals(reason) || "recentapps".equals(reason))
-                            log("native gesture navigation leaves Mi Step active");
-                        return;
-                    }
-                    if (android.content.Intent.ACTION_USER_PRESENT.equals(intent.getAction())) {
-                        log("user present -> clear keyguard privacy");
-                        MiStepHost.onUserPresent();
-                        return;
-                    }
-                    boolean on = android.content.Intent.ACTION_SCREEN_ON.equals(intent.getAction());
-                    if (!on || !MiStepEntryGuard.canOpen(sContext)) MiStepInputTrace.stop();
-                    log("screen " + (on ? "ON" : "OFF"));
-                    MiStepHost.onScreenState(on);
-                }
-            };
-            android.content.IntentFilter screenFilter = new android.content.IntentFilter();
-            screenFilter.addAction(android.content.Intent.ACTION_SCREEN_ON);
-            screenFilter.addAction(android.content.Intent.ACTION_SCREEN_OFF);
-            screenFilter.addAction(android.content.Intent.ACTION_USER_PRESENT);
-            screenFilter.addAction(android.content.Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
-            sContext.registerReceiver(screenReceiver, screenFilter,
-                    android.content.Context.RECEIVER_EXPORTED);
-            log("screen trigger armed");
-        } catch (Throwable t) {
-            log("screen trigger failed: " + t);
-        }
-    }
+    private static void installTriggers() { HostEntrySupport.INSTANCE.installTriggers(); }
 
     /**
      * 无人值守调试广播（v0.8.0）：
@@ -1389,287 +610,28 @@ public class HostEntry implements IXposedHookLoadPackage {
      *   am broadcast -a com.jiusis.mistep.DEBUG --ei slot 1 --ez swap true
      * 先确保宿主已启动，再转给 MiStepHost。
      */
-    private void handleDebugBroadcast(android.content.Intent intent) {
-        if (intent.getBooleanExtra("stopInputTrace", false)) {
-            MiStepInputTrace.stop();
-            if (sContext != null) sContext.sendBroadcast(new Intent(MiStepInputTrace.ACTION)
-                    .setPackage("android").putExtra("stopInputTrace", true));
-            return;
-        }
-        if (!MiStepEntryGuard.canOpen(sContext)) return;
-        if (intent.getBooleanExtra("traceInput", false)) {
-            MiStepInputTrace.arm(sContext, false, sContext.getClassLoader());
-            sContext.sendBroadcast(new Intent(MiStepInputTrace.ACTION).setPackage("android"));
-            return;
-        }
-        if (intent.getBooleanExtra("traceNextSwap", false)) {
-            MiStepHost.debugTraceNextSwap();
-            return;
-        }
-        int slot = intent.getIntExtra("slot", -1);
-        String pkg = intent.getStringExtra("pkg");
-        boolean swap = intent.getBooleanExtra("swap", false);
-        if (intent.getBooleanExtra("dumpViews", false)) {
-            log("broadcast DEBUG dumpViews");
-            MiStepHost.debugDumpViews();
-            return;
-        }
-        if (intent.getBooleanExtra("roots", false)) {
-            log("broadcast DEBUG roots");
-            MiStepHost.debugRoots();
-            return;
-        }
-        if (intent.getBooleanExtra("leashAnim", false)) {
-            final int animSlot = intent.getIntExtra("slot", -1);
-            final int duration = intent.getIntExtra("durationMs", 400);
-            final String animPkg = intent.getStringExtra("pkg");
-            log("broadcast DEBUG leashAnim slot=" + animSlot + " duration=" + duration
-                    + " pkg=" + animPkg);
-            if (sTaskViewFactory == null || sShellExecutor == null || sTaskViewTransitions == null) {
-                log("broadcast DEBUG leashAnim: capabilities not ready, ignored");
-                return;
-            }
-            MiStepHost.toggleOrStartIfNeeded(sContext, sShellExecutor, sTaskViewFactory,
-                    sTaskViewTransitions);
-            new Handler(Looper.getMainLooper()).postDelayed(
-                    () -> MiStepHost.debugLeashAnim(animSlot, duration, animPkg), 1500L);
-            return;
-        }
-        if (intent.hasExtra("mirrorTask") || intent.getBooleanExtra("mirror", false)) {
-            final int task = intent.getIntExtra("mirrorTask", -1);
-            final int x = intent.getIntExtra("mirrorX", 0);
-            final int y = intent.getIntExtra("mirrorY", 622);
-            final int w = intent.getIntExtra("mirrorW", 400);
-            final int h = intent.getIntExtra("mirrorH", 912);
-            final int hold = intent.getIntExtra("mirrorHoldMs", 6000);
-            final boolean hideSource = intent.getBooleanExtra("mirrorHideSource", false);
-            final int hideModeExtra = intent.getIntExtra("mirrorHideMode", -1);
-            final int hideMode = hideModeExtra >= 0 ? hideModeExtra : (hideSource ? 1 : 0);
-            log("broadcast DEBUG mirror task=" + task + " rect=" + x + "," + y + "," + w + "x" + h
-                    + " hold=" + hold + " hideMode=" + hideMode);
-            if (sTaskViewFactory == null || sShellExecutor == null || sTaskViewTransitions == null) {
-                log("broadcast DEBUG mirror: capabilities not ready, ignored");
-                return;
-            }
-            MiStepHost.toggleOrStartIfNeeded(sContext, sShellExecutor, sTaskViewFactory,
-                    sTaskViewTransitions);
-            new Handler(Looper.getMainLooper()).postDelayed(
-                    () -> MiStepHost.debugMirror(task, x, y, w, h, hold, hideMode), 1500L);
-            return;
-        }
-        log("broadcast DEBUG slot=" + slot + " pkg=" + pkg + " swap=" + swap);
-        if (slot < 0) {
-            return;
-        }
-        if (sTaskViewFactory == null || sShellExecutor == null || sTaskViewTransitions == null) {
-            log("broadcast DEBUG: capabilities not ready, ignored");
-            return;
-        }
-        MiStepHost.toggleOrStartIfNeeded(sContext, sShellExecutor, sTaskViewFactory, sTaskViewTransitions);
-        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (swap) {
-                    MiStepHost.debugSwap(slot);
-                } else if (pkg != null) {
-                    MiStepHost.debugLaunch(slot, pkg);
-                }
-            }
-        }, 1500L);
-    }
+    private void handleDebugBroadcast(android.content.Intent intent) { HostEntrySupport.INSTANCE.handleDebugBroadcast(intent); }
 
     /** 通过工厂创建一个 TaskView；回调在 Dagger/Shell 线程上，转交主线程做视图操作。 */
-    private void createTaskView() throws Exception {
-        Consumer<Object> onCreated = new Consumer<Object>() {
-            @Override
-            public void accept(Object view) {
-                log("TaskView created -> " + view);
-                sTaskView = view;
-                new Handler(Looper.getMainLooper()).post(new Runnable() {
-                    @Override
-                    public void run() {
-                        attachAndLaunch();
-                    }
-                });
-            }
-        };
-        XposedHelpers.callMethod(sTaskViewFactory, "create", sContext, sShellExecutor, onCreated);
-        log("factory.create invoked");
-    }
+    private void createTaskView() throws Exception { HostEntrySupport.INSTANCE.createTaskView(); }
 
     /** 把 TaskView 放进我们自己的窗口，然后启动目标应用。 */
-    private void attachAndLaunch() {
-        try {
-            if (sContext == null || sTaskView == null) {
-                log("attachAndLaunch: missing context/taskview");
-                return;
-            }
-            final View taskView = (View) sTaskView;
-
-            // 监听 TaskView 生命周期：这些回调决定后续「格子绑定/交换」的状态机
-            Object listener = makeListener(sShellExecutor, "com.android.wm.shell.taskview.TaskView$Listener");
-            if (listener != null) {
-                XposedHelpers.callMethod(taskView, "setListener", sShellExecutor, listener);
-                log("setListener OK");
-            }
-
-            LinearLayout root = new LinearLayout(sContext);
-            root.setOrientation(LinearLayout.VERTICAL);
-            root.setBackgroundColor(0xE6000000);
-            root.setPadding(16, 16, 16, 16);
-
-            TextView label = new TextView(sContext);
-            label.setText("Mi Step宿主 v0.3 — 真实应用承载测试");
-            label.setTextColor(Color.WHITE);
-            label.setTextSize(15f);
-            root.addView(label, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
-
-            if (taskView.getParent() instanceof android.view.ViewGroup) {
-                ((android.view.ViewGroup) taskView.getParent()).removeView(taskView);
-            }
-            root.addView(taskView, new LinearLayout.LayoutParams(BOX_W, BOX_H));
-
-            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                    PixelFormat.TRANSLUCENT);
-            lp.gravity = Gravity.TOP | Gravity.START;
-            lp.x = BOX_X;
-            lp.y = BOX_Y;
-            lp.setTitle("MiStepHostBox");
-
-            WindowManager wm = (WindowManager) sContext.getSystemService(Context.WINDOW_SERVICE);
-            wm.addView(root, lp);
-            sWindowRoot = root;
-            log("window with TaskView added: " + root + " box=" + BOX_W + "x" + BOX_H + "@" + BOX_X + "," + BOX_Y);
-
-            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    launchTargetApp(taskView);
-                }
-            }, AFTER_ADD_MS);
-        } catch (Throwable t) {
-            log("attachAndLaunch FAILED: " + t);
-            XposedBridge.log(t);
-        }
-    }
+    private void attachAndLaunch() { HostEntrySupport.INSTANCE.attachAndLaunch(); }
 
     /** 用公开的 TaskView#startActivity 启动目标应用；ActivityOptions 的隐藏 setter 走反射。 */
     /** 一次性自锁文件：写在 SystemUI 自己的数据目录，重启进程后仍存在。 */
-    private java.io.File latchFile() {
-        return new java.io.File(sContext.getFilesDir(), "mistep-launched");
-    }
+    private java.io.File latchFile() { return HostEntrySupport.INSTANCE.latchFile(); }
 
-    private void armLatch() {
-        try {
-            java.io.File f = latchFile();
-            if (!f.exists() && f.createNewFile()) {
-                log("latch armed at " + f);
-            }
-        } catch (Throwable t) {
-            log("could not arm latch: " + t);
-        }
-    }
+    private void armLatch() { HostEntrySupport.INSTANCE.armLatch(); }
 
     /** 为目标 Intent 造 PendingIntent 并调用 TaskView#startActivity。 */
-    private void launchTargetApp(View taskView) {
-        try {
-            Intent launch = sContext.getPackageManager().getLaunchIntentForPackage(TARGET_PKG);
-            if (launch == null) {
-                log("no launch intent for " + TARGET_PKG);
-                return;
-            }
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-
-            Rect bounds = new Rect(0, 0, BOX_W, BOX_H);
-            ActivityOptions options = ActivityOptions.makeBasic();
-            callHidden(options, "setLaunchBounds", bounds);
-            callHidden(options, "setLaunchCookie", new Binder());
-            callHidden(options, "setLaunchWindowingMode", 6);          // WINDOWING_MODE_MULTI_WINDOW
-            callHidden(options, "setRemoveWithTaskOrganizer", Boolean.TRUE);
-
-            // pendingIntent 必须非空：TaskViewTransitions.startActivity 第一行就
-            // pendingIntent.getIntent()，且真正的启动走
-            // WindowContainerTransaction.sendPendingIntent(pendingIntent, intent, options)。
-            // 传 null 会让 SystemUI 在 wmshell.main 上 NPE 崩溃（已实测）。
-            PendingIntent pi = PendingIntent.getActivity(sContext, 0, launch,
-                    PendingIntent.FLAG_IMMUTABLE);
-
-            // 同理不能用 XposedHelpers.callMethod：它靠实参类型匹配，遇到 null 实参会抛
-            // "Attempt to get length of null array"。改用显式 Method.invoke。
-            Method start = null;
-            for (Class<?> c = taskView.getClass(); c != null && start == null; c = c.getSuperclass()) {
-                try {
-                    start = c.getDeclaredMethod("startActivity",
-                            PendingIntent.class, Intent.class, ActivityOptions.class, Rect.class);
-                } catch (NoSuchMethodException ignored) {
-                    // 继续往父类找
-                }
-            }
-            if (start == null) {
-                log("startActivity(PendingIntent, Intent, ActivityOptions, Rect) not found");
-                return;
-            }
-            // 先上锁再调用：万一这次调用崩掉 SystemUI，重启后的新实例会因锁存在而不再重试
-            armLatch();
-            start.setAccessible(true);
-            start.invoke(taskView, pi, launch, options, bounds);
-            log("startActivity invoked for " + TARGET_PKG + " pi=" + pi + " bounds=" + bounds);
-        } catch (Throwable t) {
-            log("launchTargetApp FAILED: " + t);
-            XposedBridge.log(t);
-        }
-    }
+    private void launchTargetApp(View taskView) { HostEntrySupport.INSTANCE.launchTargetApp(taskView); }
 
     /** 隐藏 API 的调用一律走反射，失败要能看见具体是哪一个。 */
-    private static void callHidden(Object target, String name, Object... args) {
-        try {
-            Object r = XposedHelpers.callMethod(target, name, args);
-            log("   hidden OK " + name + " -> " + r);
-        } catch (Throwable t) {
-            log("   hidden FAILED " + name + ": " + t);
-        }
-    }
+    static void callHidden(Object target, String name, Object... args) { HostEntrySupport.callHidden(target, name, args); }
 
     /** 用动态代理实现隐藏接口 TaskView.Listener，记录每个回调。 */
-    private Object makeListener(Executor executor, String ifaceName) {
-        try {
-            Class<?> iface = XposedHelpers.findClass(ifaceName, sContext.getClassLoader());
-            return Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[]{iface},
-                    new InvocationHandler() {
-                        @Override
-                        public Object invoke(Object proxy, Method method, Object[] args) {
-                            StringBuilder sb = new StringBuilder("listener#").append(method.getName()).append('(');
-                            if (args != null) {
-                                for (int i = 0; i < args.length; i++) {
-                                    sb.append(i > 0 ? ", " : "").append(args[i]);
-                                }
-                            }
-                            log(sb.append(')').toString());
-                            Class<?> rt = method.getReturnType();
-                            if (rt == boolean.class) {
-                                return Boolean.FALSE;
-                            }
-                            if (rt == int.class) {
-                                return 0;
-                            }
-                            if (rt == long.class) {
-                                return 0L;
-                            }
-                            return null;
-                        }
-                    });
-        } catch (Throwable t) {
-            log("makeListener failed: " + t);
-            return null;
-        }
-    }
+    private Object makeListener(Executor executor, String ifaceName) { return HostEntrySupport.INSTANCE.makeListener(executor, ifaceName); }
 
     static void log(String msg) {
         Log.i(TAG, msg);
@@ -1682,20 +644,10 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     // 保留：字段探查工具，后续看状态用
     @SuppressWarnings("unused")
-    private static Object readField(Object target, String name) {
-        try {
-            Field f = target.getClass().getDeclaredField(name);
-            f.setAccessible(true);
-            return f.get(target);
-        } catch (Throwable t) {
-            return "unreadable: " + t;
-        }
-    }
+    static Object readField(Object target, String name) { return HostEntrySupport.readField(target, name); }
 
     @SuppressWarnings("unused")
-    private static String sig(Method m) {
-        return Modifier.toString(m.getModifiers()) + ' ' + m.getReturnType().getSimpleName() + ' ' + m.getName();
-    }
+    static String sig(Method m) { return HostEntrySupport.sig(m); }
 
     @SuppressWarnings("unused")
     private static final Map<String, String> NOTES = new LinkedHashMap<>();
