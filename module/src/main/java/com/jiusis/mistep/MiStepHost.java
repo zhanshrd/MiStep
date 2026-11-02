@@ -53,7 +53,7 @@ import de.robv.android.xposed.XposedHelpers;
 public final class MiStepHost {
     static final String LANDSCAPE_MODE_ACTION = "com.jiusis.mistep.LANDSCAPE_MODE";
 
-    private static final String DESKTOP_ICON_LAUNCH_ACTION =
+    static final String DESKTOP_ICON_LAUNCH_ACTION =
             "com.jiusis.mistep.DESKTOP_ICON_LAUNCH";
 
     private static final String TAG = "MiStepProbe";
@@ -80,7 +80,7 @@ public final class MiStepHost {
     WindowManager wm;
     WindowManager.LayoutParams lp;
     DisplayManager displayManager;
-    private DisplayManager.DisplayListener displayListener;
+    DisplayManager.DisplayListener displayListener;
     volatile int displayRotation = -1;
     boolean geometryRefreshQueued;
     int geometryRefreshDeferrals;
@@ -89,20 +89,20 @@ public final class MiStepHost {
     boolean zoomed;
     volatile int screenW = 1080;
     volatile int screenH = 2460;
-    private final Object taskUsersLock = new Object();
+    final Object taskUsersLock = new Object();
     final Object taskWindowStatesLock = new Object();
     final java.util.Map<Integer, TaskWindowState> taskWindowStates =
             new java.util.HashMap<>();
-    private volatile java.util.Set<Integer> taskUserIds;
-    private volatile long taskUserIdsReadAt;
-    private volatile String taskUserIdsReadError;
+    volatile java.util.Set<Integer> taskUserIds;
+    volatile long taskUserIdsReadAt;
+    volatile String taskUserIdsReadError;
     volatile boolean screenOn = true;
     Slot launchCurrentSlot;
     Promotion promotion;
     SwapPreview swapPreview;
     Object swapPreviewStatusOwner;
     final MiStepStatusBar statusBar;
-    private final ZoomTransport zoomTransport;
+    final ZoomTransport zoomTransport;
     final HostMirrorController mirrorController;
     final HostSwapController swapController;
     final HostPromotionController promotionController;
@@ -113,7 +113,7 @@ public final class MiStepHost {
     Bitmap wallpaperBackdrop;
     boolean wallpaperBackdropRequested;
     BroadcastReceiver wallpaperReceiver;
-    private BroadcastReceiver desktopIconReceiver;
+    BroadcastReceiver desktopIconReceiver;
     private boolean mainBackdropRequested;
     /** mirror 承载时主区显示的桌面/上一主区快照（避免隐藏任务后主区全黑）。 */
     View carrierBackdrop;
@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostStateController stateCtl;
     final HostWindowController winCtl;
     final HostLaunchController launcher;
     final HostTaskEventController taskEvents;
@@ -280,19 +281,9 @@ public final class MiStepHost {
         }
     }
 
-    NativeObservation observeNativeCommit(Object token, Runnable check) {
-        NativeObservation observation = new NativeObservation(token, check);
-        pendingNativeObservation = observation;
-        main.postDelayed(observation, 350L); // Fallback if the target omits the transition/commit callback.
-        return observation;
-    }
+    NativeObservation observeNativeCommit(Object token, Runnable check) { return stateCtl.observeNativeCommit(token, check); }
 
-    void cancelNativeObservation(NativeObservation observation) {
-        if (observation == null) return;
-        observation.consumed.set(true);
-        main.removeCallbacks(observation);
-        if (pendingNativeObservation == observation) pendingNativeObservation = null;
-    }
+    void cancelNativeObservation(NativeObservation observation) { stateCtl.cancelNativeObservation(observation); }
 
     static final class Promotion {
         final Slot slot;
@@ -460,6 +451,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        stateCtl = new HostStateController(this);
         winCtl = new HostWindowController(this);
         launcher = new HostLaunchController(this);
         taskEvents = new HostTaskEventController(this);
@@ -595,26 +587,9 @@ public final class MiStepHost {
     /** 打开一步时按滑动起始角决定主区在哪边：从左角滑 → 主区在左；从右角滑 → 主区在右。 */
     static volatile int pendingMainSide = -1;
 
-    public static void setPendingMainSide(boolean mainOnRight) {
-        MiStepHost host = sInstance;
-        // 过渡期间（RESUMING/SUSPENDING）的滑动不得改写下一次打开的方向：
-        // consumePendingMainSide 已在恢复会话时消费，晚到的写入会污染下次打开的朝向。
-        // ACTIVE 时热区手势本就在 HotZoneGesture 源头被丢弃，此守卫为防御性冗余；
-        // 关闭工作区走顶栏 ✕ / TOGGLE 广播 / Home、Recents / 息屏，没有“再滑一次关闭”。
-        if (host != null && host.scene != SUSPENDED) return;
-        pendingMainSide = mainOnRight ? 1 : 0;
-    }
+    public static void setPendingMainSide(boolean mainOnRight) { HostStateController.setPendingMainSide(mainOnRight); }
 
-    void consumePendingMainSide() {
-        int pending = pendingMainSide;
-        if (pending < 0) return;
-        pendingMainSide = -1;
-        boolean right = pending == 1;
-        if (right != mainOnRight) {
-            log("pending main side applied: " + (right ? "right" : "left"));
-            setMainSide(right);
-        }
-    }
+    void consumePendingMainSide() { stateCtl.consumePendingMainSide(); }
 
     /** 调试广播：把主区任务 leash 从主区尺寸动画到目标槽（view 级交换动画的 POC）。 */
     public static void debugLeashAnim(int slotIndex, int durationMs, String pkg) {
@@ -686,127 +661,27 @@ public final class MiStepHost {
     void applyTopConfiguration(Object wct, Object token, Slot slot) { winCtl.applyTopConfiguration(wct, token, slot); }
     int[] slotBounds(Slot slot) { return winCtl.slotBounds(slot); }
 
-    java.util.Set<Integer> supportedTaskUsers() {
-        long now = SystemClock.uptimeMillis();
-        java.util.Set<Integer> cached = taskUserIds;
-        if (cached != null && now - taskUserIdsReadAt < 5000L) return cached;
-        synchronized (taskUsersLock) {
-            cached = taskUserIds;
-            now = SystemClock.uptimeMillis();
-            if (cached != null && now - taskUserIdsReadAt < 5000L) return cached;
-            java.util.Set<Integer> ids = new java.util.HashSet<>();
-            int currentUser = currentUserId();
-            ids.add(currentUser);
-            try {
-                UserManager users = ctx.getSystemService(UserManager.class);
-                if (users != null) {
-                    java.util.List<UserHandle> profiles = users.getUserProfiles();
-                    if (profiles != null) {
-                        for (UserHandle profile : profiles) {
-                            if (profile != null) {
-                                ids.add((Integer) XposedHelpers.callMethod(profile, "getIdentifier"));
-                            }
-                        }
-                    }
-                }
-                taskUserIdsReadError = null;
-            } catch (Throwable error) {
-                String message = String.valueOf(error);
-                if (!message.equals(taskUserIdsReadError)) {
-                    log("associated task profiles unavailable; owner only: " + message);
-                    taskUserIdsReadError = message;
-                }
-            }
-            taskUserIds = java.util.Collections.unmodifiableSet(ids);
-            taskUserIdsReadAt = now;
-            log("task profile scope current=" + currentUser + " associated=" + ids);
-            return taskUserIds;
-        }
-    }
+    java.util.Set<Integer> supportedTaskUsers() { return stateCtl.supportedTaskUsers(); }
 
     boolean supportsTaskUser(int userId) { return winCtl.supportsTaskUser(userId); }
 
     int currentUserId() { return winCtl.currentUserId(); }
 
-    boolean ownsViewOrController(Object object) {
-        if (object == null) return false;
-        for (Slot slot : slots)
-            if (slot.index > 0 && !slot.parked && (slot.view == object || slot.controller == object)) return true;
-        return false;
-    }
+    boolean ownsViewOrController(Object object) { return stateCtl.ownsViewOrController(object); }
 
     /** External mode1 CHANGE belongs to Launcher, not TaskView's immediate side reparent. */
-    boolean leaveExternalChangeToNative(Object change) {
-        if (change == null || scene != ACTIVE || !screenOn || keyguardLocked || transferBusy) return false;
-        try {
-            int mode = (Integer) XposedHelpers.callMethod(change, "getMode");
-            if (mode != 6 && mode != 3) return false;
-            Object info = XposedHelpers.callMethod(change, "getTaskInfo");
-            if (!ordinaryRoot(info, 1)) return false;
-            int taskId = XposedHelpers.getIntField(info, "taskId");
-            Object token = XposedHelpers.getObjectField(info, "token");
-            for (Slot slot : slots) {
-                if (slot.index <= 0 || !isActive(slot) || !slot.occupied || slot.parked
-                        || slot.frozen || slot.launching || slot.modeAdmissionPending
-                        || slot.taskId != taskId || token == null || !token.equals(slot.taskToken)
-                        || !controllerOwns(slot, taskId, token)) continue;
-                Promotion current = promotion;
-                if (current != null && (!current.externalLaunch || current.slot != slot
-                        || current.sceneEpoch != sceneEpoch || current.bindingEpoch != slot.taskEpoch))
-                    return false;
-                Object queue = XposedHelpers.getObjectField(transitions, "mPending");
-                if (!(queue instanceof Iterable<?>)) return false;
-                for (Object pending : (Iterable<?>) queue)
-                    if (XposedHelpers.getObjectField(pending, "mTaskView") == slot.controller) return false;
-                Object organizer = XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
-                synchronized (XposedHelpers.getObjectField(organizer, "mLock")) {
-                    Object appeared = ((android.util.SparseArray<?>) XposedHelpers.getObjectField(
-                            organizer, "mTasks")).get(taskId);
-                    Object canonical = appeared == null ? null : XposedHelpers.callMethod(appeared, "getTaskInfo");
-                    if (!ordinaryRoot(canonical, 1) || !token.equals(XposedHelpers.getObjectField(canonical, "token"))
-                            || XposedHelpers.getIntField(canonical, "taskId") != taskId
-                            || XposedHelpers.getIntField(canonical, "userId") != XposedHelpers.getIntField(info, "userId"))
-                        return false;
-                }
-                log("external fullscreen change kept native task=" + taskId + " slot=" + slot.index);
-                return true;
-            }
-        } catch (Throwable unavailable) { log("external native change guard unavailable: " + unavailable); }
-        return false;
-    }
+    boolean leaveExternalChangeToNative(Object change) { return stateCtl.leaveExternalChangeToNative(change); }
 
-    java.util.List<?> rootInfos() throws Exception {
-        Object service = XposedHelpers.callStaticMethod(Class.forName("android.app.ActivityTaskManager"), "getService");
-        return (java.util.List<?>) XposedHelpers.callMethod(service, "getAllRootTaskInfos");
-    }
+    java.util.List<?> rootInfos() throws Exception { return stateCtl.rootInfos(); }
 
-    Object rootInfo(LiveTask task) throws Exception {
-        for (Object info : rootInfos()) if (task.matches(info)) return info;
-        return null;
-    }
+    Object rootInfo(LiveTask task) throws Exception { return stateCtl.rootInfo(task); }
 
-    boolean ordinaryRoot(Object info, int mode) {
-        if (info == null || XposedHelpers.getIntField(info, "displayId") != 0
-                || !supportsTaskUser(XposedHelpers.getIntField(info, "userId"))
-                || Boolean.TRUE.equals(XposedHelpers.callMethod(info, "hasParentTask"))
-                || !Integer.valueOf(mode).equals(XposedHelpers.callMethod(info, "getWindowingMode"))
-                || !Integer.valueOf(1).equals(XposedHelpers.callMethod(info, "getActivityType"))) return false;
-        ComponentName base = (ComponentName) XposedHelpers.getObjectField(info, "baseActivity");
-        return base != null && !"com.miui.home".equals(base.getPackageName());
-    }
+    boolean ordinaryRoot(Object info, int mode) { return stateCtl.ordinaryRoot(info, mode); }
 
     /** Some associated-profile roots are focused while the ROM reports isVisible=false. */
-    boolean mainTaskVisible(Object info) {
-        return info != null && TaskUserPolicy.mayBeMainTask(
-                XposedHelpers.getIntField(info, "userId"), currentUserId(), supportedTaskUsers(),
-                XposedHelpers.getBooleanField(info, "isVisible"),
-                XposedHelpers.getBooleanField(info, "isFocused"), false);
-    }
+    boolean mainTaskVisible(Object info) { return stateCtl.mainTaskVisible(info); }
 
-    boolean isSideToken(Object token) {
-        for (Slot slot : slots) if (!slot.parked && token != null && token.equals(slot.taskToken)) return true;
-        return false;
-    }
+    boolean isSideToken(Object token) { return stateCtl.isSideToken(token); }
 
     /** 诊断：打印当前所有 root task 的判定字段（findMainTask 漏判用）。 */
     void dumpRoots(String reason) { debugCtrl.dumpRoots(reason); }
@@ -829,56 +704,7 @@ public final class MiStepHost {
 
 
 
-    void checkAdoption(Slot slot, LiveTask task, long epoch, int attempt,
-            Runnable success, Consumer<String> failure) {
-        if (!isActive(slot) || epoch != sceneEpoch) {
-            adoptionFailed(slot, task, true, "scene changed during adoption", failure);
-            return;
-        }
-        if (!executeOnShell(() -> {
-            boolean ready = false;
-            String detail;
-            try {
-                Object core = rootInfo(task);
-                ready = ordinaryRoot(core, 6) && XposedHelpers.getBooleanField(core, "isVisible")
-                        && controllerOwns(slot, task.id, task.token)
-                        && getSurfaceField(slot.controller, "mTaskLeash") != null;
-                detail = "core/controller/leash=" + ready;
-            } catch (Throwable error) { detail = error.toString(); }
-            final boolean confirmed = ready;
-            final String result = detail;
-            main.post(() -> {
-                if (epoch != sceneEpoch) {
-                    adoptionFailed(slot, task, true, "stale adoption completion", failure);
-                } else if (confirmed) {
-                    bindTask(slot, task.id, task.token);
-                    slot.pkg = task.pkg;
-                    slot.occupied = true;
-                    slot.taskVisible = true;
-                    slot.launching = false;
-                    slot.windowMode = 6; // Confirmed from Core and this controller above.
-                    slot.promoting = false;
-                    slot.parked = false;
-                    transferBusy = false;
-                    updateHint(slot);
-                    updateTouchRegion(slot);
-                    reapplyScale(slot);
-                    publishDesktopSideTasks();
-                    log("adoption confirmed same task=" + task.id + " slot=" + slot.index);
-                    success.run();
-                    main.postDelayed(() -> {
-                        compactCells();
-                        // TaskView insertion can briefly hide sibling surfaces while the
-                        // native transition settles. Re-show every already-owned cell
-                        // without moving tasks or changing ownership.
-                        main.postDelayed(() -> reassertSideTaskViews("adoption-settled"), 420L);
-                    }, 120L);
-                } else if (attempt < 2) {
-                    main.postDelayed(() -> checkAdoption(slot, task, epoch, attempt + 1, success, failure), 500L);
-                } else adoptionFailed(slot, task, true, result, failure);
-            });
-        })) adoptionFailed(slot, task, true, "no Shell queue for confirmation", failure);
-    }
+    void checkAdoption(Slot slot, LiveTask task, long epoch, int attempt,            Runnable success, Consumer<String> failure) { stateCtl.checkAdoption(slot, task, epoch, attempt, success, failure); }
 
 
 
@@ -916,12 +742,7 @@ public final class MiStepHost {
     void appendRetainedSurfaces(Object tx, java.util.List<RenderBinding> frames) { surfaceCtl.appendRetainedSurfaces(tx, frames); }
 
 
-    void setZoomState(boolean on) {
-        zoomed = on;
-        HostEntry.setHostZoomed(on);
-        MiStepStatusBarSampling.geometryChanged();
-        HotZoneGesture.raiseAll(ctx);
-    }
+    void setZoomState(boolean on) { stateCtl.setZoomState(on); }
 
     /**
      * 写缩放触发文件（SystemUI 私有目录，system_server 侧轮询）。
@@ -941,15 +762,15 @@ public final class MiStepHost {
     volatile long zoomAnimUntil;
     long zoomCommandGeneration;
 
-    private String zoomOnCommand() { return zoomTransport.zoomOnCommand(); }
+    private String zoomOnCommand() { return stateCtl.zoomOnCommand(); }
 
-    void writeZoomAnimated(boolean on) { zoomTransport.writeZoomAnimated(on); }
+    void writeZoomAnimated(boolean on) { stateCtl.writeZoomAnimated(on); }
 
-    void writeZoom(boolean on) { zoomTransport.writeZoom(on); }
+    void writeZoom(boolean on) { stateCtl.writeZoom(on); }
 
-    private void writeZoomLine(String command) { zoomTransport.writeZoomLine(command); }
+    private void writeZoomLine(String command) { stateCtl.writeZoomLine(command); }
 
-    private void writeZoomLine(String command, long issuedAt) { zoomTransport.writeZoomLine(command, issuedAt); }
+    private void writeZoomLine(String command, long issuedAt) { stateCtl.writeZoomLine(command, issuedAt); }
     private void startInternal() {
         main.post(() -> {
             if (!MiStepEntryGuard.canOpen(ctx)) {
@@ -991,43 +812,10 @@ public final class MiStepHost {
      *  本看门狗独立于 scene 门禁（覆盖 ACTIVE/SUSPENDING/RESUMING 各种卡态）：
      *  >8s 温和取消一次（requestLiveSwapCancellation），>20s 强制 failPromotion 走正规
      *  失败汇总（回滚 WCT/清理槽位/触发 finishPendingSuspend），窗口期归零防连发。 */
-    private long promotionWatchdogSince;
-    private boolean promotionWatchdogNudged;
+    long promotionWatchdogSince;
+    boolean promotionWatchdogNudged;
 
-    void startPromotionWatchdog() {
-        main.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (root == null || sInstance != MiStepHost.this) {
-                    return;
-                }
-                if (promotion == null) {
-                    promotionWatchdogSince = 0L;
-                    promotionWatchdogNudged = false;
-                } else {
-                    long now = android.os.SystemClock.uptimeMillis();
-                    if (promotionWatchdogSince == 0L) {
-                        promotionWatchdogSince = now;
-                    }
-                    long stuckMs = now - promotionWatchdogSince;
-                    if (stuckMs > 8000L && !promotionWatchdogNudged) {
-                        promotionWatchdogNudged = true;
-                        log("promotion watchdog: task=" + promotion.taskId + " stuck "
-                                + (stuckMs / 1000L) + "s, requesting live-swap cancellation");
-                        promotionController.requestLiveSwapCancellation(promotion, "watchdog");
-                    }
-                    if (stuckMs > 20000L) {
-                        log("promotion watchdog: task=" + promotion.taskId + " stuck "
-                                + (stuckMs / 1000L) + "s, forcing failPromotion");
-                        promotionWatchdogSince = now;
-                        promotionWatchdogNudged = false;
-                        failPromotion(promotion, "promotion watchdog deadline");
-                    }
-                }
-                main.postDelayed(this, 4000L);
-            }
-        }, 4000L);
-    }
+    void startPromotionWatchdog() { stateCtl.startPromotionWatchdog(); }
 
     private void createSubViews() { taskEvents.createSubViews(); }
 
@@ -1055,25 +843,7 @@ public final class MiStepHost {
     /** A host-owned backing stays inside the cell, below the real task, even for translucent apps. */
     void ensureCellBackground(Slot slot) { cellLayout.ensureCellBackground(slot); }
 
-    void registerDefaultDisplayListener() {
-        if (displayListener != null) return;
-        try {
-            displayManager = (DisplayManager) ctx.getSystemService(Context.DISPLAY_SERVICE);
-            if (displayManager == null) throw new IllegalStateException("DisplayManager unavailable");
-            displayListener = new DisplayManager.DisplayListener() {
-                @Override public void onDisplayAdded(int displayId) {}
-                @Override public void onDisplayRemoved(int displayId) {}
-                @Override public void onDisplayChanged(int displayId) {
-                    if (displayId == Display.DEFAULT_DISPLAY) scheduleDisplayGeometryRefresh();
-                }
-            };
-            displayManager.registerDisplayListener(displayListener, main);
-            log("default display geometry listener registered");
-        } catch (Throwable error) {
-            displayListener = null;
-            log("default display geometry listener unavailable: " + error);
-        }
-    }
+    void registerDefaultDisplayListener() { stateCtl.registerDefaultDisplayListener(); }
 
     void readDisplayGeometry() { geometry.readDisplayGeometry(); }
 
@@ -1100,35 +870,13 @@ public final class MiStepHost {
     /** 换壁纸后自动重算模糊底，避免一步里还是旧壁纸。 */
     private void registerWallpaperReceiver() { chrome.registerWallpaperReceiver(); }
 
-    private void registerDesktopIconReceiver() {
-        if (desktopIconReceiver != null) return;
-        try {
-            desktopIconReceiver = new BroadcastReceiver() {
-                @Override public void onReceive(Context context, Intent intent) {
-                    if (intent != null && intent.getBooleanExtra("before", false)) {
-                        preannounceDesktopLaunch(intent.getBundleExtra("binding"));
-                        return;
-                    }
-                    String pkg = intent == null ? null : intent.getStringExtra("package");
-                    promoteSideTaskForDesktopLaunch(pkg, intent == null ? -1 : intent.getIntExtra("userId", -1));
-                }
-            };
-            IntentFilter filter = new IntentFilter(DESKTOP_ICON_LAUNCH_ACTION);
-            ctx.registerReceiver(desktopIconReceiver, filter,
-                    "android.permission.MANAGE_ACTIVITY_TASKS", main,
-                    Context.RECEIVER_EXPORTED);
-            log("desktop icon launch receiver registered");
-        } catch (Throwable error) {
-            desktopIconReceiver = null;
-            log("desktop icon launch receiver failed: " + error);
-        }
-    }
+    private void registerDesktopIconReceiver() { stateCtl.registerDesktopIconReceiver(); }
 
 
     /** Publish only confirmed bindings; system_server rechecks each native task before use. */
     void publishDesktopSideTasks() { launcher.publishDesktopSideTasks(); }
 
-    private void promoteSideTaskForDesktopLaunch(String pkg, int launchUser) { launcher.promoteSideTaskForDesktopLaunch(pkg, launchUser); }
+    void promoteSideTaskForDesktopLaunch(String pkg, int launchUser) { launcher.promoteSideTaskForDesktopLaunch(pkg, launchUser); }
 
 
 
@@ -1192,15 +940,7 @@ public final class MiStepHost {
      * windows anchored to opposite edges, so the shrinking and growing panes share a
      * moving divider instead of crossing through each other's centre.
      */
-    void setMainSide(boolean right) {
-        if (layout != null && mainOnRight == right) return;
-        try {
-            applyMainLayout(makeAdaptiveLayout(right));
-            if (root != null) writeZoom(true);
-        } catch (Throwable error) {
-            log("main side switch failed: " + error);
-        }
-    }
+    void setMainSide(boolean right) { stateCtl.setMainSide(right); }
 
     /** Host geometry only. A live flip sends its correlated WMS zoom separately. */
     void applyMainLayout(MiStepLayout target) { cellLayout.applyMainLayout(target); }
