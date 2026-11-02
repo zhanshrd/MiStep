@@ -65,7 +65,7 @@ public final class MiStepHost {
     private static final long LAUNCH_TIMEOUT_MS = 4000L;
     static final long SIDE_PROMOTION_TIMEOUT_MS = 3500L;
 
-    private static volatile MiStepHost sInstance;
+    static volatile MiStepHost sInstance;
 
     final Context ctx;
     private final Executor executor;
@@ -103,7 +103,7 @@ public final class MiStepHost {
     Object swapPreviewStatusOwner;
     final MiStepStatusBar statusBar;
     private final ZoomTransport zoomTransport;
-    private final HostMirrorController mirrorController;
+    final HostMirrorController mirrorController;
     final HostSwapController swapController;
     final HostPromotionController promotionController;
     volatile HomeTaskReturn coveredHome;
@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostDebugController debugCtrl;
     private View sideBacking;
     /** 侧栏按格分段的不透明底板；承载格需要把它藏起来让下面的真实任务画面透出来。 */
     final View[] sideBackingViews = new View[SLOT_COUNT];
@@ -143,8 +144,8 @@ public final class MiStepHost {
     static boolean boundsHooksReady;
     private static boolean surfaceHooksReady;
     private Object surfaceObserver;
-    private volatile boolean traceNextSwap;
-    private volatile MiStepSwapTrace swapTrace;
+    volatile boolean traceNextSwap;
+    volatile MiStepSwapTrace swapTrace;
     boolean compactPending;
     MiStepCellMotion cellMotion;
     MiStepSideDismiss sideDismiss;
@@ -452,6 +453,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        debugCtrl = new HostDebugController(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
         installRetainedSurfaces(ctx.getClassLoader());
         for (int i = 0; i < SLOT_COUNT; i++) {
@@ -545,85 +547,30 @@ public final class MiStepHost {
     }
 
     /** 调试广播：向指定格启动一个包（无人值守验证用）。 */
-    public static void debugLaunch(int slot, String pkg) {
-        MiStepHost h = sInstance;
-        if (h == null) {
-            log("debugLaunch: host not started");
-            return;
-        }
-        h.main.post(() -> h.launchWhenReady(slot, pkg, 0));
-    }
+    public static void debugLaunch(int slot, String pkg) { HostDebugController.debugLaunch(slot, pkg); }
 
     /** 调试广播：把指定副格与主区交换。 */
-    public static void debugSwap(int slot) {
-        MiStepHost h = sInstance;
-        if (h == null) {
-            log("debugSwap: host not started");
-            return;
-        }
-        h.main.post(() -> h.swapWithMain(slot));
-    }
+    public static void debugSwap(int slot) { HostDebugController.debugSwap(slot); }
 
 
 
     /** Arm passive instrumentation only; it never starts a swap or turns on a POC. */
-    public static void debugTraceNextSwap() {
-        MiStepHost h = sInstance;
-        if (h == null) { log("passive trace: host not started"); return; }
-        h.main.post(() -> {
-            if (h.scene != ACTIVE || !h.screenOn || h.keyguardLocked
-                    || h.promotion != null || h.transferBusy) return;
-            h.traceNextSwap = true;
-            log("passive trace armed for next one swap; 6s/384 events; no transaction mutations");
-        });
-    }
+    public static void debugTraceNextSwap() { HostDebugController.debugTraceNextSwap(); }
 
-    void traceSwap(Promotion ticket) {
-        if (!traceNextSwap) return;
-        traceNextSwap = false;
-        MiStepSwapTrace old = swapTrace;
-        if (old != null) old.close();
-        swapTrace = null;
-        try {
-            LiveTask previous = ticket.previousMain;
-            swapTrace = new MiStepSwapTrace(main, new java.io.File(ctx.getFilesDir(), "mistep-swap-traces"),
-                    MiStepHost::log, previous == null ? -1 : previous.id,
-                    previous == null ? null : previous.token, ticket.taskId, ticket.token,
-                    ticket.slot.controller, shellOrganizer(), layout.describe(),
-                    closed -> { if (swapTrace == closed) swapTrace = null; });
-        } catch (Throwable error) { log("passive trace unavailable: " + error); }
-    }
+    void traceSwap(Promotion ticket) { debugCtrl.traceSwap(ticket); }
 
-    void traceSwapEvent(String event) {
-        MiStepSwapTrace trace = swapTrace;
-        if (trace != null) trace.snapshot(event);
-    }
+    void traceSwapEvent(String event) { debugCtrl.traceSwapEvent(event); }
 
     /** 调试广播：把主区任务 mirror 成宿主窗口里的实时画面（验证 live-surface 承载）。 */
-    public static void debugMirror(int taskId, int x, int y, int w, int h, int holdMs,
-            int hideMode) {
-        MiStepHost host = sInstance;
-        if (host == null) {
-            log("debugMirror: host not started");
-            return;
-        }
-        if (w <= 0 || h <= 0) {
-            log("debugMirror: bad rect " + w + "x" + h);
-            return;
-        }
-        host.main.post(() -> host.startMirrorPoc(taskId,
-                new Rect(x, y, x + w, y + h), Math.max(1000, holdMs), hideMode));
-    }
+    public static void debugMirror(int taskId, int x, int y, int w, int h, int holdMs,            int hideMode) { HostDebugController.debugMirror(taskId, x, y, w, h, holdMs, hideMode); }
 
     private void createMirrorLayer() { mirrorController.createMirrorLayer(); }
 
     void setMirrorLayerVisible(boolean visible) { mirrorController.setMirrorLayerVisible(visible); }
 
-    private void startMirrorPoc(int requestedTask, Rect dest, int holdMs, int hideMode) {
-        mirrorController.startMirrorPoc(requestedTask, dest, holdMs, hideMode);
-    }
+    void startMirrorPoc(int requestedTask, Rect dest, int holdMs, int hideMode) { debugCtrl.startMirrorPoc(requestedTask, dest, holdMs, hideMode); }
 
-    private Object shellOrganizer() { return mirrorController.shellOrganizer(); }
+    Object shellOrganizer() { return mirrorController.shellOrganizer(); }
 
     private void reassertCarrier() { mirrorController.reassertCarrier(); }
 
@@ -665,181 +612,26 @@ public final class MiStepHost {
         host.main.post(() -> host.runLeashAnimPoc(slotIndex, Math.max(150, durationMs), pkg));
     }
 
-    private volatile int leashAnimFrames;
+    volatile int leashAnimFrames;
     /** POC 期间该格的 SF 底板必须停止心跳重建，否则会盖住动画中的真实任务画面。 */
-    private volatile int leashPocSlot = -1;
+    volatile int leashPocSlot = -1;
 
-    private void runLeashAnimPoc(int slotIndex, long durationMs, String pkg) {
-        if (scene != ACTIVE || layout == null || slotIndex <= SLOT_MAIN
-                || slotIndex >= SLOT_COUNT || slots[slotIndex].rect == null) {
-            log("leash anim POC skipped slot=" + slotIndex + " scene=" + scene);
-            return;
-        }
-        final int index = slotIndex;
-        if (!executeOnShell(() -> {
-            try {
-                LiveTask task = null;
-                try {
-                    task = findMainTask();
-                } catch (Throwable error) {
-                    log("leash anim: findMainTask failed: " + error);
-                }
-                if (task == null && pkg != null) {
-                    try {
-                        task = findPackageTask(pkg);
-                        log("leash anim: package fallback task="
-                                + (task == null ? -1 : task.id) + " pkg=" + pkg);
-                    } catch (Throwable error) {
-                        log("leash anim: findPackageTask failed: " + error);
-                    }
-                }
-                if (task == null) {
-                    log("leash anim POC: no main task pkg=" + pkg);
-                    return;
-                }
-                final LiveTask resolved = task;
-                Object organizer = shellOrganizer();
-                Object leash = organizer == null ? null
-                        : XposedHelpers.callMethod(organizer, "getTaskLeash",
-                                new Class<?>[]{int.class}, resolved.id);
-                if (leash == null
-                        || !Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                    log("leash anim POC: no leash task=" + resolved.id);
-                    return;
-                }
-                main.post(() -> animateLeashPoc(leash, slots[index].rect, index, resolved.id, durationMs));
-            } catch (Throwable error) {
-                log("leash anim POC setup failed: " + error);
-            }
-        })) {
-            log("leash anim POC skipped: no shell queue");
-        }
-    }
+    private void runLeashAnimPoc(int slotIndex, long durationMs, String pkg) { debugCtrl.runLeashAnimPoc(slotIndex, durationMs, pkg); }
 
-    private void animateLeashPoc(Object leash, int[] rect, int slotIndex, int taskId,
-            long durationMs) {
-        final Rect dest = new Rect(rect[0], rect[1], rect[2], rect[3]);
-        final float ratio = layout.mainScale;
-        final float endScaleX = dest.width() / (ratio * screenW);
-        final float endScaleY = dest.height() / (ratio * screenH);
-        final float endX = (dest.left - layout.mainOffsetX) / ratio;
-        final float endY = (dest.top - layout.mainOffsetY) / ratio;
-        leashAnimFrames = 0;
-        hideSlotChromeForPoc(slotIndex, true);
-        try {
-            ValueAnimator anim = ValueAnimator.ofFloat(0f, 1f);
-            anim.setDuration(durationMs);
-            anim.setInterpolator(new PathInterpolator(0.34f, 0.69f, 0.1f, 1f));
-            anim.addUpdateListener(a -> {
-                float f = (float) a.getAnimatedValue();
-                applyLeashTransform(leash, endX * f, endY * f,
-                        1f + (endScaleX - 1f) * f, 1f + (endScaleY - 1f) * f);
-            });
-            anim.addListener(new AnimatorListenerAdapter() {
-                @Override public void onAnimationEnd(Animator a) {
-                    applyLeashTransform(leash, endX, endY, endScaleX, endScaleY);
-                    log("leash anim POC finished task=" + taskId + " dest=" + dest
-                            + " frames=" + leashAnimFrames);
-                    main.postDelayed(() -> reverseLeashPoc(leash, taskId, slotIndex), 1200L);
-                }
-            });
-            anim.start();
-            log("leash anim POC start task=" + taskId + " dest=" + dest
-                    + " duration=" + durationMs + " endScale=" + endScaleX + "x" + endScaleY);
-        } catch (Throwable error) {
-            log("leash anim POC failed: " + error);
-        }
-    }
+    private void animateLeashPoc(Object leash, int[] rect, int slotIndex, int taskId,            long durationMs) { debugCtrl.animateLeashPoc(leash, rect, slotIndex, taskId, durationMs); }
 
     /** POC 期间隐藏目标格的宿主底板，让真实任务画面能在格子里可见（正式交换也会这么做）。 */
-    private void hideSlotChromeForPoc(int slotIndex, boolean hide) {
-        try {
-            leashPocSlot = hide ? slotIndex : -1;
-            View backing = sideBackingViews[slotIndex];
-            if (backing != null) {
-                backing.setVisibility(hide ? View.GONE : View.VISIBLE);
-            }
-            Slot slot = slots[slotIndex];
-            if (slot != null) {
-                if (hide) {
-                    if (slot.hint != null) slot.hint.setVisibility(View.GONE);
-                    removeCellBackground(slot);
-                } else if (slot.hint != null) {
-                    slot.hint.setVisibility(View.VISIBLE);
-                }
-            }
-            if (root != null) {
-                root.requestLayout();
-                root.invalidate();
-            }
-            log("leash anim POC slot chrome hidden=" + hide + " slot=" + slotIndex);
-        } catch (Throwable error) {
-            log("leash anim chrome failed: " + error);
-        }
-    }
+    private void hideSlotChromeForPoc(int slotIndex, boolean hide) { debugCtrl.hideSlotChromeForPoc(slotIndex, hide); }
 
-    private void reverseLeashPoc(Object leash, int taskId, int slotIndex) {
-        // POC 只验证“主窗 live 缩小”；hold 后直接回位，避免再引入一套反向动画。
-        applyLeashTransform(leash, 0f, 0f, 1f, 1f);
-        hideSlotChromeForPoc(slotIndex, false);
-        log("leash anim POC restored task=" + taskId);
-    }
+    private void reverseLeashPoc(Object leash, int taskId, int slotIndex) { debugCtrl.reverseLeashPoc(leash, taskId, slotIndex); }
 
     /**
      * view 级主窗动画：把真实主任务 leash 在桥的洞内从主区矩形缩进目标格。
      * 与 SwapPreview 同时长、同曲线，桥只画侧栏/背景，主窗画面是真实任务表面。
      */
-    private void startLiveMainShrink(Promotion ticket) {
-        Object leash = ticket.mainLeash;
-        if (leash == null || ticket.slot == null || ticket.slot.rect == null) return;
-        int[] rect = ticket.slot.rect;
-        final Rect dest = new Rect(rect[0], rect[1], rect[2], rect[3]);
-        final float ratio = layout.mainScale;
-        final float endScaleX = dest.width() / (ratio * screenW);
-        final float endScaleY = dest.height() / (ratio * screenH);
-        final float endX = (dest.left - layout.mainOffsetX) / ratio;
-        final float endY = (dest.top - layout.mainOffsetY) / ratio;
-        try {
-            ValueAnimator anim = ValueAnimator.ofFloat(0f, 1f);
-            anim.setDuration(SwapPreview.DURATION_MS);
-            anim.setInterpolator(new PathInterpolator(0.34f, 0.69f, 0.1f, 1f));
-            anim.addUpdateListener(a -> {
-                float f = (float) a.getAnimatedValue();
-                applyLeashTransform(leash, endX * f, endY * f,
-                        1f + (endScaleX - 1f) * f, 1f + (endScaleY - 1f) * f);
-            });
-            anim.addListener(new AnimatorListenerAdapter() {
-                @Override public void onAnimationEnd(Animator a) {
-                    applyLeashTransform(leash, endX, endY, endScaleX, endScaleY);
-                    log("live main shrink finished task=" + ticket.taskId
-                            + " dest=" + dest + " frames=" + leashAnimFrames);
-                }
-            });
-            leashAnimFrames = 0;
-            anim.start();
-            log("live main shrink start task=" + ticket.taskId + " dest=" + dest
-                    + " duration=" + SwapPreview.DURATION_MS);
-        } catch (Throwable error) {
-            log("live main shrink failed: " + error);
-        }
-    }
+    private void startLiveMainShrink(Promotion ticket) { debugCtrl.startLiveMainShrink(ticket); }
 
-    void applyLeashTransform(Object leash, float x, float y, float sx, float sy) {
-        try {
-            Object tx = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            try {
-                XposedHelpers.callMethod(tx, "setPosition", leash, x, y);
-                XposedHelpers.callMethod(tx, "setMatrix", leash, sx, 0f, 0f, sy);
-                XposedHelpers.callMethod(tx, "apply");
-                leashAnimFrames++;
-            } finally {
-                try { XposedHelpers.callMethod(tx, "close"); } catch (Throwable ignored) {}
-            }
-        } catch (Throwable error) {
-            log("leash anim frame failed: " + error);
-        }
-    }
+    void applyLeashTransform(Object leash, float x, float y, float sx, float sy) { debugCtrl.applyLeashTransform(leash, x, y, sx, sy); }
 
     /** Bounds of the visible main pane while the host owns the display zoom. */
     static Rect activeMainBounds() {
@@ -1236,57 +1028,10 @@ TopTaskGeometry topGeometry() {
     }
 
     /** 诊断：打印当前所有 root task 的判定字段（findMainTask 漏判用）。 */
-    private void dumpRoots(String reason) {
-        try {
-            java.util.List<?> roots = rootInfos();
-            LiveTask main = null;
-            try { main = findMainTask(); } catch (Throwable error) {
-                log("roots[" + reason + "] findMainTask threw: " + error);
-            }
-            log("roots[" + reason + "] count=" + roots.size()
-                    + " main=" + (main == null ? -1 : main.id));
-            for (Object info : roots) {
-                int taskId = XposedHelpers.getIntField(info, "taskId");
-                int userId = XposedHelpers.getIntField(info, "userId");
-                int type = (Integer) XposedHelpers.callMethod(info, "getActivityType");
-                boolean visible = XposedHelpers.getBooleanField(info, "isVisible");
-                boolean focused = XposedHelpers.getBooleanField(info, "isFocused");
-                boolean hasParent = Boolean.TRUE.equals(
-                        XposedHelpers.callMethod(info, "hasParentTask"));
-                int mode = -1;
-                try {
-                    Object config = XposedHelpers.getObjectField(info, "configuration");
-                    Object wc = XposedHelpers.getObjectField(config, "windowConfiguration");
-                    mode = (Integer) XposedHelpers.callMethod(wc, "getWindowingMode");
-                } catch (Throwable ignored) {}
-                Object token = XposedHelpers.getObjectField(info, "token");
-                boolean side = isSideToken(token);
-                boolean ordinary = ordinaryRoot(info, 1);
-                ComponentName base = (ComponentName) XposedHelpers.getObjectField(
-                        info, "baseActivity");
-                log("roots[" + reason + "] task=" + taskId + " type=" + type
-                        + " user=" + userId
-                        + " vis=" + visible + " focused=" + focused + " mode=" + mode
-                        + " parent=" + hasParent + " side=" + side
-                        + " ordinary=" + ordinary
-                        + " base=" + (base == null ? "?" : base.getPackageName()));
-            }
-        } catch (Throwable error) {
-            log("roots dump[" + reason + "] failed: " + error);
-        }
-    }
+    void dumpRoots(String reason) { debugCtrl.dumpRoots(reason); }
 
     /** 调试广播入口：打印 root 诊断。 */
-    public static void debugRoots() {
-        MiStepHost host = sInstance;
-        if (host == null) {
-            log("debugRoots: host not started");
-            return;
-        }
-        if (!host.executeOnShell(() -> host.dumpRoots("debug"))) {
-            log("debugRoots skipped: no shell queue");
-        }
-    }
+    public static void debugRoots() { HostDebugController.debugRoots(); }
 
     LiveTask findMainTask() throws Exception {
         // A closing fullscreen app may remain visible while Home has already taken
@@ -1325,7 +1070,7 @@ TopTaskGeometry topGeometry() {
         return candidate; // Home（type=2）不会被当主任务。
     }
 
-    private LiveTask findPackageTask(String pkg) throws Exception {
+    LiveTask findPackageTask(String pkg) throws Exception {
         LiveTask candidate = null;
         for (Object info : rootInfos()) {
             if (!TaskUserPolicy.isCurrentUser(
@@ -2622,38 +2367,11 @@ TopTaskGeometry topGeometry() {
 
 
     /** 调试广播入口：打印宿主 View 树（定位残带/残留视图）。 */
-    public static void debugDumpViews() {
-        MiStepHost host = sInstance;
-        if (host == null) { log("debugDumpViews: host not started"); return; }
-        host.main.post(() -> host.dumpViewTree());
-    }
+    public static void debugDumpViews() { HostDebugController.debugDumpViews(); }
 
-    private void dumpViewTree() {
-        if (root == null) { log("view tree: root null"); return; }
-        log("view tree root children=" + root.getChildCount());
-        dumpViewRecursive(root, 0);
-    }
+    void dumpViewTree() { debugCtrl.dumpViewTree(); }
 
-    private void dumpViewRecursive(View view, int depth) {
-        if (view == null) return;
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < depth; i++) sb.append("| ");
-        sb.append(view.getClass().getSimpleName())
-                .append(" vis=").append(view.getVisibility())
-                .append(" l=").append(view.getLeft()).append(" t=").append(view.getTop())
-                .append(" w=").append(view.getWidth()).append(" h=").append(view.getHeight())
-                .append(" a=").append(view.getAlpha());
-        if (view.getBackground() != null) {
-            sb.append(" bg=").append(view.getBackground().getClass().getSimpleName());
-        }
-        log("view: " + sb);
-        if (view instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) view;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                dumpViewRecursive(group.getChildAt(i), depth + 1);
-            }
-        }
-    }
+    private void dumpViewRecursive(View view, int depth) { debugCtrl.dumpViewRecursive(view, depth); }
 
 
     /** 交换确认后把新主任务 leash 完全复位：position/matrix/alpha/crop，避免副格残留变换把画面顶到主区上方。 */
