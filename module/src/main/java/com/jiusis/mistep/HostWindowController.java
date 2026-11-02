@@ -53,7 +53,7 @@ TopTaskGeometry topGeometry() {
                 h.ctx.getResources().getDisplayMetrics().density);
     }
 
-    void applyTopConfiguration(Object wct, Object token, MiStepHost.Slot slot) {
+    void applyTopConfiguration(Object wct, Object token, Slot slot) {
         if (slot == null || slot.index != MiStepHost.SLOT_TOP) return;
         TopTaskGeometry geometry = topGeometry();
         XposedHelpers.callMethod(wct, "setAppBounds", token, h.logicalBounds(slot));
@@ -65,7 +65,7 @@ TopTaskGeometry topGeometry() {
         XposedHelpers.callMethod(wct, "setSmallestScreenWidthDp", token, Math.min(widthDp, heightDp));
     }
 
-    int[] slotBounds(MiStepHost.Slot slot) {
+    int[] slotBounds(Slot slot) {
         return slot.index==MiStepHost.SLOT_TOP ? topGeometry().bounds() : h.layout.cellBounds(slot.index-1);
     }
 
@@ -101,7 +101,7 @@ TopTaskGeometry topGeometry() {
             h.dragGhost.setX(event.getRawX() - h.dragGhost.getWidth() * 0.5f);
             h.dragGhost.setY(event.getRawY() - h.dragGhost.getHeight() * 0.5f);
         }
-        MiStepHost.Slot target = slotAtPoint(event.getRawX(), event.getRawY());
+        Slot target = slotAtPoint(event.getRawX(), event.getRawY());
         if (target != h.dragTarget) {
             setDropHighlight(h.dragTarget, false);
             h.dragTarget = target;
@@ -112,7 +112,7 @@ TopTaskGeometry topGeometry() {
     void finishWindowDrag(MotionEvent event) {
         boolean cancelled = event.getActionMasked() == MotionEvent.ACTION_CANCEL;
         boolean moved = h.dragMoved;
-        MiStepHost.Slot target = slotAtPoint(event.getRawX(), event.getRawY());
+        Slot target = slotAtPoint(event.getRawX(), event.getRawY());
         setDropHighlight(h.dragTarget, false);
         if (h.dragGhost != null) {
             h.root.removeView(h.dragGhost);
@@ -154,12 +154,12 @@ TopTaskGeometry topGeometry() {
         h.root.requestLayout();
     }
 
-    void setDropHighlight(MiStepHost.Slot slot, boolean active) {
+    void setDropHighlight(Slot slot, boolean active) {
         if (slot == null || slot.hint == null) return;
         float scale = active ? 1.06f : 1f;
         slot.hint.setScaleX(scale);
         slot.hint.setScaleY(scale);
-        MiStepHost.LiveSwapVisualLease.writeAlpha(slot.hint, 1f);
+        LiveSwapVisualLease.writeAlpha(slot.hint, 1f);
     }
 
     int sideSegmentTop(int slotIndex) {
@@ -175,9 +175,9 @@ TopTaskGeometry topGeometry() {
         return Math.max(1, bottom - top);
     }
 
-    MiStepHost.Slot slotAtPoint(float x, float y) {
+    Slot slotAtPoint(float x, float y) {
         if (h.layout == null || y < h.layout.topStrip) return null;
-        for (MiStepHost.Slot slot : h.slots) {
+        for (Slot slot : h.slots) {
             if (slot.index <= MiStepHost.SLOT_MAIN || slot.index >= MiStepHost.CELL_SLOT_COUNT || slot.rect == null) continue;
             if (x >= slot.rect[0] && x < slot.rect[2]
                     && y >= slot.rect[1] && y < slot.rect[3]) return slot;
@@ -186,7 +186,7 @@ TopTaskGeometry topGeometry() {
     }
 
     int slotIndexOfView(View view) {
-        for (MiStepHost.Slot s : h.slots) {
+        for (Slot s : h.slots) {
             if (s.view == view) {
                 return s.index;
             }
@@ -220,7 +220,7 @@ TopTaskGeometry topGeometry() {
                         touchable.op(new Rect(h.layout.cellX, h.layout.topStrip,
                                         h.layout.cellX + h.layout.cellWidth, h.screenH),
                                 Region.Op.UNION);
-                        MiStepHost.Slot upper=h.slots[MiStepHost.SLOT_TOP];
+                        Slot upper=h.slots[MiStepHost.SLOT_TOP];
                         if(h.topCtrl.topFace && h.topCtrl.topTaskPane!=null && !h.topCtrl.topTaskPane.choosing()
                                 && h.topCtrl.topRoll!=null && !h.topCtrl.topRoll.rolling() && upper.occupied && !upper.parked
                                 && !upper.promoting && upper.rect!=null)
@@ -233,7 +233,7 @@ TopTaskGeometry topGeometry() {
         MiStepHost.log("host input: top/side only; system main passes through");
     }
 
-    void updateTouchRegion(MiStepHost.Slot slot) {
+    void updateTouchRegion(Slot slot) {
         try {
             if (slot.view == null) {
                 return;
@@ -280,7 +280,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    void syncSlotWindowState(MiStepHost.Slot slot) {
+    void syncSlotWindowState(Slot slot) {
         if (slot != null && slot.windowState != null) {
             slot.windowState.slotIndex = slot.index;
         }
@@ -314,7 +314,7 @@ TopTaskGeometry topGeometry() {
 
     String describeTasks() {
         StringBuilder sb = new StringBuilder();
-        for (MiStepHost.Slot s : h.slots) {
+        for (Slot s : h.slots) {
             sb.append(" [").append(s.index).append(':')
                     .append(s.taskId).append(s.occupied ? "" : "(empty)")
                     .append(s.taskVisible ? "/vis" : "/hid");
@@ -350,11 +350,11 @@ TopTaskGeometry topGeometry() {
         return h.layout.cellScale(0);
     }
 
-    float scaleFor(MiStepHost.Slot slot) {
+    float scaleFor(Slot slot) {
         return slot.index == MiStepHost.SLOT_TOP ? topGeometry().scale : h.layout.cellScale(slot.index - 1);
     }
 
-    void applySlotScale(MiStepHost.Slot slot) {
+    void applySlotScale(Slot slot) {
         if (h.holdsLiveFlipZoom() || !h.canRender(slot) || slot.promoting || !slot.occupied || slot.view == null
                 || !h.mayWriteSideSurface(slot)) {
             return;
@@ -382,7 +382,7 @@ TopTaskGeometry topGeometry() {
             slot.scaleSurface = sc;
             slot.scaleTaskId = slot.taskId;
             slot.scaleApplied = k;
-            MiStepHost.OwnedTask accepted = h.ownedTasks.get(slot.taskToken);
+            OwnedTask accepted = h.ownedTasks.get(slot.taskToken);
             if (accepted != null) accepted.surface = sc;
             MiStepHost.log("applySlotScale slot=" + slot.index + " task=" + slot.taskId
                     + " k=" + k + " onLeash=" + slot.scaleOnLeash + " surface=" + sc);
@@ -395,7 +395,7 @@ TopTaskGeometry topGeometry() {
         h.main.postDelayed(() -> reapplyScale(slot), 1200L);
     }
 
-    void reapplyScale(MiStepHost.Slot slot) {
+    void reapplyScale(Slot slot) {
         if (h.holdsLiveFlipZoom() || !h.canRender(slot) || slot.promoting || !slot.occupied || !h.mayWriteSideSurface(slot)) {
             return;
         }
@@ -414,7 +414,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    void applyFullscreenBounds(MiStepHost.Slot slot) {
+    void applyFullscreenBounds(Slot slot) {
         if (h.holdsLiveFlipZoom() || !h.canRender(slot) || slot.promoting || slot.taskToken == null
                 || !h.mayWriteSideSurface(slot)) {
             return;
@@ -435,7 +435,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    boolean applyScaleTransform(MiStepHost.Slot slot, Object sc) {
+    boolean applyScaleTransform(Slot slot, Object sc) {
         if (h.holdsLiveFlipZoom() || !h.canRender(slot) || slot.promoting || !h.mayWriteSideSurface(slot)) return false;
         float k = scaleFor(slot);
         Object tx = null;

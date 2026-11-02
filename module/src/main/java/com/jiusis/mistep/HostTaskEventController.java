@@ -69,7 +69,7 @@ final class HostTaskEventController {
 
     void onTaskViewCreated(int index, Object taskViewObj) {
         try {
-            MiStepHost.Slot slot = h.slots[index];
+            Slot slot = h.slots[index];
             View view = (View) taskViewObj;
             slot.view = view;
             slot.controller = XposedHelpers.callMethod(view, "getController");
@@ -147,7 +147,7 @@ final class HostTaskEventController {
         }
     }
 
-    void clearSlot(MiStepHost.Slot slot) {
+    void clearSlot(Slot slot) {
         if(slot.index==MiStepHost.SLOT_TOP && h.topCtrl.topTaskState.owner()!=null) {
             h.topCtrl.topTaskState.release(h.topCtrl.topTaskState.owner(),false); h.topCtrl.topOriginalSlot=null;
         }
@@ -193,22 +193,22 @@ final class HostTaskEventController {
         h.requestCompaction();
     }
 
-    boolean isActive(MiStepHost.Slot slot) {
+    boolean isActive(Slot slot) {
         return h.root != null && MiStepHost.sInstance == h && slot.index > 0
                 && slot.index < MiStepHost.SLOT_COUNT && h.slots[slot.index] == slot;
     }
 
-    boolean canRender(MiStepHost.Slot slot) {
+    boolean canRender(Slot slot) {
         return isActive(slot) && !slot.parked && h.screenOn
                 && (h.scene == MiStepHost.ACTIVE || h.scene == MiStepHost.RESUMING)
                 && h.root.getVisibility() == View.VISIBLE;
     }
 
-    void postForSlot(MiStepHost.Slot slot, Consumer<MiStepHost.Slot> callback) {
+    void postForSlot(Slot slot, Consumer<Slot> callback) {
         h.main.post(() -> { if (isActive(slot)) callback.accept(slot); });
     }
 
-    boolean controllerOwns(MiStepHost.Slot slot, int taskId, Object token) {
+    boolean controllerOwns(Slot slot, int taskId, Object token) {
         try {
             Object info = XposedHelpers.getObjectField(slot.controller, "mTaskInfo");
             Object current = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
@@ -224,9 +224,9 @@ final class HostTaskEventController {
         }
     }
 
-    void bindTask(MiStepHost.Slot slot, int taskId, Object token) { h.promotionController.bindTask(slot, taskId, token); }
+    void bindTask(Slot slot, int taskId, Object token) { h.promotionController.bindTask(slot, taskId, token); }
 
-    void resetIdleTaskView(MiStepHost.Slot slot) {
+    void resetIdleTaskView(Slot slot) {
         if (slot == null || slot.controller == null) return;
         try {
             MiStepIdleTaskView.reset(slot.controller, text -> MiStepHost.log(text + " slot=" + slot.index));
@@ -235,7 +235,7 @@ final class HostTaskEventController {
         }
     }
 
-    void startSlot(final MiStepHost.Slot slot, Intent launch, String label) {
+    void startSlot(final Slot slot, Intent launch, String label) {
         if (!isActive(slot) || h.scene != MiStepHost.ACTIVE || slot.promoting) { slot.launching = false; return; }
         final int index = slot.index;
         resetIdleTaskView(slot);
@@ -282,7 +282,7 @@ final class HostTaskEventController {
     }
 
     Object makeListener(final int slotIndex) {
-        final MiStepHost.Slot owner = h.slots[slotIndex];
+        final Slot owner = h.slots[slotIndex];
         try {
             Class<?> iface = XposedHelpers.findClass(
                     "com.android.wm.shell.taskview.TaskView$Listener", h.ctx.getClassLoader());
@@ -327,7 +327,7 @@ final class HostTaskEventController {
     }
 
     void onTaskIdKnown(int slotIndex, int taskId) {
-        MiStepHost.Slot slot = h.slots[slotIndex];
+        Slot slot = h.slots[slotIndex];
         if (slot.promoting || slot.parked || slot.retiredTaskId == taskId || !controllerOwns(slot, taskId, null)) return;
         Object token = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
         if (token == null || !controllerOwns(slot, taskId, token)) return;
@@ -346,7 +346,7 @@ final class HostTaskEventController {
     }
 
     void onTaskInfo(int slotIndex, Object info) {
-        MiStepHost.Slot slot = h.slots[slotIndex];
+        Slot slot = h.slots[slotIndex];
         try {
             int taskId = XposedHelpers.getIntField(info, "taskId");
             if (slot.promoting || slot.parked || slot.retiredTaskId == taskId) return;
@@ -413,7 +413,7 @@ final class HostTaskEventController {
     }
 
     void onTaskVisibility(int slotIndex, int taskId, boolean visible) {
-        MiStepHost.Slot slot = h.slots[slotIndex];
+        Slot slot = h.slots[slotIndex];
         if (slot.taskId != taskId || slot.promoting || slot.parked) return;
         slot.taskVisible = visible;
         MiStepHost.log("taskVisibility slot=" + slotIndex + " task=" + taskId + " visible=" + visible);
@@ -433,7 +433,7 @@ final class HostTaskEventController {
                 if (task == null) continue;
                 int id = XposedHelpers.getIntField(task, "taskId");
                 Object token = XposedHelpers.getObjectField(task, "token");
-                for (MiStepHost.Slot slot : h.slots) {
+                for (Slot slot : h.slots) {
                     if (slot.index == 0 || slot.taskId != id || !java.util.Objects.equals(slot.taskToken, token)
                             || !slot.occupied || slot.promoting || slot.parked || slot.closing || slot.frozen
                             || !controllerOwns(slot, id, token)) continue;
@@ -484,7 +484,7 @@ final class HostTaskEventController {
     }
 
     void onTaskRemovalStarted(int slotIndex, int taskId) {
-        MiStepHost.Slot slot = h.slots[slotIndex];
+        Slot slot = h.slots[slotIndex];
         MiStepHost.log("onTaskRemovalStarted slot=" + slotIndex + " taskId=" + taskId
                 + " current=" + slot.taskId);
         if (slot.closing || slot.nativeReleasePending) return;
@@ -515,7 +515,7 @@ final class HostTaskEventController {
         }, 250L);
     }
 
-    void scheduleSideVisibilityRepair(MiStepHost.Slot slot) {
+    void scheduleSideVisibilityRepair(Slot slot) {
         if (!canRender(slot) || h.scene != MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked
                 || slot.promoting || slot.launching
                 || slot.frozen || !slot.occupied || slot.taskVisible || slot.reassertPending) return;
@@ -526,7 +526,7 @@ final class HostTaskEventController {
         h.main.postDelayed(() -> {
             slot.reassertPending = false;
             if (!visibilityRepairCurrent(slot, epoch, binding, taskId, token)) return;
-            for (MiStepHost.Slot side : h.slots) if (side.promoting || side.launching || side.frozen) return;
+            for (Slot side : h.slots) if (side.promoting || side.launching || side.frozen) return;
             h.executeOnShell(() -> {
                 try {
                     if (!visibilityRepairCurrent(slot, epoch, binding, taskId, token)
@@ -546,11 +546,11 @@ final class HostTaskEventController {
                     Object wct = Class.forName("android.window.WindowContainerTransaction")
                             .getDeclaredConstructor().newInstance();
                     int count = 0;
-                    for (MiStepHost.Slot side : h.slots) {
+                    for (Slot side : h.slots) {
                         if (!canRender(side) || side.promoting || side.launching || side.frozen
                                 || !side.occupied || !controllerOwns(side, side.taskId, side.taskToken)) continue;
                         Object core = null;
-                        for (Object info : roots) if (new MiStepHost.LiveTask(side).matches(info)) { core = info; break; }
+                        for (Object info : roots) if (new LiveTask(side).matches(info)) { core = info; break; }
                         if (!h.ordinaryRoot(core, 6)) continue;
                         XposedHelpers.callMethod(wct, "setHidden", side.taskToken, false);
                         XposedHelpers.callMethod(wct, "setForceTranslucent", side.taskToken, true);
@@ -562,7 +562,7 @@ final class HostTaskEventController {
                     if (count == 0 || !visibilityRepairCurrent(slot, epoch, binding, taskId, token)) return;
                     boolean applied = h.applyWct("retain-side-order", wct);
                     if (applied) {
-                        for (MiStepHost.Slot side : h.slots) {
+                        for (Slot side : h.slots) {
                             if (canRender(side) && side.occupied && !side.promoting && !side.frozen
                                     && controllerOwns(side, side.taskId, side.taskToken))
                                 XposedHelpers.callMethod(h.transitions, "setTaskViewVisible", side.controller, true);
@@ -583,8 +583,8 @@ final class HostTaskEventController {
             if (!h.screenOn || (h.scene != MiStepHost.ACTIVE && h.scene != MiStepHost.RESUMING)
                     || h.root == null || epoch != h.sceneEpoch) return;
             int count = 0;
-            java.util.List<MiStepHost.RenderBinding> frames = new java.util.ArrayList<>();
-            for (MiStepHost.Slot side : h.slots) {
+            java.util.List<RenderBinding> frames = new java.util.ArrayList<>();
+            for (Slot side : h.slots) {
                 if (side.index <= MiStepHost.SLOT_MAIN || !canRender(side) || !side.occupied
                         || (side.index==MiStepHost.SLOT_TOP && !h.topCtrl.topFace) || side.parked || side.promoting || side.launching || side.frozen
                         || side.controller == null
@@ -594,7 +594,7 @@ final class HostTaskEventController {
                     Object leash = MiStepHost.getSurfaceField(side.controller, "mTaskLeash");
                     Object parent = MiStepHost.getSurfaceField(side.controller, "mSurfaceControl");
                     if (leash != null && parent != null && leash != parent)
-                        frames.add(new MiStepHost.RenderBinding(side, epoch, leash, parent));
+                        frames.add(new RenderBinding(side, epoch, leash, parent));
                     count++;
                 } catch (Throwable error) {
                     MiStepHost.log("side reassert failed slot=" + side.index + ": " + error);
@@ -616,7 +616,7 @@ final class HostTaskEventController {
             }
             final int visible = count;
             h.main.post(() -> {
-                for (MiStepHost.Slot side : h.slots) {
+                for (Slot side : h.slots) {
                     if (side.index > MiStepHost.SLOT_MAIN && side.occupied && !side.promoting && !side.parked)
                         h.reapplyScale(side);
                 }
@@ -625,7 +625,7 @@ final class HostTaskEventController {
         })) MiStepHost.log("side TaskView reassert skipped reason=" + reason + ": no Shell queue");
     }
 
-    boolean visibilityRepairCurrent(MiStepHost.Slot slot, long epoch, long binding, int id, Object token) {
+    boolean visibilityRepairCurrent(Slot slot, long epoch, long binding, int id, Object token) {
         return canRender(slot) && h.scene == MiStepHost.ACTIVE && !slot.promoting && !slot.launching && !slot.frozen
                 && h.sceneEpoch == epoch && slot.taskEpoch == binding && slot.taskId == id
                 && token != null && token.equals(slot.taskToken);

@@ -67,7 +67,7 @@ final class HostSurfaceController {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         MiStepHost hb = MiStepHost.sInstance;
                         if (hb == null) return;
-                        java.util.List<MiStepHost.RenderBinding> frames = hb.finishTransactions.take(p.thisObject);
+                        java.util.List<RenderBinding> frames = hb.finishTransactions.take(p.thisObject);
                         if (!frames.isEmpty()) hb.appendRetainedSurfaces(p.thisObject, frames);
                         hb.appendWorkspaceSurfaces(p.thisObject, hb.workspaceFinishes.take(p.thisObject));
                         java.util.List<MiStepHost.NativeObservation> checks = hb.nativeObservations.take(p.thisObject);
@@ -164,7 +164,7 @@ final class HostSurfaceController {
         // current canonical binding at the final apply, after native merges.
         h.workspaceFinishes.mark(finish, java.util.Collections.singletonList(h.sceneEpoch));
         boolean relevant = h.promotion != null || h.transferBusy;
-        for (MiStepHost.Slot slot : h.slots) if (slot.launching) relevant = true;
+        for (Slot slot : h.slots) if (slot.launching) relevant = true;
         java.util.List<?> changes = (java.util.List<?>) XposedHelpers.callMethod(info, "getChanges");
         for (Object change : changes) {
             Object task = XposedHelpers.callMethod(change, "getTaskInfo");
@@ -173,15 +173,15 @@ final class HostSurfaceController {
             if (h.isSideToken(token)) relevant = true;
         }
         if (!relevant) return;
-        java.util.List<MiStepHost.RenderBinding> frames = new java.util.ArrayList<>();
-        for (MiStepHost.Slot slot : h.slots) {
+        java.util.List<RenderBinding> frames = new java.util.ArrayList<>();
+        for (Slot slot : h.slots) {
             if (!h.canRender(slot) || !slot.occupied || slot.promoting || slot.launching || slot.frozen
                     || !mayWriteSideSurface(slot)
                     || !h.controllerOwns(slot, slot.taskId, slot.taskToken)) continue;
             Object leash = getSurfaceField(slot.controller, "mTaskLeash");
             Object parent = getSurfaceField(slot.controller, "mSurfaceControl");
             if (leash != null && parent != null && leash != parent)
-                frames.add(new MiStepHost.RenderBinding(slot, h.sceneEpoch, leash, parent));
+                frames.add(new RenderBinding(slot, h.sceneEpoch, leash, parent));
         }
         if (!frames.isEmpty() && !h.finishTransactions.mark(finish, frames))
             MiStepHost.log("retained finish transaction cap; do not retry or touch unrelated transactions");
@@ -199,7 +199,7 @@ final class HostSurfaceController {
 
     void refreshOverlayAfterTransition() {
         if (h.scene != MiStepHost.ACTIVE || h.root == null) return;
-        for (MiStepHost.Slot slot : h.slots) if (slot.closing) {
+        for (Slot slot : h.slots) if (slot.closing) {
             h.main.postDelayed(this::refreshOverlayAfterTransition, 120L);
             return;
         }
@@ -226,8 +226,8 @@ final class HostSurfaceController {
     void appendWorkspaceSurfaces(Object tx, java.util.List<Long> epochs) {
         if (!h.screenOn || (h.scene != MiStepHost.ACTIVE && h.scene != MiStepHost.RESUMING) || h.root == null
                 || !epochs.contains(h.sceneEpoch)) return;
-        java.util.List<MiStepHost.RenderBinding> frames = new java.util.ArrayList<>();
-        for (MiStepHost.Slot slot : h.slots) {
+        java.util.List<RenderBinding> frames = new java.util.ArrayList<>();
+        for (Slot slot : h.slots) {
             if (slot.index <= MiStepHost.SLOT_MAIN || !h.canRender(slot) || !slot.occupied
                     || slot.parked || slot.promoting || slot.launching || slot.frozen
                     || !mayWriteSideSurface(slot)
@@ -235,16 +235,16 @@ final class HostSurfaceController {
             Object leash = getSurfaceField(slot.controller, "mTaskLeash");
             Object parent = getSurfaceField(slot.controller, "mSurfaceControl");
             if (leash != null && parent != null && leash != parent)
-                frames.add(new MiStepHost.RenderBinding(slot, h.sceneEpoch, leash, parent));
+                frames.add(new RenderBinding(slot, h.sceneEpoch, leash, parent));
         }
         appendRetainedSurfaces(tx, frames);
     }
 
-    void appendRetainedSurfaces(Object tx, java.util.List<MiStepHost.RenderBinding> frames) {
-        java.util.Set<MiStepHost.Slot> restored = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    void appendRetainedSurfaces(Object tx, java.util.List<RenderBinding> frames) {
+        java.util.Set<Slot> restored = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
         int count = 0;
-        for (MiStepHost.RenderBinding frame : frames) {
-            MiStepHost.Slot slot = frame.slot;
+        for (RenderBinding frame : frames) {
+            Slot slot = frame.slot;
             if (restored.contains(slot) || !h.canRender(slot) || slot.promoting || slot.launching || slot.frozen
                     || !mayWriteSideSurface(slot)
                     || frame.scene != h.sceneEpoch || frame.binding != slot.taskEpoch
@@ -269,10 +269,10 @@ final class HostSurfaceController {
         if (count > 0) MiStepHost.log("final transaction retained own side surfaces=" + count);
     }
 
-    boolean mayWriteSideSurface(MiStepHost.Slot slot) {
+    boolean mayWriteSideSurface(Slot slot) {
         if(slot!=null && slot.index==MiStepHost.SLOT_TOP && !h.topCtrl.topFace)return false;
         if (slot == null || slot.windowMode != 6 || slot.controller == null) return false;
-        MiStepHost.PendingSidePromotion pending = slot.pendingSidePromotion;
+        PendingSidePromotion pending = slot.pendingSidePromotion;
         if (pending != null && pending.desktopLaunch) return false;
         try {
             // Controller.onTaskInfoChanged forwards info without replacing its

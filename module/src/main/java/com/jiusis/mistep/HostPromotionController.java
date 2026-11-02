@@ -16,7 +16,7 @@ final class HostPromotionController {
         h = host;
     }
 
-    private void enqueuePromotion(MiStepHost.Promotion ticket) {
+    private void enqueuePromotion(Promotion ticket) {
         if (h.promotion != ticket || ticket.cancelled) return;
         if (!h.executeOnShell(() -> {
             MiStepHost.NativeObservation observation = null;
@@ -62,7 +62,7 @@ final class HostPromotionController {
         if (h.root != null) h.root.requestLayout();
     }
 
-    private void stopLiveLift(MiStepHost.Promotion ticket) {
+    private void stopLiveLift(Promotion ticket) {
         if (ticket == null) return;
         if (ticket.liveLift != null) {
             if (h.swapPreview != null) h.swapPreview.seal();
@@ -85,7 +85,7 @@ final class HostPromotionController {
         if (h.root != null) h.root.requestLayout();
     }
 
-    private static void releaseCompactSnapshot(MiStepHost.Promotion ticket) {
+    private static void releaseCompactSnapshot(Promotion ticket) {
         if (ticket == null) return;
         if (ticket.compactSnapshot != null && !ticket.compactSnapshot.isRecycled()) {
             ticket.compactSnapshot.recycle();
@@ -117,7 +117,7 @@ final class HostPromotionController {
         else reveal.run();
     }
 
-    Object fullscreenExitTransaction(MiStepHost.Promotion ticket) throws Exception {
+    Object fullscreenExitTransaction(Promotion ticket) throws Exception {
         Object wct = Class.forName("android.window.WindowContainerTransaction")
                 .getDeclaredConstructor().newInstance();
         Object token = ticket.token;
@@ -175,7 +175,7 @@ final class HostPromotionController {
     }
 
     /** Retire only our binding, then return its canonical task surface to the existing DA. */
-    void handoffPromotedTask(MiStepHost.Promotion ticket) throws Throwable {
+    void handoffPromotedTask(Promotion ticket) throws Throwable {
         if (ticket.handoffAttempted || ticket.cancelled) return;
         Object controller = ticket.slot.controller;
         Object organizer = XposedHelpers.getObjectField(controller, "mTaskOrganizer");
@@ -275,7 +275,7 @@ final class HostPromotionController {
     }
 
     /** At most three observations; notification or transaction submission alone is insufficient. */
-    void checkPromotion(MiStepHost.Promotion ticket, int attempt) {
+    void checkPromotion(Promotion ticket, int attempt) {
         if (h.promotion != ticket || ticket.cancelled || !h.isActive(ticket.slot)) return;
         if (!h.executeOnShell(() -> {
             boolean success = false;
@@ -365,7 +365,7 @@ final class HostPromotionController {
     }
 
     /** The promoted binding is already retired; move the remaining owners into its gap. */
-    void completeHomePromotion(MiStepHost.Promotion ticket) {
+    void completeHomePromotion(Promotion ticket) {
         if (h.promotion != ticket || ticket.cancelled) return;
         h.traceSwapEvent("Home-cover-and-focus-confirmed");
         ticket.cancelled = true;
@@ -384,7 +384,7 @@ final class HostPromotionController {
     }
 
     /** Backfill can take focus again; make the focus request after that last WCT. */
-    void finishPromotionFocus(MiStepHost.Promotion ticket, Runnable complete, int attempt) {
+    void finishPromotionFocus(Promotion ticket, Runnable complete, int attempt) {
         if (h.promotion != ticket || ticket.cancelled) return;
         if (ticket.liveMainFocusPrepared) {
             // The live Shell callback already requested the exact h.main task.
@@ -393,7 +393,7 @@ final class HostPromotionController {
             return;
         }
         final long epoch = h.sceneEpoch;
-        final MiStepHost.LiveTask home = ticket.nativeCollect ? ticket.collectionHome : null;
+        final LiveTask home = ticket.nativeCollect ? ticket.collectionHome : null;
         if (ticket.nativeCollect && home == null) { complete.run(); return; }
         final int focusId = home == null ? ticket.taskId : home.id;
         final Object focusToken = home == null ? ticket.token : home.token;
@@ -460,7 +460,7 @@ final class HostPromotionController {
         }
     }
 
-    void failPromotion(MiStepHost.Promotion ticket, String reason) {
+    void failPromotion(Promotion ticket, String reason) {
         h.traceSwapEvent("promotion-failure");
         if (h.promotion != ticket || ticket.cancelled) return;
         if (ticket.nativeSwap) {
@@ -496,7 +496,7 @@ final class HostPromotionController {
             h.setMainSide(ticket.previousMainOnRight);
         }
         closeSwapPreview(ticket);
-        MiStepHost.Slot slot = ticket.slot;
+        Slot slot = ticket.slot;
         h.resumeNotificationLaunch(ticket);
         MiStepHost.log("promote unconfirmed task=" + ticket.taskId + "; retain all slots: " + reason);
         if (ticket.externalLaunch) {
@@ -542,7 +542,7 @@ final class HostPromotionController {
         h.main.post(h::finishPendingSuspend);
     }
 
-    boolean requestLiveSwapCancellation(MiStepHost.Promotion ticket, String reason) {
+    boolean requestLiveSwapCancellation(Promotion ticket, String reason) {
         if (h.promotion != ticket || ticket.cancelled || ticket.cancelRequested || ticket.nativeCompleting)
             return false;
         // WCT may already be applied while Shell still waits for onTransitionReady.
@@ -574,10 +574,10 @@ final class HostPromotionController {
     }
 
     /** A wedged live reveal must never leave the desktop translucent behind the returned app. */
-    void restoreTopMainOpacity(MiStepHost.Promotion ticket) {
+    void restoreTopMainOpacity(Promotion ticket) {
         if(!h.executeOnShell(()->{
             try {
-                Object info=h.rootInfo(new MiStepHost.LiveTask(ticket.taskId,ticket.token,ticket.slot.pkg));
+                Object info=h.rootInfo(new LiveTask(ticket.taskId,ticket.token,ticket.slot.pkg));
                 // A late completion must not change a newly adopted freeform task.
                 if(!h.ordinaryRoot(info,1))return;
                 Object wct=Class.forName("android.window.WindowContainerTransaction")
@@ -589,7 +589,7 @@ final class HostPromotionController {
         }))MiStepHost.log("upper live main opacity restore unavailable: no Shell queue");
     }
 
-    void bindTask(MiStepHost.Slot slot, int taskId, Object token) {
+    void bindTask(Slot slot, int taskId, Object token) {
         if (slot.taskId != taskId || !java.util.Objects.equals(slot.taskToken, token)) {
             slot.pendingSidePromotion = null;
             slot.taskEpoch++;
@@ -616,7 +616,7 @@ final class HostPromotionController {
             }
         }
         slot.windowState.slotIndex = slot.index;
-        MiStepHost.OwnedTask retained = h.ownedTasks.computeIfAbsent(token, ignored -> new MiStepHost.OwnedTask(taskId, token));
+        OwnedTask retained = h.ownedTasks.computeIfAbsent(token, ignored -> new OwnedTask(taskId, token));
         retained.recoveryController = slot.controller;
     }
 }

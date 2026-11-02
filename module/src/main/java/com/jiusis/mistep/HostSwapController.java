@@ -42,7 +42,7 @@ final class HostSwapController {
      */
     boolean onSlotTouch(int slotIndex, MotionEvent e) {
         if (slotIndex <= MiStepHost.SLOT_MAIN || slotIndex >= MiStepHost.CELL_SLOT_COUNT) return false;
-        MiStepHost.Slot slot = h.slots[slotIndex];
+        Slot slot = h.slots[slotIndex];
         // Our MOVE session owns this pointer even while the task-transfer gate is held.
         if (h.sideDismiss != null && h.sideDismissSlot == slot) return followSideDismiss(slot, e);
         if (slot.promoting || slot.launching || slot.closing || slot.frozen || slot.parked
@@ -121,14 +121,14 @@ final class HostSwapController {
         }
     }
 
-    void recycleBuffered(MiStepHost.Slot slot) {
+    void recycleBuffered(Slot slot) {
         if (slot.bufferedDown != null) {
             slot.bufferedDown.recycle();
             slot.bufferedDown = null;
         }
     }
 
-    boolean followSideDismiss(MiStepHost.Slot slot, MotionEvent e) {
+    boolean followSideDismiss(Slot slot, MotionEvent e) {
         MiStepSideDismiss run = h.sideDismiss;
         if (!run.isTracking()) return true;
         MotionEvent down = slot.bufferedDown;
@@ -152,19 +152,19 @@ final class HostSwapController {
         return true;
     }
 
-    void dismissSideToBackground(MiStepHost.Slot slot) {
+    void dismissSideToBackground(Slot slot) {
         if (h.scene != MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked || h.transferBusy || h.promotion != null
                 || h.cellMotion != null || !h.isActive(slot) || !slot.occupied || slot.carrier
                 || slot.parked || slot.frozen || slot.promoting || slot.launching || slot.closing
                 || slot.taskId < 0 || slot.taskToken == null || slot.controller == null) return;
-        for (MiStepHost.Slot other : h.slots) if (other.launching || other.promoting || other.closing) return;
+        for (Slot other : h.slots) if (other.launching || other.promoting || other.closing) return;
         final int taskId = slot.taskId;
         final long binding = slot.taskEpoch;
         final long epoch = h.sceneEpoch;
         final View hostRoot = h.root;
         MiStepHost.log("side outward swipe -> background task=" + taskId + " slot=" + slot.index);
         MiStepLiveBackdrop preparing = null;
-        MiStepHost.LiveSwapVisualLease preparingVisuals = null;
+        LiveSwapVisualLease preparingVisuals = null;
         try {
             final MiStepLayout geometry = h.layout;
             final int emptyMask = 1 << slot.index;
@@ -172,8 +172,8 @@ final class HostSwapController {
             final MiStepLiveBackdrop backing = preparing = MiStepLiveBackdrop.create(liveHostRootSurface(),
                     h.wallpaperBackdrop, h.screenW, h.screenH, strip, strip,
                     canvas -> drawLiveEmptyHints(canvas, geometry, geometry, emptyMask), MiStepHost::log);
-            final MiStepHost.LiveSwapVisualLease visuals = preparingVisuals =
-                    new MiStepHost.LiveSwapVisualLease(h.sideBackingViews[slot.index], slot.hint);
+            final LiveSwapVisualLease visuals = preparingVisuals =
+                    new LiveSwapVisualLease(h.sideBackingViews[slot.index], slot.hint);
             h.transferBusy = true;
             slot.promoting = true;
             final MiStepSideDismiss[] run = new MiStepSideDismiss[1];
@@ -182,7 +182,7 @@ final class HostSwapController {
                 if (h.sideDismiss == run[0]) { h.sideDismiss = null; h.sideDismissSlot = null; }
                 recycleBuffered(slot); slot.injecting = false;
                 if (h.root == hostRoot && h.sceneEpoch == epoch) {
-                    for (MiStepHost.Slot cell : h.slots) h.updateCellSurfaceVisibility(cell);
+                    for (Slot cell : h.slots) h.updateCellSurfaceVisibility(cell);
                     visuals.restore();
                     hostRoot.invalidate();
                 } else visuals.restore();
@@ -225,7 +225,7 @@ final class HostSwapController {
     }
 
     /** Keep tap-to-swap, transfer a drag to its real window without reinjecting coordinates. */
-    void transferTouchToTask(MiStepHost.Slot slot, long eventTime) {
+    void transferTouchToTask(Slot slot, long eventTime) {
         if (h.root == null || slot.taskToken == null || !h.controllerOwns(slot, slot.taskId, slot.taskToken)) return;
         try {
             android.os.Bundle tokens = new android.os.Bundle();
@@ -253,14 +253,14 @@ final class HostSwapController {
             MiStepHost.log("onSlotTapped slot=" + slotIndex
                     + (h.slots[slotIndex] != null && h.slots[slotIndex].carrier ? " carrier" : ""));
             if (h.scene != MiStepHost.ACTIVE || h.transferBusy || h.promotion != null) return;
-            MiStepHost.Slot slot = h.slots[slotIndex];
+            Slot slot = h.slots[slotIndex];
             if (slot.closing) return;
             if (slot.carrier) {
                 h.restoreCarrierToMain();
                 return;
             }
             if (slot.parked && slot.occupied && !slot.frozen) {
-                h.adoptExisting(slot, new MiStepHost.LiveTask(slot), h::finishPendingSuspend,
+                h.adoptExisting(slot, new LiveTask(slot), h::finishPendingSuspend,
                         error -> MiStepHost.log("explicit resume retained task: " + error));
                 return;
             }
@@ -279,9 +279,9 @@ final class HostSwapController {
     }
 
     /** Official empty-cell flow: open an app from Home, then collect that exact task. */
-    void captureMainIntoEmptySlot(MiStepHost.Slot requestedSlot) {
+    void captureMainIntoEmptySlot(Slot requestedSlot) {
         if (requestedSlot == null) return;
-        final MiStepHost.Slot slot = requestedSlot;
+        final Slot slot = requestedSlot;
         if (h.carrierSlotIndex >= 0) {
             android.widget.Toast.makeText(h.ctx, "先点副格把相机放回主区",
                     android.widget.Toast.LENGTH_SHORT).show();
@@ -291,12 +291,12 @@ final class HostSwapController {
                 || h.promotion != null || h.swapPreview != null
                 || slot.occupied || slot.launching || slot.promoting || slot.frozen
                 || slot.controller == null) return;
-        for (MiStepHost.Slot other : h.slots) if (other.launching || other.promoting || other.closing) return;
+        for (Slot other : h.slots) if (other.launching || other.promoting || other.closing) return;
         final long epoch = h.sceneEpoch;
         h.transferBusy = true;
         if (!h.executeOnShell(() -> {
             try {
-                MiStepHost.LiveTask task = h.findMainTask(); // Deliberately excludes Home and existing cells.
+                LiveTask task = h.findMainTask(); // Deliberately excludes Home and existing cells.
                 h.main.post(() -> {
                     if (h.scene != MiStepHost.ACTIVE || epoch != h.sceneEpoch || !h.isActive(slot)
                             || slot.occupied || h.promotion != null || h.suspendRequested) {
@@ -328,7 +328,7 @@ final class HostSwapController {
     }
 
     /** Collect the actual fullscreen task; no captured app or desktop participates. */
-    void startLiveCollect(MiStepHost.Slot slot, MiStepHost.LiveTask task) {
+    void startLiveCollect(Slot slot, LiveTask task) {
         final MiStepLayout geometry = h.layout;
         final int width = h.screenW, height = h.screenH;
         final Object hostSurface;
@@ -340,7 +340,7 @@ final class HostSwapController {
             return;
         }
         h.bindTask(slot, task.id, task.token);
-        MiStepHost.Promotion ticket = new MiStepHost.Promotion(slot, h.slots);
+        Promotion ticket = new Promotion(slot, h.slots);
         ticket.sceneEpoch = h.sceneEpoch;
         ticket.bindingEpoch = slot.taskEpoch;
         ticket.previousMain = task;
@@ -349,7 +349,7 @@ final class HostSwapController {
         slot.promoting = true;
         h.promotion = ticket;
         h.transferBusy = false;
-        MiStepHost.OwnedTask candidate = h.ownedTasks.computeIfAbsent(task.token, key -> new MiStepHost.OwnedTask(task.id, key));
+        OwnedTask candidate = h.ownedTasks.computeIfAbsent(task.token, key -> new OwnedTask(task.id, key));
         candidate.recoveryController = slot.controller;
         candidate.recoveryCandidate = true;
         ticket.previousMainCandidate = candidate;
@@ -363,7 +363,7 @@ final class HostSwapController {
             return;
         }
         // Keep the empty-cell affordance until the real task occupies it.
-        ticket.liveVisual = new MiStepHost.LiveSwapVisualLease(h.sideBackingViews[slot.index], null);
+        ticket.liveVisual = new LiveSwapVisualLease(h.sideBackingViews[slot.index], null);
         h.prepareCellSurface(slot);
         if (!setLiveSwapInputBlocked(true)) {
             h.failPromotion(ticket, "transition input window unavailable"); return;
@@ -405,7 +405,7 @@ final class HostSwapController {
         }));
     }
 
-    void prepareCollectHandoff(MiStepHost.Promotion ticket, Consumer<Boolean> settled) {
+    void prepareCollectHandoff(Promotion ticket, Consumer<Boolean> settled) {
         if (!h.externalPromotionCurrent(ticket)) { settled.accept(false); return; }
         // The real app is still above Host. Remove the opaque empty-cell drawing
         // now, commit that frame, then let Shell return the app to its TaskView.
@@ -413,7 +413,7 @@ final class HostSwapController {
         MiStepCollectFrame.await(h.root, () -> h.externalPromotionCurrent(ticket), settled);
     }
 
-    void finishLiveCollect(MiStepHost.Promotion ticket, MiStepLiveSwap.Result result) {
+    void finishLiveCollect(Promotion ticket, MiStepLiveSwap.Result result) {
         if (ticket.nativeCompleting) return;
         if (!livePromotionBound(ticket)) {
             if (h.promotion == ticket && !ticket.cancelled)
@@ -421,7 +421,7 @@ final class HostSwapController {
             return;
         }
         ticket.nativeCompleting = true;
-        MiStepHost.Slot slot = ticket.slot;
+        Slot slot = ticket.slot;
         if (result.sideOwned && result.rolesConfirmed) {
             slot.pkg = ticket.previousMain.pkg;
             slot.occupied = slot.taskVisible = true;
@@ -442,9 +442,9 @@ final class HostSwapController {
         } else completeLiveCollect(ticket, result);
     }
 
-    void completeLiveCollect(MiStepHost.Promotion ticket, MiStepLiveSwap.Result result) {
+    void completeLiveCollect(Promotion ticket, MiStepLiveSwap.Result result) {
         if (h.promotion != ticket || ticket.cancelled) return;
-        MiStepHost.Slot slot = ticket.slot;
+        Slot slot = ticket.slot;
         ticket.cancelled = true;
         h.promotion = null;
         restoreLiveSwapVisual(ticket);
@@ -467,7 +467,7 @@ final class HostSwapController {
         if (slotIndex <= MiStepHost.SLOT_MAIN || slotIndex >= MiStepHost.SLOT_COUNT) {
             return;
         }
-        MiStepHost.Slot cellSlot = h.slots[slotIndex];
+        Slot cellSlot = h.slots[slotIndex];
         if (h.scene != MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked || h.transferBusy
                 || h.swapPreview != null || cellSlot.parked
                 || h.promotion != null || cellSlot.launching || cellSlot.promoting) return;
@@ -476,7 +476,7 @@ final class HostSwapController {
             h.restoreCarrierToMain();
             return;
         }
-        for (MiStepHost.Slot s : h.slots) if (s.launching || s.closing) return;
+        for (Slot s : h.slots) if (s.launching || s.closing) return;
         if (!cellSlot.occupied || cellSlot.controller == null) {
             captureMainIntoEmptySlot(cellSlot);
             return;
@@ -485,7 +485,7 @@ final class HostSwapController {
             MiStepHost.log("promote: task token not ready; keep cell" + slotIndex);
             return;
         }
-        final MiStepHost.Promotion ticket = new MiStepHost.Promotion(cellSlot, h.slots);
+        final Promotion ticket = new Promotion(cellSlot, h.slots);
         MiStepClipboard.get(h.ctx).close();
         ticket.sceneEpoch = h.sceneEpoch;
         ticket.bindingEpoch = cellSlot.taskEpoch;
@@ -615,9 +615,9 @@ final class HostSwapController {
                 geometry.mainOnRight ? geometry.sideWidth : geometry.width, geometry.height);
     }
 
-    private boolean livePeerBindingsCurrent(MiStepHost.Promotion ticket) {
-        for (MiStepHost.LivePeerBinding peer : ticket.livePeers) {
-            MiStepHost.Slot slot = peer.slot;
+    private boolean livePeerBindingsCurrent(Promotion ticket) {
+        for (LivePeerBinding peer : ticket.livePeers) {
+            Slot slot = peer.slot;
             if (!h.isActive(slot) || slot.taskEpoch != peer.epoch || slot.taskId != peer.id
                     || slot.controller != peer.controller || !peer.token.equals(slot.taskToken)
                     || !slot.occupied || slot.parked || slot.frozen || slot.promoting || slot.launching)
@@ -627,7 +627,7 @@ final class HostSwapController {
     }
 
     /** Real A/B leashes stay in their original columns as their roles expand/shrink. */
-    private void startLiveSwap(MiStepHost.Promotion ticket) {
+    private void startLiveSwap(Promotion ticket) {
         if (!h.externalPromotionCurrent(ticket) || ticket.previousMain == null) {
             h.failPromotion(ticket, "live swap scene changed before preparation");
             return;
@@ -635,7 +635,7 @@ final class HostSwapController {
         final MiStepLayout geometry = h.layout;
         final MiStepLayout target = h.makeAdaptiveLayout(!geometry.mainOnRight);
         final int width = h.screenW, height = h.screenH;
-        final MiStepHost.LiveTask first = ticket.previousMain;
+        final LiveTask first = ticket.previousMain;
         LiveSwapGeometry.Task a = new LiveSwapGeometry.Task(first.id, first.token, width, height,
                 liveMainRect(geometry), liveCellRect(target, ticket.slot.index));
         LiveSwapGeometry.Task b = new LiveSwapGeometry.Task(ticket.taskId, ticket.token, width, height,
@@ -646,14 +646,14 @@ final class HostSwapController {
         try {
             hostSurface = liveHostRootSurface();
             for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
-                MiStepHost.Slot peer = h.slots[i];
+                Slot peer = h.slots[i];
                 cellBackgrounds[i - 1] = peer.cellBackground;
                 if (peer == ticket.slot || !peer.occupied) continue;
                 if (peer.parked || peer.frozen || peer.carrier || peer.launching || peer.promoting
                         || peer.windowMode != 6 || peer.taskToken == null || peer.controller == null)
                     throw new IllegalStateException("peer not live for flip slot=" + i);
-                ticket.livePeers.add(new MiStepHost.LivePeerBinding(peer));
-                Object peerInfo = h.rootInfo(new MiStepHost.LiveTask(peer));
+                ticket.livePeers.add(new LivePeerBinding(peer));
+                Object peerInfo = h.rootInfo(new LiveTask(peer));
                 if (!h.ordinaryRoot(peerInfo, 6))
                     throw new IllegalStateException("peer user or identity changed slot=" + i);
                 peers.add(new LiveTaskSwapDriver.Peer(new LiveSwapGeometry.Task(peer.taskId,
@@ -678,18 +678,18 @@ final class HostSwapController {
         final LiveSwapZoom.Zoom targetZoom = new LiveSwapZoom.Zoom(++h.zoomCommandGeneration,
                 target.mainScale, target.mainOffsetX, target.mainOffsetY);
         ticket.slot.promoting = true;
-        MiStepHost.OwnedTask candidate = h.ownedTasks.computeIfAbsent(first.token, token -> new MiStepHost.OwnedTask(first.id, token));
+        OwnedTask candidate = h.ownedTasks.computeIfAbsent(first.token, token -> new OwnedTask(first.id, token));
         candidate.recoveryController = ticket.slot.controller;
         candidate.recoveryCandidate = true;
         ticket.previousMainCandidate = candidate;
-        MiStepHost.OwnedTask oldSide = h.ownedTasks.get(ticket.token);
+        OwnedTask oldSide = h.ownedTasks.get(ticket.token);
         if (oldSide != null) {
             oldSide.recoveryController = ticket.slot.controller;
             oldSide.recoveryCandidate = true;
         }
-        ticket.liveVisual = new MiStepHost.LiveSwapVisualLease(h.sideBackingViews[ticket.slot.index], ticket.slot.hint);
+        ticket.liveVisual = new LiveSwapVisualLease(h.sideBackingViews[ticket.slot.index], ticket.slot.hint);
         for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) if (i != ticket.slot.index)
-            ticket.peerVisuals.add(new MiStepHost.LiveSwapVisualLease(h.sideBackingViews[i], h.slots[i].hint));
+            ticket.peerVisuals.add(new LiveSwapVisualLease(h.sideBackingViews[i], h.slots[i].hint));
         if (!setLiveSwapInputBlocked(true)) {
             h.failPromotion(ticket, "transition input window unavailable"); return;
         }
@@ -709,7 +709,7 @@ final class HostSwapController {
                                 XposedHelpers.callMethod(shellTransitions, "isIdle")))
                             throw new IllegalStateException("workspace or native transition still animating");
                         Object info = h.rootInfo(first);
-                        Object sideInfo = h.rootInfo(new MiStepHost.LiveTask(ticket.slot));
+                        Object sideInfo = h.rootInfo(new LiveTask(ticket.slot));
                         if (!h.ordinaryRoot(info, 1) || !h.ordinaryRoot(sideInfo, 6))
                             throw new IllegalStateException("live main/side identity changed");
                         int user = XposedHelpers.getIntField(info, "userId");
@@ -749,7 +749,7 @@ final class HostSwapController {
             canvas.scale((float) h.wallpaperBackdrop.getWidth() / original.width,
                     (float) h.wallpaperBackdrop.getHeight() / original.height);
             for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
-                MiStepHost.Slot slot = h.slots[i];
+                Slot slot = h.slots[i];
                 boolean revealed = (revealEmptySlots & (1 << i)) != 0;
                 if (slot.hint == null || (!revealed
                         && (slot.occupied || slot.hint.getVisibility() != View.VISIBLE))) continue;
@@ -789,7 +789,7 @@ final class HostSwapController {
     }
 
     /** B covers the existing Home; Home, Host direction and WMS Z do not participate. */
-    private void startLiveHome(MiStepHost.Promotion ticket) {
+    private void startLiveHome(Promotion ticket) {
         if (!h.externalPromotionCurrent(ticket) || ticket.previousMain != null || ticket.homeBeforeCover == null) {
             h.failPromotion(ticket, "live Home scene/identity changed before preparation");
             return;
@@ -813,9 +813,9 @@ final class HostSwapController {
         ticket.nativeHome = true;
         ticket.previousLayout = ticket.targetLayout = geometry;
         ticket.slot.promoting = true;
-        MiStepHost.OwnedTask owned = h.ownedTasks.get(ticket.token);
+        OwnedTask owned = h.ownedTasks.get(ticket.token);
         if (owned != null) { owned.recoveryController = ticket.slot.controller; owned.recoveryCandidate = true; }
-        ticket.liveVisual = new MiStepHost.LiveSwapVisualLease(h.sideBackingViews[ticket.slot.index], ticket.slot.hint);
+        ticket.liveVisual = new LiveSwapVisualLease(h.sideBackingViews[ticket.slot.index], ticket.slot.hint);
         if (!setLiveSwapInputBlocked(true)) {
             h.failPromotion(ticket, "transition input window unavailable"); return;
         }
@@ -832,7 +832,7 @@ final class HostSwapController {
                         if (SystemClock.uptimeMillis() < h.zoomAnimUntil || !Boolean.TRUE.equals(
                                 XposedHelpers.callMethod(shell, "isIdle")))
                             throw new IllegalStateException("workspace or native transition still animating");
-                        Object info = h.rootInfo(new MiStepHost.LiveTask(ticket.slot));
+                        Object info = h.rootInfo(new LiveTask(ticket.slot));
                         Object homeInfo = h.rootInfo(ticket.homeBeforeCover);
                         if (!h.ordinaryRoot(info, 6) || !h.isHomeRoot(homeInfo) || h.windowModeOf(homeInfo) != 1)
                             throw new IllegalStateException("live Home/app identity changed");
@@ -859,7 +859,7 @@ final class HostSwapController {
     }
 
     /** Commit the Host visual/input hole itself before moving real tasks below its window. */
-    void afterLiveHostFrame(MiStepHost.Promotion ticket, Runnable action) {
+    void afterLiveHostFrame(Promotion ticket, Runnable action) {
         final View drawingRoot = h.root;
         if (!h.externalPromotionCurrent(ticket) || drawingRoot == null
                 || !drawingRoot.isAttachedToWindow() || !drawingRoot.isHardwareAccelerated()) {
@@ -876,23 +876,23 @@ final class HostSwapController {
     }
 
     boolean holdsLiveFlipZoom() {
-        MiStepHost.Promotion active = h.promotion;
+        Promotion active = h.promotion;
         return active != null && active.nativeFlip && !active.cancelled;
     }
 
     /** Recovery may run after screen-off, so this deliberately omits entry-only guards. */
-    boolean livePromotionBound(MiStepHost.Promotion ticket) {
+    boolean livePromotionBound(Promotion ticket) {
         return h.promotion == ticket && !ticket.cancelled && h.isActive(ticket.slot)
                 && h.sceneEpoch == ticket.sceneEpoch && ticket.slot.taskEpoch == ticket.bindingEpoch
                 && ticket.slot.taskId == ticket.taskId && ticket.token.equals(ticket.slot.taskToken);
     }
 
     private final class LiveZoomRequest implements Runnable {
-        final MiStepHost.Promotion ticket;
+        final Promotion ticket;
         final LiveSwapZoom.Zoom expected;
         final java.util.function.Consumer<LiveSwapZoom.Ack> completed;
         boolean delivered;
-        LiveZoomRequest(MiStepHost.Promotion ticket, LiveSwapZoom.Zoom expected,
+        LiveZoomRequest(Promotion ticket, LiveSwapZoom.Zoom expected,
                 java.util.function.Consumer<LiveSwapZoom.Ack> completed) {
             this.ticket = ticket; this.expected = expected; this.completed = completed;
         }
@@ -956,7 +956,7 @@ final class HostSwapController {
     }
 
     /** WMS acknowledgement only; the native driver separately awaits the Host h.layout frame. */
-    private void applyLiveZoom(MiStepHost.Promotion ticket, LiveSwapZoom.Zoom target,
+    private void applyLiveZoom(Promotion ticket, LiveSwapZoom.Zoom target,
             java.util.function.Consumer<LiveSwapZoom.Ack> completed) {
         h.main.post(() -> {
             LiveZoomRequest request = new LiveZoomRequest(ticket, target, completed);
@@ -988,7 +988,7 @@ final class HostSwapController {
     }
 
     /** This callback confirms only the target Host frame, never the WMS scaling transaction. */
-    private void applyLiveMainLayout(MiStepHost.Promotion ticket, LiveSwapZoom.Zoom zoom, boolean restoring,
+    private void applyLiveMainLayout(Promotion ticket, LiveSwapZoom.Zoom zoom, boolean restoring,
             java.util.function.Consumer<LiveSwapZoom.FrameAck> completed) {
         h.main.post(() -> {
             MiStepLayout target = restoring ? ticket.previousLayout : ticket.targetLayout;
@@ -1025,7 +1025,7 @@ final class HostSwapController {
     }
 
     /** Already on Shell's completion turn, after exact roles and the finish Surface commit. */
-    void finishLiveResult(MiStepHost.Promotion ticket, MiStepLiveSwap.Result result) {
+    void finishLiveResult(Promotion ticket, MiStepLiveSwap.Result result) {
         boolean mainReady = result.rolesConfirmed && (ticket.nativeCollect ? result.sideOwned
                 : ticket.nativeHome ? result.succeeded && !result.sideOwned : result.sideOwned);
         if (mainReady && h.externalPromotionCurrent(ticket)) {
@@ -1047,8 +1047,8 @@ final class HostSwapController {
         });
     }
 
-    private PromotionFocusTransfer.Result requestLiveMainFocus(MiStepHost.Promotion ticket) throws Exception {
-        final MiStepHost.LiveTask home = ticket.nativeCollect ? ticket.collectionHome : null;
+    private PromotionFocusTransfer.Result requestLiveMainFocus(Promotion ticket) throws Exception {
+        final LiveTask home = ticket.nativeCollect ? ticket.collectionHome : null;
         if (ticket.nativeCollect && home == null) return PromotionFocusTransfer.Result.UNAVAILABLE;
         final int id = home == null ? ticket.taskId : home.id;
         final Object token = home == null ? ticket.token : home.token;
@@ -1085,7 +1085,7 @@ final class HostSwapController {
         }, id, token, user);
     }
 
-    void finishLiveSwap(MiStepHost.Promotion ticket, MiStepLiveSwap.Result result) {
+    void finishLiveSwap(Promotion ticket, MiStepLiveSwap.Result result) {
         if (h.promotion != ticket || ticket.cancelled || ticket.nativeCompleting || !h.isActive(ticket.slot)) return;
         if (h.sceneEpoch != ticket.sceneEpoch || ticket.slot.taskEpoch != ticket.bindingEpoch
                 || ticket.slot.taskId != ticket.taskId || !ticket.token.equals(ticket.slot.taskToken)) {
@@ -1101,7 +1101,7 @@ final class HostSwapController {
             h.zoomAnimUntil = 0L;
             h.writeZoom(true);
         }
-        MiStepHost.Slot slot = ticket.slot;
+        Slot slot = ticket.slot;
         if (result.sideOwned) {
             // Facade has retired B and bound the same controller to A already.
             // Clear only the old logical slot; never adopt/relaunch A a second time.
@@ -1138,7 +1138,7 @@ final class HostSwapController {
             if (original) {
                 if (ticket.previousMainCandidate != null)
                     h.ownedTasks.remove(ticket.previousMainCandidate.token, ticket.previousMainCandidate);
-                MiStepHost.OwnedTask retained = h.ownedTasks.get(ticket.token);
+                OwnedTask retained = h.ownedTasks.get(ticket.token);
                 if (retained != null) retained.recoveryCandidate = false;
             } else if (!ticket.nativeSubmitted && ticket.previousMainCandidate != null) {
                 // Facade refused before a WCT, so this fullscreen A was never ours.
@@ -1154,7 +1154,7 @@ final class HostSwapController {
         }
     }
 
-    void finishLiveHome(MiStepHost.Promotion ticket, MiStepLiveSwap.Result result) {
+    void finishLiveHome(Promotion ticket, MiStepLiveSwap.Result result) {
         if (ticket.nativeCompleting) return;
         if (!livePromotionBound(ticket)) {
             if (h.promotion == ticket && !ticket.cancelled)
@@ -1162,7 +1162,7 @@ final class HostSwapController {
             return;
         }
         ticket.nativeCompleting = true;
-        MiStepHost.Slot slot = ticket.slot;
+        Slot slot = ticket.slot;
         if (result.succeeded && !result.sideOwned && result.rolesConfirmed) {
             // The facade already gave B to the existing fullscreen listener and committed finishT.
             ticket.handoffAttempted = ticket.handoffComplete = true;
@@ -1177,7 +1177,7 @@ final class HostSwapController {
         } else {
             boolean original = result.sideOwned && result.rolesConfirmed
                     && h.controllerOwns(slot, ticket.taskId, ticket.token) && h.mayWriteSideSurface(slot);
-            MiStepHost.OwnedTask retained = h.ownedTasks.get(ticket.token);
+            OwnedTask retained = h.ownedTasks.get(ticket.token);
             if (retained != null && original) retained.recoveryCandidate = false;
             ticket.cancelled = true;
             h.promotion = null;
@@ -1200,11 +1200,11 @@ final class HostSwapController {
      *  inert-cancellation wedge, where a transition may still be mid-flight and
      *  reconciliation would fight it; it heals at session exit per the
      *  unconfirmed-completion convention. */
-    void forceAbandonLivePromotion(MiStepHost.Promotion ticket, String reason, boolean keepCellUnfrozen) {
+    void forceAbandonLivePromotion(Promotion ticket, String reason, boolean keepCellUnfrozen) {
         if (h.promotion != ticket || ticket.cancelled) return;
         ticket.cancelled = true;
         h.promotion = null;
-        MiStepHost.Slot slot = ticket.slot;
+        Slot slot = ticket.slot;
         slot.promoting = !keepCellUnfrozen;
         slot.frozen = !keepCellUnfrozen;
         restoreLiveSwapVisual(ticket);
@@ -1218,15 +1218,15 @@ final class HostSwapController {
         h.finishPendingSuspend();
     }
 
-    void restoreLiveSwapVisual(MiStepHost.Promotion ticket) {
-        MiStepHost.LiveSwapVisualLease visual = ticket.liveVisual;
+    void restoreLiveSwapVisual(Promotion ticket) {
+        LiveSwapVisualLease visual = ticket.liveVisual;
         ticket.liveVisual = null;
         if (visual != null) visual.restore();
-        for (MiStepHost.LiveSwapVisualLease peer : ticket.peerVisuals) peer.restore();
+        for (LiveSwapVisualLease peer : ticket.peerVisuals) peer.restore();
         ticket.peerVisuals.clear();
         // Native ownership and the final logical bindings now agree. Reconcile
         // once, after the replacement, rather than hiding between clear/bind.
-        for (MiStepHost.Slot cell : h.slots) if (cell.index > MiStepHost.SLOT_MAIN) h.updateCellSurfaceVisibility(cell);
+        for (Slot cell : h.slots) if (cell.index > MiStepHost.SLOT_MAIN) h.updateCellSurfaceVisibility(cell);
         if (h.root != null) { h.root.requestLayout(); h.root.invalidate(); }
         if (ticket.liveBackdrop != null) {
             ticket.liveBackdrop.closeAfterFrame(h.root); ticket.liveBackdrop = null;

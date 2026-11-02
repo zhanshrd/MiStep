@@ -99,7 +99,7 @@ final class HostMirrorController {
         try {
             stopMirrorPoc();
             if (requestedTask < 0) {
-                MiStepHost.LiveTask main = h.findMainTask();
+                LiveTask main = h.findMainTask();
                 if (main == null) {
                     MiStepHost.log("mirror POC: no main task");
                     android.widget.Toast.makeText(h.ctx, "mirror: 主区无应用",
@@ -109,7 +109,7 @@ final class HostMirrorController {
                 requestedTask = main.id;
             }
             Object organizer = null;
-            for (MiStepHost.Slot slot : h.slots) {
+            for (Slot slot : h.slots) {
                 if (slot.controller != null) {
                     organizer = XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
                     break;
@@ -313,7 +313,7 @@ final class HostMirrorController {
     }
 
     Object shellOrganizer() {
-        for (MiStepHost.Slot slot : h.slots) {
+        for (Slot slot : h.slots) {
             if (slot.controller != null) {
                 return XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
             }
@@ -328,7 +328,7 @@ final class HostMirrorController {
      * 任务保持满屏前台（预览继续刷新），直接把任务 leash 变换成格子的大小/位置；
      * 主区显示桌面快照。此形态真机验证宿主仍能收到触摸（mirror 形态会被 CLONE 输入窗口挡住）。
      */
-    private boolean attachMirrorCarrier(MiStepHost.Slot slot, MiStepHost.LiveTask task) {
+    private boolean attachMirrorCarrier(Slot slot, LiveTask task) {
         if (slot == null || task == null || h.scene != MiStepHost.ACTIVE || h.carrierSlotIndex >= 0) return false;
         if (slot.rect == null) return false;
         try {
@@ -461,7 +461,7 @@ final class HostMirrorController {
 
     /** 心跳/系统重排后重新声明“原任务 leash 在格子里的位置/缩放”。 */
     void reassertCarrier() {
-        for (MiStepHost.Slot slot : h.slots) {
+        for (Slot slot : h.slots) {
             if (!slot.carrier) continue;
             Object leash = slot.carrierLeash;
             if (leash == null || slot.rect == null) continue;
@@ -482,7 +482,7 @@ final class HostMirrorController {
     /** 把承载中的任务移回主区（点击格子/主区、退出一步、系统返回都走这里）。 */
     void restoreCarrierToMain() {
         boolean restored = false;
-        for (MiStepHost.Slot slot : h.slots) {
+        for (Slot slot : h.slots) {
             if (!slot.carrier) continue;
             Object leash = slot.carrierLeash;
             try {
@@ -561,7 +561,7 @@ final class HostMirrorController {
             if (h.root == null || h.scene == MiStepHost.SUSPENDED) return;
             if (!h.executeOnShell(() -> {
                 try {
-                    MiStepHost.LiveTask mainTask = h.findMainTask();
+                    LiveTask mainTask = h.findMainTask();
                     if (mainTask != null) clearMainTaskLeashCrop(mainTask.id);
                 } catch (Throwable error) {
                     MiStepHost.log("main task crop clear failed: " + error);

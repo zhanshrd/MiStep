@@ -61,7 +61,7 @@ final class HostLifecycleController {
                 h.failPromotion(h.promotion, "suspend requested: " + reason);
             return;
         }
-        for (MiStepHost.Slot slot : h.slots) {
+        for (Slot slot : h.slots) {
             if (slot.launching) {
                 h.suspendRequested = true;
                 MiStepHost.log("suspend queued after launch: " + reason);
@@ -104,11 +104,11 @@ final class HostLifecycleController {
 
     /** A pending swap can leave A outside the saved slot; it remains in the recovery ledger. */
     void returnUnboundOwnedCandidates(long epoch, Runnable complete) {
-        MiStepHost.OwnedTask next = null;
-        for (MiStepHost.OwnedTask candidate : h.ownedTasks.values()) {
+        OwnedTask next = null;
+        for (OwnedTask candidate : h.ownedTasks.values()) {
             if (!candidate.recoveryCandidate) continue;
             boolean inSlot = false;
-            for (MiStepHost.Slot slot : h.slots) if (slot.index > 0 && slot.occupied
+            for (Slot slot : h.slots) if (slot.index > 0 && slot.occupied
                     && candidate.token.equals(slot.taskToken)) { inSlot = true; break; }
             if (!inSlot) { next = candidate; break; }
         }
@@ -116,7 +116,7 @@ final class HostLifecycleController {
         returnUnboundOwnedCandidate(next, epoch, 0, complete);
     }
 
-    void returnUnboundOwnedCandidate(MiStepHost.OwnedTask candidate, long epoch, int attempt, Runnable complete) {
+    void returnUnboundOwnedCandidate(OwnedTask candidate, long epoch, int attempt, Runnable complete) {
         if (h.scene != MiStepHost.SUSPENDING || h.sceneEpoch != epoch || h.ownedTasks.get(candidate.token) != candidate) return;
         if (!h.executeOnShell(() -> {
             if (h.scene != MiStepHost.SUSPENDING || h.sceneEpoch != epoch || h.ownedTasks.get(candidate.token) != candidate) return;
@@ -125,7 +125,7 @@ final class HostLifecycleController {
             try {
                 Object controller = candidate.recoveryController;
                 if (controller == null || candidate.userId < 0) throw new IllegalStateException("candidate owner/user absent");
-                MiStepHost.LiveTask identity = new MiStepHost.LiveTask(candidate.id, candidate.token, null);
+                LiveTask identity = new LiveTask(candidate.id, candidate.token, null);
                 Object organizer = XposedHelpers.getObjectField(controller, "mTaskOrganizer");
                 Object core = h.rootInfo(identity);
                 Object appeared;
@@ -146,10 +146,10 @@ final class HostLifecycleController {
                     if (!identity.matches(core) || XposedHelpers.getIntField(core, "userId") != candidate.userId
                             || (!h.ordinaryRoot(core, 1) && !h.ordinaryRoot(core, 6)))
                         throw new IllegalStateException("candidate identity/user/display/role changed");
-                    MiStepHost.Slot recovery = new MiStepHost.Slot(-1);
+                    Slot recovery = new Slot(-1);
                     recovery.controller = controller; recovery.taskId = candidate.id;
                     recovery.taskToken = candidate.token;
-                    MiStepHost.Promotion handback = new MiStepHost.Promotion(recovery, new MiStepHost.Slot[0]);
+                    Promotion handback = new Promotion(recovery, new Slot[0]);
                     handback.background = true; handback.candidateRecovery = true;
                     if (attempt == 0 || h.ordinaryRoot(core, 6)) {
                         if (!h.applyWct("return-unbound-owned-candidate", h.promotionController.fullscreenExitTransaction(handback)))
@@ -193,7 +193,7 @@ final class HostLifecycleController {
             MiStepHost.log("host suspended; all side tasks returned alive: " + h.describeTasks());
             return;
         }
-        MiStepHost.Slot slot = h.slots[index];
+        Slot slot = h.slots[index];
         if (!slot.occupied || slot.parked || slot.taskToken == null) {
             parkNext(index + 1);
             return;
@@ -233,7 +233,7 @@ final class HostLifecycleController {
                 }
                 h.main.post(() -> {
                     if (h.scene != MiStepHost.RESUMING || h.sceneEpoch != epoch) return;
-                    for (MiStepHost.Slot saved : h.slots) {
+                    for (Slot saved : h.slots) {
                         if (saved.parked && saved.occupied && saved.taskToken != null
                                 && !RetainedTaskRestorePolicy.reclaim(
                                         saved.occupied, saved.parked, saved.taskToken, foreground)) {
@@ -287,9 +287,9 @@ final class HostLifecycleController {
             finishPendingSuspend();
             return;
         }
-        MiStepHost.Slot slot = h.slots[index];
+        Slot slot = h.slots[index];
         if (!slot.occupied || !slot.parked) { resumeNext(index + 1, epoch); return; }
-        MiStepHost.LiveTask saved = new MiStepHost.LiveTask(slot);
+        LiveTask saved = new LiveTask(slot);
         h.adoptExisting(slot, saved, () -> resumeNext(index + 1, epoch), error -> {
             // External task removal is a real empty cell; a failed admission never launches it.
             h.updateHint(slot);
@@ -345,10 +345,10 @@ final class HostLifecycleController {
         Object tx = null;
         try {
             for (int i = 1; i < MiStepHost.SLOT_COUNT; i++) {
-                MiStepHost.LiveSwapVisualLease.writeAlpha(h.sideBackingViews[i], h.workspaceAlpha);
-                MiStepHost.Slot slot = h.slots[i];
+                LiveSwapVisualLease.writeAlpha(h.sideBackingViews[i], h.workspaceAlpha);
+                Slot slot = h.slots[i];
                 if (slot == null) continue;
-                MiStepHost.LiveSwapVisualLease.writeAlpha(slot.hint, h.workspaceAlpha);
+                LiveSwapVisualLease.writeAlpha(slot.hint, h.workspaceAlpha);
                 Object surface = h.getSurfaceField(slot.controller, "mSurfaceControl");
                 if (surface == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(surface, "isValid"))) continue;
                 if (tx == null) tx = Class.forName("android.view.SurfaceControl$Transaction").getDeclaredConstructor().newInstance();
@@ -427,7 +427,7 @@ final class HostLifecycleController {
         }
         h.updateTopBarState();
         if (h.scene == MiStepHost.ACTIVE && h.screenOn) {
-            for (MiStepHost.Slot slot : h.slots) {
+            for (Slot slot : h.slots) {
                 if (slot.occupied && !slot.promoting) {
                     h.reapplyScale(slot);
                     h.scheduleSideVisibilityRepair(slot);

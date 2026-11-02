@@ -72,7 +72,7 @@ final class HostCellLayoutController {
         };
         h.transitionInput = new MiStepTransitionInput(h.root, h::acquireTransitionInputWindow, h::releaseTransitionInputWindow, blocked -> {
             h.liveSwapInputBlocked = blocked;
-            for (MiStepHost.Slot slot : h.slots) if (slot != null && slot.index > 0) h.updateTouchRegion(slot);
+            for (Slot slot : h.slots) if (slot != null && slot.index > 0) h.updateTouchRegion(slot);
             if (h.root != null) { h.root.requestLayout(); h.root.invalidate(); }
         }, MiStepHost::log);
         h.root.setClipChildren(false);
@@ -204,7 +204,7 @@ final class HostCellLayoutController {
                     HotZoneGesture.raiseAll(h.ctx);
                 }
                 // v1.1.3：转场可能覆盖 leash 的位置/矩阵（"只显示一部分"），心跳里周期性重发。
-                for (MiStepHost.Slot s : h.slots) {
+                for (Slot s : h.slots) {
                     if (h.holdsLiveFlipZoom()) continue;
                     if (s.carrier || s.index == h.leashPocSlot) {
                         continue;
@@ -222,7 +222,7 @@ final class HostCellLayoutController {
         h.startPromotionWatchdog();
     }
 
-    void updateCellSurfaceVisibility(MiStepHost.Slot slot) {
+    void updateCellSurfaceVisibility(Slot slot) {
         // Shell owns the borrowed task parents until the whole handoff finishes.
         // clearSlot/bindTask is only a logical replacement during a native swap;
         // an independent hide here would blank the just-committed real task.
@@ -246,7 +246,7 @@ final class HostCellLayoutController {
         finally { closeSurfaceObject(tx, "close"); }
     }
 
-    void prepareCellSurface(MiStepHost.Slot slot) {
+    void prepareCellSurface(Slot slot) {
         if (slot.view != null) slot.view.setAlpha(1f);
         Object surface = MiStepHost.getSurfaceField(slot.controller, "mSurfaceControl");
         if (surface == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(surface, "isValid"))) return;
@@ -259,7 +259,7 @@ final class HostCellLayoutController {
         finally { closeSurfaceObject(tx, "close"); }
     }
 
-    void ensureCellBackground(MiStepHost.Slot slot) {
+    void ensureCellBackground(Slot slot) {
         if (h.wallpaperBackdrop != null) h.applyWallpaperBackdrops();
         if (!slot.occupied || slot.parked) {
             removeCellBackground(slot);
@@ -320,7 +320,7 @@ final class HostCellLayoutController {
         return Math.round(h.ctx.getResources().getDisplayMetrics().density * value);
     }
 
-    void removeCellBackground(MiStepHost.Slot slot) {
+    void removeCellBackground(Slot slot) {
         Object background = slot.cellBackground;
         slot.cellBackground = null;
         slot.cellBackgroundParent = null;
@@ -352,7 +352,7 @@ final class HostCellLayoutController {
         }
     }
 
-    void applyRect(MiStepHost.Slot slot) {
+    void applyRect(Slot slot) {
         if (slot.rect == null) {
             return;
         }
@@ -390,7 +390,7 @@ final class HostCellLayoutController {
         h.applyWallpaperBackdrops();
         if (h.root == null) return;
         for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
-            MiStepHost.Slot slot = h.slots[i];
+            Slot slot = h.slots[i];
             slot.rect = h.slotBounds(slot);
             applyRect(slot);
             h.updateTouchRegion(slot);
@@ -417,7 +417,7 @@ final class HostCellLayoutController {
             return;
         }
         // Pending callbacks and an active host gesture keep their owner geometry fixed.
-        for (MiStepHost.Slot s : h.slots) {
+        for (Slot s : h.slots) {
             if (s.promoting || s.launching || s.closing || s.nativeReleasePending
                     || s.bufferedDown != null || s.injecting) {
                 h.compactPending = true;
@@ -426,17 +426,17 @@ final class HostCellLayoutController {
         }
         h.compactPending = false;
         h.publishDesktopSideTasks();
-        java.util.List<MiStepHost.CellMovePlan> moves = new java.util.ArrayList<>();
+        java.util.List<CellMovePlan> moves = new java.util.ArrayList<>();
         int initialEmptySlots = 0;
-        for (MiStepHost.Slot slot : h.slots) if (slot.index > MiStepHost.SLOT_MAIN && !slot.occupied)
+        for (Slot slot : h.slots) if (slot.index > MiStepHost.SLOT_MAIN && !slot.occupied)
             initialEmptySlots |= 1 << slot.index;
         for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT - 1; i++) {
-            MiStepHost.Slot cur = h.slots[i];
+            Slot cur = h.slots[i];
             if (cur.occupied) {
                 continue;
             }
             for (int j = i + 1; j < MiStepHost.CELL_SLOT_COUNT; j++) {
-                MiStepHost.Slot next = h.slots[j];
+                Slot next = h.slots[j];
                 if (!next.occupied) {
                     continue;
                 }
@@ -451,7 +451,7 @@ final class HostCellLayoutController {
                 cur.rect = h.layout.cellBounds(cur.index - 1);
                 next.rect = h.layout.cellBounds(next.index - 1);
                 if (oldRect != null) {
-                    moves.add(new MiStepHost.CellMovePlan(next, oldRect));
+                    moves.add(new CellMovePlan(next, oldRect));
                 }
                 break;
             }
@@ -468,7 +468,7 @@ final class HostCellLayoutController {
     void finishCellLayout() {
         h.updateTopTaskGeometry();
         for (int i = 1; i < MiStepHost.SLOT_COUNT; i++) {
-            MiStepHost.Slot slot = h.slots[i];
+            Slot slot = h.slots[i];
             applyRect(slot);
             h.updateHint(slot);
             h.updateTouchRegion(slot);
@@ -479,7 +479,7 @@ final class HostCellLayoutController {
         if (h.root != null) { h.root.requestLayout(); h.root.invalidate(); }
     }
 
-    boolean cellMoveCurrent(MiStepHost.Slot slot, FrameLayout movingRoot, long epoch, long binding,
+    boolean cellMoveCurrent(Slot slot, FrameLayout movingRoot, long epoch, long binding,
             int id, Object token, Object controller, View movingView, Object surface) {
         String changed = h.root != movingRoot ? "root" : h.sceneEpoch != epoch ? "scene"
                 : !h.isActive(slot) ? "slot" : slot.taskEpoch != binding ? "binding"
@@ -494,18 +494,18 @@ final class HostCellLayoutController {
 
     static int compactionHintMask(int initialEmptySlots, int occupiedSlots) { return HostStaticUtil.compactionHintMask(initialEmptySlots, occupiedSlots); }
 
-    void animateCellMoves(java.util.List<MiStepHost.CellMovePlan> plans, int initialEmptySlots) {
+    void animateCellMoves(java.util.List<CellMovePlan> plans, int initialEmptySlots) {
         final FrameLayout movingRoot = h.root;
         final long epoch = h.sceneEpoch;
         final java.util.List<MiStepCellMotion.Move> moves = new java.util.ArrayList<>();
-        final java.util.List<MiStepHost.LiveSwapVisualLease> hints = new java.util.ArrayList<>();
+        final java.util.List<LiveSwapVisualLease> hints = new java.util.ArrayList<>();
         MiStepLiveBackdrop wallpaper = null;
         try {
             int occupiedSlots = 0;
-            for (MiStepHost.Slot slot : h.slots) if (slot.index > MiStepHost.SLOT_MAIN && slot.occupied)
+            for (Slot slot : h.slots) if (slot.index > MiStepHost.SLOT_MAIN && slot.occupied)
                 occupiedSlots |= 1 << slot.index;
-            for (MiStepHost.CellMovePlan plan : plans) {
-                MiStepHost.Slot slot = plan.slot;
+            for (CellMovePlan plan : plans) {
+                Slot slot = plan.slot;
                 final long binding = slot.taskEpoch;
                 final int id = slot.taskId;
                 final Object token = slot.taskToken, controller = slot.controller;
@@ -527,8 +527,8 @@ final class HostCellLayoutController {
                             revealEmptySlots), MiStepHost::log);
             // One wallpaper/plus owner covers the complete strip during compaction.
             // Static backings otherwise cover its pluses and reappear between layouts.
-            for (MiStepHost.Slot slot : h.slots) if (slot.index > 0)
-                hints.add(new MiStepHost.LiveSwapVisualLease(h.sideBackingViews[slot.index], slot.hint));
+            for (Slot slot : h.slots) if (slot.index > 0)
+                hints.add(new LiveSwapVisualLease(h.sideBackingViews[slot.index], slot.hint));
             final MiStepLiveBackdrop backing = wallpaper;
             final MiStepCellMotion[] run = new MiStepCellMotion[1];
             run[0] = new MiStepCellMotion(movingRoot, moves,
@@ -537,11 +537,11 @@ final class HostCellLayoutController {
                         finishCellLayout();
                         // Restore Host chrome in the SAME draw that retires the temporary
                         // layer, before waiting for that frame's committed callback.
-                        for (MiStepHost.LiveSwapVisualLease hint : hints) hint.restore();
+                        for (LiveSwapVisualLease hint : hints) hint.restore();
                         backing.closeAfterFrame(movingRoot);
                     },
                     () -> {
-                        for (MiStepHost.LiveSwapVisualLease hint : hints) hint.restore();
+                        for (LiveSwapVisualLease hint : hints) hint.restore();
                         movingRoot.invalidate();
                         backing.closeAfterFrame(movingRoot);
                         if (h.cellMotion != run[0]) return;
@@ -549,7 +549,7 @@ final class HostCellLayoutController {
                         h.transferBusy = false;
                         // finishCellLayout ran while cellMotion still owned visibility.
                         // Reconcile now, including the empty old source's resize background.
-                        for (MiStepHost.Slot cell : h.slots) updateCellSurfaceVisibility(cell);
+                        for (Slot cell : h.slots) updateCellSurfaceVisibility(cell);
                         if (h.compactPending) compactCells();
                         h.finishPendingSuspend();
                     }, MiStepHost::log);
@@ -557,7 +557,7 @@ final class HostCellLayoutController {
             h.transferBusy = true;
             run[0].start();
         } catch (Throwable error) {
-            for (MiStepHost.LiveSwapVisualLease hint : hints) hint.restore();
+            for (LiveSwapVisualLease hint : hints) hint.restore();
             if (wallpaper != null) wallpaper.closeAfterFrame(movingRoot);
             h.cellMotion = null;
             h.transferBusy = false;

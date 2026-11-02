@@ -123,7 +123,7 @@ final class HostStateController {
 
     boolean ownsViewOrController(Object object) {
         if (object == null) return false;
-        for (MiStepHost.Slot slot : h.slots)
+        for (Slot slot : h.slots)
             if (slot.index > 0 && !slot.parked && (slot.view == object || slot.controller == object)) return true;
         return false;
     }
@@ -137,12 +137,12 @@ final class HostStateController {
             if (!ordinaryRoot(info, 1)) return false;
             int taskId = XposedHelpers.getIntField(info, "taskId");
             Object token = XposedHelpers.getObjectField(info, "token");
-            for (MiStepHost.Slot slot : h.slots) {
+            for (Slot slot : h.slots) {
                 if (slot.index <= 0 || !h.isActive(slot) || !slot.occupied || slot.parked
                         || slot.frozen || slot.launching || slot.modeAdmissionPending
                         || slot.taskId != taskId || token == null || !token.equals(slot.taskToken)
                         || !h.controllerOwns(slot, taskId, token)) continue;
-                MiStepHost.Promotion current = h.promotion;
+                Promotion current = h.promotion;
                 if (current != null && (!current.externalLaunch || current.slot != slot
                         || current.sceneEpoch != h.sceneEpoch || current.bindingEpoch != slot.taskEpoch))
                     return false;
@@ -172,7 +172,7 @@ final class HostStateController {
         return (java.util.List<?>) XposedHelpers.callMethod(service, "getAllRootTaskInfos");
     }
 
-    Object rootInfo(MiStepHost.LiveTask task) throws Exception {
+    Object rootInfo(LiveTask task) throws Exception {
         for (Object info : rootInfos()) if (task.matches(info)) return info;
         return null;
     }
@@ -195,11 +195,11 @@ final class HostStateController {
     }
 
     boolean isSideToken(Object token) {
-        for (MiStepHost.Slot slot : h.slots) if (!slot.parked && token != null && token.equals(slot.taskToken)) return true;
+        for (Slot slot : h.slots) if (!slot.parked && token != null && token.equals(slot.taskToken)) return true;
         return false;
     }
 
-    void checkAdoption(MiStepHost.Slot slot, MiStepHost.LiveTask task, long epoch, int attempt,
+    void checkAdoption(Slot slot, LiveTask task, long epoch, int attempt,
             Runnable success, Consumer<String> failure) {
         if (!h.isActive(slot) || epoch != h.sceneEpoch) {
             h.adoptionFailed(slot, task, true, "scene changed during adoption", failure);

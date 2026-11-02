@@ -226,7 +226,7 @@ final class HostGeometryController {
                         if (arg == null || !arg.getClass().getName().contains("RunningTaskInfo")) continue;
                         Object controller = XposedHelpers.callMethod(p.thisObject, "findTaskView", arg);
                         if (hb.ownsViewOrController(controller)) {
-                            for (MiStepHost.Slot slot : hb.slots) {
+                            for (Slot slot : hb.slots) {
                                 if (slot.controller == controller && !slot.parked
                                         && hb.controllerOwns(slot, XposedHelpers.getIntField(arg, "taskId"),
                                         XposedHelpers.getObjectField(arg, "token"))) p.args[0] = hb.logicalBounds(slot);
@@ -248,7 +248,7 @@ final class HostGeometryController {
                         XposedHelpers.callMethod(wct, "setForceTranslucent", token, true);
                         XposedHelpers.callMethod(wct, "setAlwaysOnTop", token, true);
                         XposedHelpers.callMethod(wct, "setFocusable", token, true);
-                        MiStepHost.Slot slot = hb.slotForObject(p.args[0]);
+                        Slot slot = hb.slotForObject(p.args[0]);
                         XposedHelpers.callMethod(wct, "setBounds", token, hb.logicalBounds(slot));
                         hb.applyTopConfiguration(wct, token, slot);
                     }
@@ -266,14 +266,14 @@ final class HostGeometryController {
 
     Rect logicalBounds() { return new Rect(0, 0, h.screenW, h.screenH); }
 
-    Rect logicalBounds(MiStepHost.Slot slot) {
+    Rect logicalBounds(Slot slot) {
         if(slot==null || slot.index!=MiStepHost.SLOT_TOP)return logicalBounds();
         TopTaskGeometry upper=h.topGeometry();
         return new Rect(0,0,upper.logicalWidth,upper.logicalHeight);
     }
 
-    MiStepHost.Slot slotForObject(Object object) {
-        for(MiStepHost.Slot slot:h.slots) if(slot.view==object || slot.controller==object)return slot;
+    Slot slotForObject(Object object) {
+        for(Slot slot:h.slots) if(slot.view==object || slot.controller==object)return slot;
         return null;
     }
 
@@ -381,7 +381,7 @@ final class HostGeometryController {
             h.topBar.setStatusBarInset(DeviceProfile.statusBarHeightPx(h.ctx));
         }
         for (int i = 1; i < MiStepHost.SLOT_COUNT; i++) {
-            MiStepHost.Slot slot = h.slots[i];
+            Slot slot = h.slots[i];
             slot.rect = h.slotBounds(slot);
             h.applyRect(slot);
             h.updateTouchRegion(slot);
@@ -423,7 +423,7 @@ final class HostGeometryController {
         else MiStepHost.log("display geometry changed while host inactive; skip zoom/task reassert");
         boolean queued = activeRoot && h.executeOnShell(() -> {
             if (h.scene != MiStepHost.ACTIVE) return;
-            for (MiStepHost.Slot slot : h.slots) {
+            for (Slot slot : h.slots) {
                 if (slot.index > MiStepHost.SLOT_MAIN && slot.occupied && !slot.carrier
                         && !slot.promoting && !slot.launching) h.applyFullscreenBounds(slot);
             }
@@ -431,7 +431,7 @@ final class HostGeometryController {
         h.main.postDelayed(() -> {
             if (!ZoomLifecyclePolicy.shouldReassertGeometry(h.scene == MiStepHost.ACTIVE,
                     h.root != null && h.root.getVisibility() == View.VISIBLE, h.screenOn)) return;
-            for (MiStepHost.Slot slot : h.slots) {
+            for (Slot slot : h.slots) {
                 if (slot.index > MiStepHost.SLOT_MAIN && slot.occupied && !slot.carrier) h.reapplyScale(slot);
             }
         }, queued ? 180L : 0L);

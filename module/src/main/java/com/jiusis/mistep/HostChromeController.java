@@ -81,12 +81,12 @@ final class HostChromeController {
         canvas.drawLine(x, y - radius, x, y + radius, plus);
     }
 
-    FrameLayout.LayoutParams hintParams(MiStepHost.Slot slot) {
+    FrameLayout.LayoutParams hintParams(Slot slot) {
         return new FrameLayout.LayoutParams(
                 slot.rect[2] - slot.rect[0], slot.rect[3] - slot.rect[1]);
     }
 
-    void updateHint(MiStepHost.Slot slot) {
+    void updateHint(Slot slot) {
         if(slot.index==MiStepHost.SLOT_TOP) {
             h.ensureCellBackground(slot); h.updateCellSurfaceVisibility(slot);
             if(h.topCtrl.topTaskPane!=null)h.topCtrl.topTaskPane.occupied(slot.occupied && !slot.parked);
@@ -170,7 +170,7 @@ final class HostChromeController {
             h.topStripBacking.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
                     0, 0, HyperOsStyle.topWallpaperTint(h.ctx)));
         }
-        MiStepHost.Slot upper=h.slots[MiStepHost.SLOT_TOP];
+        Slot upper=h.slots[MiStepHost.SLOT_TOP];
         if(upper!=null && upper.hint!=null && !upper.occupied)
             upper.hint.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop,h.screenW,h.screenH,
                     0,0,HyperOsStyle.topWallpaperTint(h.ctx)));
@@ -180,7 +180,7 @@ final class HostChromeController {
             if (backing == null) continue;
             backing.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
                     x, h.sideSegmentTop(i), HyperOsStyle.topWallpaperTint(h.ctx)));
-            MiStepHost.Slot slot = h.slots[i];
+            Slot slot = h.slots[i];
             if (slot == null || slot.hint == null || slot.occupied || slot.rect == null) continue;
             slot.hint.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
                     slot.rect[0], slot.rect[1], HyperOsStyle.topWallpaperTint(h.ctx)));

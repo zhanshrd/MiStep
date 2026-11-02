@@ -16,11 +16,11 @@ final class HostAdoptionController {
 
     HostAdoptionController(MiStepHost host) { h = host; }
 
-    void adoptExisting(MiStepHost.Slot slot, MiStepHost.LiveTask task, Runnable success, Consumer<String> failure) {
+    void adoptExisting(Slot slot, LiveTask task, Runnable success, Consumer<String> failure) {
         adoptExisting(slot, task, false, success, failure);
     }
 
-    void adoptExisting(MiStepHost.Slot slot, MiStepHost.LiveTask task, boolean collectFromMain,
+    void adoptExisting(Slot slot, LiveTask task, boolean collectFromMain,
             Runnable success, Consumer<String> failure) {
         if (!h.isActive(slot) || !h.boundsHooksReady || h.transferBusy || slot.frozen || slot.controller == null) {
             failure.accept("adoption busy/unavailable");
@@ -97,7 +97,7 @@ final class HostAdoptionController {
     }
 
     /** A failed claim is handed back to the same native owner, never removed/restarted. */
-    void adoptionFailed(MiStepHost.Slot slot, MiStepHost.LiveTask task, boolean claimed, String error, Consumer<String> failure) {
+    void adoptionFailed(Slot slot, LiveTask task, boolean claimed, String error, Consumer<String> failure) {
         h.transferBusy = false;
         slot.launching = false;
         if (!claimed) {
@@ -123,13 +123,13 @@ final class HostAdoptionController {
         });
     }
 
-    void returnToSystem(MiStepHost.Slot slot, boolean front, Runnable success, Consumer<String> failure) {
+    void returnToSystem(Slot slot, boolean front, Runnable success, Consumer<String> failure) {
         returnToSystem(slot,front,false,success,failure);
     }
 
-    void returnToSystem(MiStepHost.Slot slot, boolean front, boolean liveMainReveal,
+    void returnToSystem(Slot slot, boolean front, boolean liveMainReveal,
             Runnable success, Consumer<String> failure) {
-        MiStepHost.Promotion ticket = new MiStepHost.Promotion(slot, new MiStepHost.Slot[0]);
+        Promotion ticket = new Promotion(slot, new Slot[0]);
         ticket.background = !front;
         ticket.liveMainReveal = liveMainReveal;
         if(liveMainReveal && h.topCtrl.topTransition!=null) {
@@ -147,7 +147,7 @@ final class HostAdoptionController {
             MiStepHost.NativeObservation observation = null;
             try {
                 if (!returnTicketCurrent(ticket)) throw new IllegalStateException("stale return ticket");
-                MiStepHost.LiveTask identity = new MiStepHost.LiveTask(ticket.taskId, ticket.token, slot.pkg);
+                LiveTask identity = new LiveTask(ticket.taskId, ticket.token, slot.pkg);
                 Object core = h.rootInfo(identity);
                 if (core == null) {
                     if (!absentFromShellAndController(slot, identity))
@@ -179,14 +179,14 @@ final class HostAdoptionController {
          })) { h.transferBusy = false; slot.promoting = slot.frozen; failure.accept("no Shell queue"); }
     }
 
-    boolean returnTicketCurrent(MiStepHost.Promotion ticket) {
-        MiStepHost.Slot slot = ticket.slot;
+    boolean returnTicketCurrent(Promotion ticket) {
+        Slot slot = ticket.slot;
         return h.isActive(slot) && h.sceneEpoch == ticket.sceneEpoch && slot.taskEpoch == ticket.bindingEpoch
                 && slot.taskId == ticket.taskId && ticket.token.equals(slot.taskToken);
     }
 
     /** Root enumeration alone does not prove death: child/moved tasks remain in Shell. */
-    boolean absentFromShellAndController(MiStepHost.Slot slot, MiStepHost.LiveTask task) {
+    boolean absentFromShellAndController(Slot slot, LiveTask task) {
         Object organizer = XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
         synchronized (XposedHelpers.getObjectField(organizer, "mLock")) {
             Object appeared = ((android.util.SparseArray<?>) XposedHelpers.getObjectField(organizer, "mTasks")).get(task.id);
@@ -197,7 +197,7 @@ final class HostAdoptionController {
         }
     }
 
-    void checkReturned(MiStepHost.Slot slot, MiStepHost.Promotion ticket, int attempt, Runnable success, Consumer<String> failure) {
+    void checkReturned(Slot slot, Promotion ticket, int attempt, Runnable success, Consumer<String> failure) {
         if (!returnTicketCurrent(ticket)) {
             h.transferBusy = false;
             failure.accept("stale return ticket; no new binding touched");
@@ -208,7 +208,7 @@ final class HostAdoptionController {
             String detail;
             try {
                 if (!returnTicketCurrent(ticket)) throw new IllegalStateException("stale return on Shell queue");
-                MiStepHost.LiveTask identity = new MiStepHost.LiveTask(ticket.taskId, ticket.token, slot.pkg);
+                LiveTask identity = new LiveTask(ticket.taskId, ticket.token, slot.pkg);
                 Object core = h.rootInfo(identity);
                 if (core == null) {
                     gone = absentFromShellAndController(slot, identity);
@@ -257,7 +257,7 @@ final class HostAdoptionController {
         })) { h.transferBusy = false; failure.accept("no Shell queue for handback"); }
     }
 
-    void promoteExternalLaunch(MiStepHost.Slot slot) {
+    void promoteExternalLaunch(Slot slot) {
         if (slot == null || slot.index <= MiStepHost.SLOT_MAIN || !h.isActive(slot)) return;
         MiStepHost.log("external launcher launch detected slot=" + slot.index
                 + " task=" + slot.taskId + " mode=" + slot.windowMode + "; promote");
@@ -269,7 +269,7 @@ final class HostAdoptionController {
      * Keep their task alive by opening it in the h.main pane instead of forcing a mode
      * change, which makes the framework destroy the task.
      */
-    void promoteUnsupportedSide(MiStepHost.Slot slot) {
+    void promoteUnsupportedSide(Slot slot) {
         if (slot == null || slot.index <= MiStepHost.SLOT_MAIN || !h.isActive(slot)
                 || slot.promoting || h.promotion != null || h.transferBusy) return;
         String pkg = slot.pkg == null ? "" : slot.pkg;
@@ -282,7 +282,7 @@ final class HostAdoptionController {
         h.onSlotTapped(slot.index);
     }
 
-    void scheduleSideModeResolution(MiStepHost.Slot slot, int taskId) {
+    void scheduleSideModeResolution(Slot slot, int taskId) {
         long delay = Math.max(220L,
                 slot.modeGuardUntil - SystemClock.uptimeMillis() + 150L);
         h.main.postDelayed(() -> {
@@ -298,7 +298,7 @@ final class HostAdoptionController {
         }, delay);
     }
 
-    void repairSideWindowMode(MiStepHost.Slot slot, int taskId) {
+    void repairSideWindowMode(Slot slot, int taskId) {
         if (!h.isActive(slot) || slot.taskId != taskId || slot.promoting
                 || slot.launching || slot.parked || !slot.modeAdmissionPending) return;
         long now = SystemClock.uptimeMillis();
@@ -328,7 +328,7 @@ final class HostAdoptionController {
         h.main.postDelayed(() -> scheduleSideModeResolution(slot, taskId), 900L);
     }
 
-    void releaseNativeFreeformSide(MiStepHost.Slot slot, int taskId, Object token) {
+    void releaseNativeFreeformSide(Slot slot, int taskId, Object token) {
         if (slot.nativeReleasePending) return;
         final long binding = slot.taskEpoch;
         final Object controller = slot.controller;
@@ -368,8 +368,8 @@ final class HostAdoptionController {
         if (h == null || dispatch == null || pkg == null || Looper.myLooper() != h.main.getLooper()
                 || h.scene != MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked
                 || !h.supportsTaskUser(userId) || h.promotion != null || h.transferBusy) return false;
-        MiStepHost.Slot match = null;
-        for (MiStepHost.Slot slot : h.slots) {
+        Slot match = null;
+        for (Slot slot : h.slots) {
             if (slot.index <= MiStepHost.SLOT_MAIN || slot.index >= MiStepHost.CELL_SLOT_COUNT || !slot.occupied || slot.parked || slot.frozen
                     || slot.carrier || slot.windowMode != 6 || !pkg.equals(slot.pkg)
                     || !h.mayWriteSideSurface(slot)
@@ -384,14 +384,14 @@ final class HostAdoptionController {
         }
         if (match == null) return false;
         h.swapWithMain(match.index);
-        MiStepHost.Promotion ticket = h.promotion;
+        Promotion ticket = h.promotion;
         if (ticket == null || ticket.cancelled || ticket.slot != match) return false;
         ticket.notificationLaunch = dispatch;
         MiStepHost.log("notification waits for same-task promotion task=" + ticket.taskId + " package=" + pkg);
         return true;
     }
 
-    void resumeNotificationLaunch(MiStepHost.Promotion ticket) {
+    void resumeNotificationLaunch(Promotion ticket) {
         Runnable dispatch = ticket.notificationLaunch;
         ticket.notificationLaunch = null;
         if (dispatch != null) {
@@ -400,11 +400,11 @@ final class HostAdoptionController {
         }
     }
 
-    void queueSidePromotion(MiStepHost.Slot slot, boolean desktopLaunch) {
+    void queueSidePromotion(Slot slot, boolean desktopLaunch) {
         if (slot == null || slot.index <= MiStepHost.SLOT_MAIN || !h.isActive(slot)
                 || !slot.occupied || slot.taskId < 0 || slot.taskToken == null
                 || slot.parked || slot.frozen || slot.launching) return;
-        MiStepHost.PendingSidePromotion pending = slot.pendingSidePromotion;
+        PendingSidePromotion pending = slot.pendingSidePromotion;
         if (pending != null && pending.taskId == slot.taskId
                 && pending.token.equals(slot.taskToken)
                 && pending.bindingEpoch == slot.taskEpoch
@@ -412,14 +412,14 @@ final class HostAdoptionController {
             pending.desktopLaunch |= desktopLaunch;
             return;
         }
-        pending = new MiStepHost.PendingSidePromotion(slot, h.sceneEpoch, desktopLaunch,
+        pending = new PendingSidePromotion(slot, h.sceneEpoch, desktopLaunch,
                 SystemClock.uptimeMillis() + MiStepHost.SIDE_PROMOTION_TIMEOUT_MS);
         slot.pendingSidePromotion = pending;
         retrySidePromotion(pending);
     }
 
-    void retrySidePromotion(MiStepHost.PendingSidePromotion request) {
-        MiStepHost.Slot slot = request.slot;
+    void retrySidePromotion(PendingSidePromotion request) {
+        Slot slot = request.slot;
         if (slot.pendingSidePromotion != request) return;
         boolean sameTask = h.scene == MiStepHost.ACTIVE && h.isActive(slot) && slot.occupied
                 && !slot.parked && !slot.frozen && !slot.launching
@@ -465,14 +465,14 @@ final class HostAdoptionController {
         h.main.postDelayed(() -> retrySidePromotion(request), wait);
     }
 
-    void beginExternalPromotion(MiStepHost.PendingSidePromotion request) {
-        MiStepHost.Slot slot = request.slot;
+    void beginExternalPromotion(PendingSidePromotion request) {
+        Slot slot = request.slot;
         if (h.promotion != null || h.transferBusy || !h.isActive(slot)
                 || !SidePromotionPolicy.sameBinding(request.taskId, request.token,
                         request.sceneEpoch, request.bindingEpoch, request.pkg,
                         slot.taskId, slot.taskToken, h.sceneEpoch, slot.taskEpoch, slot.pkg)
                 || slot.windowMode != 1) return;
-        MiStepHost.Promotion ticket = new MiStepHost.Promotion(slot, h.slots);
+        Promotion ticket = new Promotion(slot, h.slots);
         ticket.sceneEpoch = h.sceneEpoch;
         ticket.bindingEpoch = slot.taskEpoch;
         ticket.externalLaunch = true;
@@ -500,7 +500,7 @@ final class HostAdoptionController {
         })) h.failPromotion(ticket, "external promotion Shell executor unavailable");
     }
 
-    boolean externalPromotionCurrent(MiStepHost.Promotion ticket) {
+    boolean externalPromotionCurrent(Promotion ticket) {
         return h.promotion == ticket && !ticket.cancelled && !ticket.cancelRequested && h.scene == MiStepHost.ACTIVE
                 && h.screenOn && !h.keyguardLocked
                 && h.sceneEpoch == ticket.sceneEpoch && h.isActive(ticket.slot)
@@ -509,7 +509,7 @@ final class HostAdoptionController {
                 && ticket.token.equals(ticket.slot.taskToken);
     }
 
-    void afterExternalTransitionIdle(MiStepHost.Promotion ticket) {
+    void afterExternalTransitionIdle(Promotion ticket) {
         if (!externalPromotionCurrent(ticket)) return;
         if (!h.executeOnShell(() -> {
             try {
@@ -532,7 +532,7 @@ final class HostAdoptionController {
                 || binding.getLong("scene", -1L) != h.sceneEpoch) return;
         int taskId = binding.getInt("taskId", -1);
         android.os.IBinder token = binding.getBinder("task");
-        for (MiStepHost.Slot slot : h.slots) {
+        for (Slot slot : h.slots) {
             if (slot.index <= 0 || !slot.occupied || slot.parked || slot.frozen
                     || slot.taskId != taskId || slot.taskToken == null
                     || slot.taskEpoch != binding.getLong("binding", -1L)
@@ -557,7 +557,7 @@ final class HostAdoptionController {
         }
     }
 
-    boolean sideTaskMatchesUser(MiStepHost.Slot slot, int user) {
+    boolean sideTaskMatchesUser(Slot slot, int user) {
         if (user < 0 || slot == null || !slot.occupied || slot.parked || slot.frozen
                 || slot.controller == null || slot.taskToken == null) return false;
         try {

@@ -77,14 +77,14 @@ final class HostDebugController {
         });
     }
 
-    void traceSwap(MiStepHost.Promotion ticket) {
+    void traceSwap(Promotion ticket) {
         if (!h.traceNextSwap) return;
         h.traceNextSwap = false;
         MiStepSwapTrace old = h.swapTrace;
         if (old != null) old.close();
         h.swapTrace = null;
         try {
-            MiStepHost.LiveTask previous = ticket.previousMain;
+            LiveTask previous = ticket.previousMain;
             h.swapTrace = new MiStepSwapTrace(h.main, new java.io.File(h.ctx.getFilesDir(), "mistep-swap-traces"),
                     MiStepHost::log, previous == null ? -1 : previous.id,
                     previous == null ? null : previous.token, ticket.taskId, ticket.token,
@@ -126,7 +126,7 @@ final class HostDebugController {
         final int index = slotIndex;
         if (!h.executeOnShell(() -> {
             try {
-                MiStepHost.LiveTask task = null;
+                LiveTask task = null;
                 try {
                     task = h.findMainTask();
                 } catch (Throwable error) {
@@ -145,7 +145,7 @@ final class HostDebugController {
                     MiStepHost.log("leash anim POC: no main task pkg=" + pkg);
                     return;
                 }
-                final MiStepHost.LiveTask resolved = task;
+                final LiveTask resolved = task;
                 Object organizer = h.shellOrganizer();
                 Object leash = organizer == null ? null
                         : XposedHelpers.callMethod(organizer, "getTaskLeash",
@@ -206,7 +206,7 @@ final class HostDebugController {
             if (backing != null) {
                 backing.setVisibility(hide ? View.GONE : View.VISIBLE);
             }
-            MiStepHost.Slot slot = h.slots[slotIndex];
+            Slot slot = h.slots[slotIndex];
             if (slot != null) {
                 if (hide) {
                     if (slot.hint != null) slot.hint.setVisibility(View.GONE);
@@ -232,7 +232,7 @@ final class HostDebugController {
         MiStepHost.log("leash anim POC restored task=" + taskId);
     }
 
-    void startLiveMainShrink(MiStepHost.Promotion ticket) {
+    void startLiveMainShrink(Promotion ticket) {
         Object leash = ticket.mainLeash;
         if (leash == null || ticket.slot == null || ticket.slot.rect == null) return;
         int[] rect = ticket.slot.rect;
@@ -287,7 +287,7 @@ final class HostDebugController {
     void dumpRoots(String reason) {
         try {
             java.util.List<?> roots = h.rootInfos();
-            MiStepHost.LiveTask main = null;
+            LiveTask main = null;
             try { main = h.findMainTask(); } catch (Throwable error) {
                 MiStepHost.log("roots[" + reason + "] findMainTask threw: " + error);
             }
