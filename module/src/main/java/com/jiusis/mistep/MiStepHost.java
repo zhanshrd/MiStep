@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostLaunchController launcher;
     final HostTaskEventController taskEvents;
     final HostChromeController chrome;
     final HostCellLayoutController cellLayout;
@@ -162,8 +163,8 @@ public final class MiStepHost {
     }
     volatile boolean liveSwapInputBlocked;
     MiStepTransitionInput transitionInput;
-    private final android.os.IBinder desktopSceneOwner = new android.os.Binder();
-    private volatile long desktopRegistrationSequence;
+    final android.os.IBinder desktopSceneOwner = new android.os.Binder();
+    volatile long desktopRegistrationSequence;
     final FinishTransactions<RenderBinding> finishTransactions = new FinishTransactions<>(16);
     final FinishTransactions<Long> workspaceFinishes = new FinishTransactions<>(16);
 
@@ -458,6 +459,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        launcher = new HostLaunchController(this);
         taskEvents = new HostTaskEventController(this);
         chrome = new HostChromeController(this);
         cellLayout = new HostCellLayoutController(this);
@@ -697,7 +699,7 @@ TopTaskGeometry topGeometry() {
         return slot.index==SLOT_TOP ? topGeometry().bounds() : layout.cellBounds(slot.index-1);
     }
 
-    private java.util.Set<Integer> supportedTaskUsers() {
+    java.util.Set<Integer> supportedTaskUsers() {
         long now = SystemClock.uptimeMillis();
         java.util.Set<Integer> cached = taskUserIds;
         if (cached != null && now - taskUserIdsReadAt < 5000L) return cached;
@@ -836,90 +838,18 @@ TopTaskGeometry topGeometry() {
     /** 调试广播入口：打印 root 诊断。 */
     public static void debugRoots() { HostDebugController.debugRoots(); }
 
-    LiveTask findMainTask() throws Exception {
-        // A closing fullscreen app may remain visible while Home has already taken
-        // focus. Visibility alone cannot make that departing app a swap participant.
-        // If both claim focus the scene is still changing: retain both task bindings.
-        LiveTask candidate = null;
-        LiveTask focusedCandidate = null;
-        boolean focusedHome = false;
-        int visibleCandidates = 0;
-        java.util.List<?> roots = rootInfos();
-        for (Object info : roots) {
-            if (isHomeRoot(info) && XposedHelpers.getBooleanField(info, "isVisible")
-                    && XposedHelpers.getBooleanField(info, "isFocused")) focusedHome = true;
-            if (!ordinaryRoot(info, 1)) continue;
-            int userId = XposedHelpers.getIntField(info, "userId");
-            boolean visible = XposedHelpers.getBooleanField(info, "isVisible");
-            boolean focused = XposedHelpers.getBooleanField(info, "isFocused");
-            boolean sideTask = isSideToken(XposedHelpers.getObjectField(info, "token"));
-            if (!TaskUserPolicy.mayBeMainTask(userId, currentUserId(),
-                    supportedTaskUsers(), visible, focused, sideTask)) continue;
-            if (visible) visibleCandidates++;
-            LiveTask task = new LiveTask(info);
-            if (focused) {
-                if (focusedCandidate != null)
-                    throw new IllegalStateException("ambiguous focused main roots");
-                focusedCandidate = task;
-            }
-            candidate = task;
-            updateTaskWindowState(0, info, task.id, true);
-        }
-        if (focusedHome && focusedCandidate != null)
-            throw new IllegalStateException("Home/app focus is changing; retain task bindings");
-        if (focusedHome) return null;
-        if (focusedCandidate != null) return focusedCandidate;
-        if (visibleCandidates > 1) throw new IllegalStateException("ambiguous visible main roots");
-        return candidate; // Home（type=2）不会被当主任务。
-    }
+    LiveTask findMainTask() throws Exception { return launcher.findMainTask(); }
 
-    LiveTask findPackageTask(String pkg) throws Exception {
-        LiveTask candidate = null;
-        for (Object info : rootInfos()) {
-            if (!TaskUserPolicy.isCurrentUser(
-                    XposedHelpers.getIntField(info, "userId"), currentUserId())) continue;
-            ComponentName base = (ComponentName) XposedHelpers.getObjectField(info, "baseActivity");
-            if (base == null || !pkg.equals(base.getPackageName())) continue;
-            if (!ordinaryRoot(info, 1) || isSideToken(XposedHelpers.getObjectField(info, "token")))
-                throw new IllegalStateException("existing package task has unsupported owner/mode");
-            if (candidate != null) throw new IllegalStateException("multiple package tasks; no implicit relaunch");
-            candidate = new LiveTask(info);
-        }
-        return candidate;
-    }
+    LiveTask findPackageTask(String pkg) throws Exception { return launcher.findPackageTask(pkg); }
 
-    LiveTask existingHomeTask() throws Exception {
-        LiveTask home = null;
-        for (Object info : rootInfos()) {
-            if (!isHomeRoot(info)) continue;
-            if (home != null) throw new IllegalStateException("ambiguous existing Home roots");
-            home = new LiveTask(info);
-        }
-        if (home == null) throw new IllegalStateException("existing Home root unavailable");
-        return home;
-    }
+    LiveTask existingHomeTask() throws Exception { return launcher.existingHomeTask(); }
 
-    boolean isHomeRoot(Object info) {
-        return info != null && Integer.valueOf(2).equals(
-                    XposedHelpers.callMethod(info, "getActivityType"))
-                && XposedHelpers.getIntField(info, "displayId") == 0
-                && XposedHelpers.getIntField(info, "userId") == currentUserId()
-                && !Boolean.TRUE.equals(XposedHelpers.callMethod(info, "hasParentTask"));
-    }
+    boolean isHomeRoot(Object info) { return launcher.isHomeRoot(info); }
 
     /** Reveal only the same Home that this app covered; never send a HOME launch intent. */
-    LiveTask existingHomeForCollection(LiveTask task) throws Exception {
-        LiveTask home = existingHomeTask();
-        HomeTaskReturn saved = coveredHome;
-        if (saved != null && saved.covers(task.id, task.token)
-                && !saved.restores(home.id, home.token))
-            throw new IllegalStateException("covered Home identity changed; keep app in main");
-        return home;
-    }
+    LiveTask existingHomeForCollection(LiveTask task) throws Exception { return launcher.existingHomeForCollection(task); }
 
-    Object homeForCollection(LiveTask task) throws Exception {
-        return existingHomeForCollection(task).token;
-    }
+    Object homeForCollection(LiveTask task) throws Exception { return launcher.homeForCollection(task); }
 
 
 
@@ -1220,96 +1150,9 @@ TopTaskGeometry topGeometry() {
 
 
     /** Publish only confirmed bindings; system_server rechecks each native task before use. */
-    void publishDesktopSideTasks() {
-        final long sequence = ++desktopRegistrationSequence;
-        final long epoch = sceneEpoch;
-        final java.util.List<Slot> owners = new java.util.ArrayList<>();
-        for (Slot slot : slots) if (slot != null && slot.index > 0 && slot.index < CELL_SLOT_COUNT) owners.add(slot);
-        final boolean active = scene == ACTIVE && screenOn && !keyguardLocked && root != null;
-        final boolean keepRecents = root != null && scene != SUSPENDED;
-        Runnable send = () -> {
-            if (sequence != desktopRegistrationSequence || epoch != sceneEpoch) return;
-            android.os.Bundle state = new android.os.Bundle();
-            java.util.ArrayList<android.os.Bundle> rows = new java.util.ArrayList<>();
-            java.util.ArrayList<android.os.Bundle> recents = new java.util.ArrayList<>();
-            if (active || keepRecents) for (Slot slot : owners) {
-                try {
-                    if (!isActive(slot) || !slot.occupied || slot.parked || slot.taskId < 0
-                            || slot.taskToken == null || slot.pkg == null
-                            || !controllerOwns(slot, slot.taskId, slot.taskToken)) continue;
-                    Object organizer = XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
-                    synchronized (XposedHelpers.getObjectField(organizer, "mLock")) {
-                        Object appeared = ((android.util.SparseArray<?>) XposedHelpers.getObjectField(
-                                organizer, "mTasks")).get(slot.taskId);
-                        Object info = appeared == null ? null : XposedHelpers.callMethod(appeared, "getTaskInfo");
-                        if (info == null || !slot.taskToken.equals(XposedHelpers.getObjectField(info, "token"))) continue;
-                        android.os.Bundle row = new android.os.Bundle();
-                        row.putBinder("task", (android.os.IBinder) XposedHelpers.callMethod(slot.taskToken, "asBinder"));
-                        row.putInt("taskId", slot.taskId);
-                        row.putInt("userId", XposedHelpers.getIntField(info, "userId"));
-                        row.putInt("displayId", XposedHelpers.getIntField(info, "displayId"));
-                        row.putString("package", slot.pkg);
-                        row.putLong("scene", epoch);
-                        row.putLong("binding", slot.taskEpoch);
-                        if (keepRecents && scene != SUSPENDED && windowModeOf(info) == 6) recents.add(row);
-                        if (active && scene == ACTIVE && screenOn && !keyguardLocked
-                                && !slot.frozen && !slot.promoting && !slot.launching
-                                && mayWriteSideSurface(slot)) rows.add(row);
-                    }
-                } catch (Throwable unavailable) { log("desktop binding omitted: " + unavailable); }
-            }
-            if (sequence != desktopRegistrationSequence || epoch != sceneEpoch) return;
-            state.putBinder("owner", desktopSceneOwner);
-            Slot upper = slots[SLOT_TOP];
-            TopTaskState.Key upperOwner = topCtrl.topTaskState.owner();
-            if (active && scene == ACTIVE && screenOn && !keyguardLocked && topCtrl.topFace
-                    && upperOwner != null && upperOwner.taskId == upper.taskId
-                    && upperOwner.token.equals(upper.taskToken)
-                    && isActive(upper) && upper.occupied && !upper.parked
-                    && !upper.frozen && !upper.promoting && !upper.launching
-                    && upper.taskToken != null && controllerOwns(upper, upper.taskId, upper.taskToken)) {
-                TopTaskGeometry geometry = topGeometry();
-                android.os.Bundle topInput = new android.os.Bundle();
-                topInput.putBinder("task", (android.os.IBinder) XposedHelpers.callMethod(upper.taskToken, "asBinder"));
-                topInput.putInt("taskId", upper.taskId);
-                topInput.putInt("userId", upperOwner.userId);
-                topInput.putInt("displayId", 0);
-                topInput.putInt("width", geometry.logicalWidth);
-                topInput.putInt("height", geometry.logicalHeight);
-                topInput.putFloat("scale", geometry.scale);
-                state.putBundle("topInput", topInput);
-            }
-            state.putLong("sequence", sequence);
-            state.putParcelableArrayList("rows", rows);
-            state.putParcelableArrayList("recents", recents);
-            ctx.sendBroadcast(new Intent(MiStepDesktopLaunchBridge.ACTION).setPackage("android")
-                    .putExtra("state", state), android.Manifest.permission.WRITE_SECURE_SETTINGS);
-        };
-        if (active || keepRecents) executeOnShell(send); else send.run();
-    }
+    void publishDesktopSideTasks() { launcher.publishDesktopSideTasks(); }
 
-    private void promoteSideTaskForDesktopLaunch(String pkg, int launchUser) {
-        if (pkg == null || scene != ACTIVE) return;
-        if (!supportsTaskUser(launchUser)) return;
-        String[] packages = new String[SLOT_COUNT - 1];
-        int[] users = new int[SLOT_COUNT - 1];
-        boolean[] occupied = new boolean[SLOT_COUNT - 1];
-        for (int i = 1; i < SLOT_COUNT; i++) {
-            packages[i - 1] = slots[i].pkg;
-            occupied[i - 1] = sideTaskMatchesUser(slots[i], launchUser);
-            users[i - 1] = launchUser;
-        }
-        int sideIndex = DesktopIconLaunchPolicy.uniqueSideSlot(pkg, launchUser, packages, users, occupied);
-        if (sideIndex < 0) {
-            log("desktop launch has no unique side task package=" + pkg);
-            return;
-        }
-        Slot match = slots[sideIndex + 1];
-        if(match.index==SLOT_TOP) {topCtrl.releaseTopTask(true,true,null);return;}
-        log("desktop icon selected side task package=" + pkg + " slot=" + match.index
-                + " task=" + match.taskId + "; promote existing task");
-        queueSidePromotion(match, true);
-    }
+    private void promoteSideTaskForDesktopLaunch(String pkg, int launchUser) { launcher.promoteSideTaskForDesktopLaunch(pkg, launchUser); }
 
 
 
@@ -1317,19 +1160,7 @@ TopTaskGeometry topGeometry() {
 
 
 
-    void scheduleSideSurfaceRestore(Slot slot, int taskId, Object token,
-            long bindingEpoch, long epoch) {
-        for (long delay : new long[]{90L, 320L, 800L}) {
-            main.postDelayed(() -> {
-                if (scene != ACTIVE || sceneEpoch != epoch || !isActive(slot)
-                        || slot.taskId != taskId || slot.taskEpoch != bindingEpoch
-                        || !java.util.Objects.equals(slot.taskToken, token)
-                        || !slot.occupied || slot.promoting || slot.parked
-                        || slot.windowMode != 6) return;
-                reapplyScale(slot);
-            }, delay);
-        }
-    }
+    void scheduleSideSurfaceRestore(Slot slot, int taskId, Object token,            long bindingEpoch, long epoch) { launcher.scheduleSideSurfaceRestore(slot, taskId, token, bindingEpoch, epoch); }
 
 
     MiStepLayout makeAdaptiveLayout(boolean right) { return cellLayout.makeAdaptiveLayout(right); }
@@ -1346,54 +1177,9 @@ TopTaskGeometry topGeometry() {
     /** 交换确认后把新主任务 leash 完全复位：position/matrix/alpha/crop，避免副格残留变换把画面顶到主区上方。 */
     void resetMainTaskLeash(int taskId) { taskEvents.resetMainTaskLeash(taskId); }
 
-    void launchQuick(QuickApp entry) {
-        if (entry == null || entry.component == null || scene != ACTIVE
-                || promotion != null || transferBusy) return;
-        for (Slot slot : slots) {
-            if (slot.index > SLOT_MAIN && sideTaskMatchesUser(slot, currentUserId()) && entry.component.getPackageName()
-                    .equals(slot.pkg)) {
-                log("top shortcut promotes existing side task slot=" + slot.index);
-                onSlotTapped(slot.index);
-                return;
-            }
-        }
-        Intent launch = new Intent(Intent.ACTION_MAIN)
-                .addCategory(Intent.CATEGORY_LAUNCHER)
-                .setComponent(entry.component)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                        | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-        try {
-            ctx.startActivity(launch);
-            log("top shortcut launch main " + entry.component.flattenToShortString());
-            scheduleMainCropClear(1400L);
-        } catch (Throwable error) {
-            log("top shortcut launch failed: " + error);
-            android.widget.Toast.makeText(ctx, "无法打开 " + entry.label,
-                    android.widget.Toast.LENGTH_SHORT).show();
-        }
-    }
+    void launchQuick(QuickApp entry) { launcher.launchQuick(entry); }
 
-    void openSettingsInMain() {
-        if (scene != ACTIVE || promotion != null || transferBusy) return;
-        for (Slot slot : slots) {
-            if (slot.index > SLOT_MAIN && sideTaskMatchesUser(slot, currentUserId())
-                    && "com.android.settings".equals(slot.pkg)) {
-                onSlotTapped(slot.index);
-                return;
-            }
-        }
-        try {
-            Intent settings = new Intent(android.provider.Settings.ACTION_SETTINGS)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                            | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-            ctx.startActivity(settings);
-            log("system settings launched in main");
-        } catch (Throwable error) {
-            log("system settings launch failed: " + error);
-            android.widget.Toast.makeText(ctx, "无法打开系统设置",
-                    android.widget.Toast.LENGTH_SHORT).show();
-        }
-    }
+    void openSettingsInMain() { launcher.openSettingsInMain(); }
 
     void beginWindowDrag(MotionEvent event) {
         dragMoved = false;
@@ -1774,21 +1560,9 @@ TopTaskGeometry topGeometry() {
      * 普通应用仍按原路线进 TaskView。
      */
     /** 规则：除桌面外都可进副格；系统标志不预拒绝，交给 native adoption 结果。 */
-    private boolean launchActivitySupportsSide(Intent launch) {
-        return true;
-    }
+    private boolean launchActivitySupportsSide(Intent launch) { return launcher.launchActivitySupportsSide(launch); }
 
-    private void keepUnsupportedInMain(Slot slot, String pkg, String reason) {
-        if (slot != null) {
-            slot.launching = false;
-            updateHint(slot);
-            updateTouchRegion(slot);
-        }
-        log("side launch rejected slot=" + (slot == null ? -1 : slot.index)
-                + " pkg=" + pkg + ": " + reason + "; task remains in main");
-        android.widget.Toast.makeText(ctx, "该应用不支持副格，已在主区打开",
-                android.widget.Toast.LENGTH_SHORT).show();
-    }
+    private void keepUnsupportedInMain(Slot slot, String pkg, String reason) { launcher.keepUnsupportedInMain(slot, pkg, reason); }
 
     /**
      * TaskViewTaskController keeps mTaskNotFound after an idle task vanished without a token.
@@ -1829,87 +1603,19 @@ TopTaskGeometry topGeometry() {
 
     // ---------------------------------------------------------------- 启动 / 关闭任务
 
-    void launchPackage(int slotIndex, String pkg) {
-        if (slotIndex <= SLOT_MAIN || slotIndex >= SLOT_COUNT) {
-            log("launchPackage bad slot=" + slotIndex);
-            return;
-        }
-        Intent i = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
-        if (i == null && pkg.contains("home")) {
-            // 桌面（home）没有普通 LAUNCHER intent，用 CATEGORY_HOME 显式构造。
-            i = new Intent(Intent.ACTION_MAIN);
-            i.addCategory(Intent.CATEGORY_HOME);
-            i.setPackage(pkg);
-            log("launchPackage: using CATEGORY_HOME for " + pkg);
-        }
-        if (i == null) {
-            log("launchPackage: no launcher for " + pkg);
-            return;
-        }
-        launchIntoSlot(slotIndex, i, pkg);
-    }
+    void launchPackage(int slotIndex, String pkg) { launcher.launchPackage(slotIndex, pkg); }
 
-    private void launchComponent(int slotIndex, ComponentName cn) {
-        Intent i = new Intent(Intent.ACTION_MAIN);
-        i.addCategory(Intent.CATEGORY_LAUNCHER);
-        i.setComponent(cn);
-        launchIntoSlot(slotIndex, i, cn.flattenToShortString());
-    }
+    private void launchComponent(int slotIndex, ComponentName cn) { launcher.launchComponent(slotIndex, cn); }
 
-    private void launchIntoSlot(final int slotIndex, Intent launch, String label) {
-        final Slot slot = slots[slotIndex];
-        if (!isActive(slot) || slot.view == null || slot.launching || slot.promoting || promotion != null) {
-            log("launchIntoSlot " + slotIndex + ": no view");
-            return;
-        }
-        final String pkg = launch.getComponent() != null
-                ? launch.getComponent().getPackageName() : launch.getPackage();
-        if (pkg == null || "com.miui.home".equals(pkg)) return;
-        for (Slot other : slots) {
-            if (other != slot && (other.occupied || other.launching) && pkg.equals(other.pkg)) {
-                log("launch rejected: package already in side slot=" + other.index);
-                return;
-            }
-        }
-        if (!boundsHooksReady || scene != ACTIVE || transferBusy) return;
-        Runnable choose = () -> chooseExistingOrLaunch(slot, launch, label, pkg);
-        if (slot.occupied) {
-            returnToSystem(slot, false, () -> { clearSlot(slot); choose.run(); },
-                    error -> log("replacement stopped; previous live task retained: " + error));
-        } else choose.run();
-    }
+    private void launchIntoSlot(final int slotIndex, Intent launch, String label) { launcher.launchIntoSlot(slotIndex, launch, label); }
 
-    private void chooseExistingOrLaunch(Slot slot, Intent launch, String label, String pkg) {
-        if (!isActive(slot) || scene != ACTIVE) return;
-        slot.launching = true;
-        if (!executeOnShell(() -> {
-            try {
-                LiveTask existing = findPackageTask(pkg);
-                main.post(() -> {
-                    if (!isActive(slot) || scene != ACTIVE) { slot.launching = false; return; }
-                    if (existing == null) {
-                        startSlot(slot, launch, label);
-                    } else {
-                        slot.launching = false;
-                        adoptExisting(slot, existing, this::finishPendingSuspend,
-                                error -> {
-                                    log("existing task admission failed; no launcher fallback: " + error);
-                                    finishPendingSuspend();
-                                });
-                    }
-                });
-            } catch (Throwable error) {
-                main.post(() -> { slot.launching = false; log("choose task stopped: " + error);
-                    finishPendingSuspend(); });
-            }
-        })) { slot.launching = false; log("no Shell queue for selection"); }
-    }
+    private void chooseExistingOrLaunch(Slot slot, Intent launch, String label, String pkg) { launcher.chooseExistingOrLaunch(slot, launch, label, pkg); }
 
-    private void startSlot(final Slot slot, Intent launch, String label) { taskEvents.startSlot(slot, launch, label); }
+    void startSlot(final Slot slot, Intent launch, String label) { taskEvents.startSlot(slot, launch, label); }
 
-    static void callHidden(Object target, String name, Object... args) { HostStaticUtil.callHidden(target, name, args); }
+    static void callHidden(Object target, String name, Object... args) { HostLaunchController.callHidden(target, name, args); }
 
-    static Method findStartActivity(Class<?> cls) { return HostStaticUtil.findStartActivity(cls); }
+    static Method findStartActivity(Class<?> cls) { return HostLaunchController.findStartActivity(cls); }
 
     // ---------------------------------------------------------------- 任务状态 / 密度 / 可见性
 
