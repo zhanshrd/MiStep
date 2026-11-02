@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostCellLayoutController cellLayout;
     final HostSurfaceController surfaceCtl;
     final HostGeometryController geometry;
     final HostDebugController debugCtrl;
@@ -152,7 +153,7 @@ public final class MiStepHost {
     MiStepCellMotion cellMotion;
     MiStepSideDismiss sideDismiss;
     Slot sideDismissSlot;
-    private static final class CellMovePlan {
+    static final class CellMovePlan {
         final Slot slot;
         final Rect from;
         CellMovePlan(Slot slot, Rect from) { this.slot = slot; this.from = from; }
@@ -455,6 +456,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        cellLayout = new HostCellLayoutController(this);
         surfaceCtl = new HostSurfaceController(this);
         geometry = new HostGeometryController(this);
         debugCtrl = new HostDebugController(this);
@@ -568,7 +570,7 @@ public final class MiStepHost {
     /** 调试广播：把主区任务 mirror 成宿主窗口里的实时画面（验证 live-surface 承载）。 */
     public static void debugMirror(int taskId, int x, int y, int w, int h, int holdMs,            int hideMode) { HostDebugController.debugMirror(taskId, x, y, w, h, holdMs, hideMode); }
 
-    private void createMirrorLayer() { mirrorController.createMirrorLayer(); }
+    void createMirrorLayer() { mirrorController.createMirrorLayer(); }
 
     void setMirrorLayerVisible(boolean visible) { mirrorController.setMirrorLayerVisible(visible); }
 
@@ -583,7 +585,7 @@ public final class MiStepHost {
     void scheduleMainCropClear(long delayMs) { mirrorController.scheduleMainCropClear(delayMs); }
 
     /** 打开一步时按滑动起始角决定主区在哪边：从左角滑 → 主区在左；从右角滑 → 主区在右。 */
-    private static volatile int pendingMainSide = -1;
+    static volatile int pendingMainSide = -1;
 
     public static void setPendingMainSide(boolean mainOnRight) {
         MiStepHost host = sInstance;
@@ -1059,179 +1061,7 @@ TopTaskGeometry topGeometry() {
         });
     }
 
-    private void buildLayout() {
-        readDisplayGeometry();
-        int w = screenW;
-        int h = screenH;
-        int pendingSide = pendingMainSide;
-        if (pendingSide >= 0) {
-            pendingMainSide = -1;
-            mainOnRight = pendingSide == 1;
-            log("layout mainOnRight from gesture edge=" + mainOnRight);
-        }
-        log("device: " + DeviceProfile.describe(ctx));
-        float layoutDensity = ctx.getResources().getDisplayMetrics().density;
-        layout = MiStepLayout.of(w, h, mainOnRight, layoutDensity);
-        log("layout: " + layout.describe()
-                + " mainScale=" + mainScale() + " cellScale=" + cellScale());
-
-        root = new FrameLayout(ctx) {
-            @Override public boolean dispatchTouchEvent(MotionEvent event) {
-                if (transitionInput != null && transitionInput.consume(event.getActionMasked())) return true;
-                return super.dispatchTouchEvent(event);
-            }
-        };
-        transitionInput = new MiStepTransitionInput(root, this::acquireTransitionInputWindow, this::releaseTransitionInputWindow, blocked -> {
-            liveSwapInputBlocked = blocked;
-            for (Slot slot : slots) if (slot != null && slot.index > 0) updateTouchRegion(slot);
-            if (root != null) { root.requestLayout(); root.invalidate(); }
-        }, MiStepHost::log);
-        root.setClipChildren(false);
-        root.setBackgroundColor(0x00000000);
-        installHostTouchRegion();
-
-        wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
-        lp = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                PixelFormat.TRANSLUCENT);
-        lp.gravity = Gravity.TOP | Gravity.START;
-        lp.setTitle("MiStepHost");
-        HostWindowPolicy.configure(lp);
-        // APPLICATION_OVERLAY 默认被状态栏/cutout 顶下去（真机 122px）。两者都关掉后
-        // 窗口坐标系才等于屏幕坐标系（[0,0]-[1080,2460]）。
-        try {
-            lp.setFitInsetsTypes(0);
-            log("fitInsetsTypes=0 applied");
-        } catch (Throwable t) {
-            log("setFitInsetsTypes failed: " + t);
-        }
-        try {
-            lp.layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
-            log("cutoutMode=ALWAYS applied");
-        } catch (Throwable t) {
-            log("cutout mode failed: " + t);
-        }
-        wm.addView(root, lp);
-        registerDefaultDisplayListener();
-        createMirrorLayer();
-        log("host 2.9.41 HyperOS glass added " + w + "x" + h
-                + " privateFlags=0x" + Integer.toHexString(
-                        XposedHelpers.getIntField(lp, "privateFlags")));
-        // v1.3.3：呼出Mi Step = 整块屏缩进主区（写缩放触发文件，system_server 轮询执行）。
-        main.postDelayed(this::collapseStatusBarPanels, 220L);
-        // Host-owned toolbar and app strip, matching the Mi Step 3.0 interaction surface.
-        try {
-            java.util.List<QuickApp> quickApps;
-            try {
-                quickApps = MiStepWarmup.quickApps(ctx);
-            } catch (Throwable error) {
-                quickApps = java.util.Collections.emptyList();
-                log("top app strip unavailable: " + error);
-            }
-            topBar = new MiStepTopBar(ctx, layout, quickApps, new MiStepTopBar.Listener() {
-                @Override public void onOpenSettings() { openSettingsInMain(); }
-                @Override public void onOpenClipboard() {
-                    if (scene == ACTIVE && promotion == null && !transferBusy)
-                        topBar.toggleClipboard(wallpaperBackdrop, screenW, screenH);
-                }
-                @Override public void onToggleTorch() {
-                    if (scene == ACTIVE && promotion == null && !transferBusy)
-                        MiStepSystemActions.toggleTorch(ctx);
-                }
-                @Override public void onScreenshot() {
-                    if (scene == ACTIVE && promotion == null && !transferBusy)
-                        MiStepSystemActions.takeScreenshot(ctx);
-                }
-                @Override public void onScreenRecord() {
-                    if (scene == ACTIVE && promotion == null && !transferBusy)
-                        MiStepSystemActions.toggleScreenRecord(ctx);
-                }
-                @Override public void onExit() {
-                    log("top bar exit tapped");
-                    toggleVisibility();
-                }
-                @Override public void onLaunch(QuickApp entry) { launchQuick(entry); }
-                @Override public boolean canCustomizeApps() {
-                    return scene == ACTIVE && screenOn && !keyguardLocked
-                            && promotion == null && !transferBusy && !topCtrl.topFace;
-                }
-                @Override public void onDragStart(MotionEvent event) { beginWindowDrag(event); }
-                @Override public void onDragMove(MotionEvent event) { updateWindowDrag(event); }
-                @Override public void onDragEnd(MotionEvent event) { finishWindowDrag(event); }
-                @Override public void onOpenLandscape() { topCtrl.openTopFace(true); }
-            });
-            refreshQuickApps();
-            topStripBacking = new View(ctx);
-            topStripBacking.setBackgroundColor(0xFF1E2420);
-            root.addView(topStripBacking, new FrameLayout.LayoutParams(-1, layout.topStrip));
-            root.addView(topBar, new FrameLayout.LayoutParams(-1, layout.topStrip));
-            topBar.setStatusBarInset(DeviceProfile.statusBarHeightPx(ctx));
-            main.post(this::applyWallpaperBackdrops);
-            for (int i = 1; i < CELL_SLOT_COUNT; i++) {
-                View backing = new View(ctx);
-                backing.setBackgroundColor(HyperOsStyle.page(ctx));
-                FrameLayout.LayoutParams rlp =
-                        new FrameLayout.LayoutParams(layout.sideWidth, sideSegmentHeight(i));
-                rlp.leftMargin = layout.mainOnRight ? 0 : layout.mainWidth;
-                rlp.topMargin = sideSegmentTop(i);
-                backing.setLayoutParams(rlp);
-                root.addView(backing);
-                sideBackingViews[i] = backing;
-            }
-            log("Mi Step top bar ready shortcuts=" + quickApps.size());
-        } catch (Throwable t) {
-            log("top bar add failed: " + t);
-        }
-        root.post(this::updateTopBarState);
-        loadWallpaperBackdrop();
-        beginWorkspaceEntry(null);
-        // Keep corner activation disabled while active; HyperOS GestureStub owns back gestures.
-        HotZoneGesture.raiseAll(ctx);
-        // v0.9.9：心跳保证热区始终在位上（面板关闭路径异常时也能自动恢复，否则会卡在"撤下"）。
-        main.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (root == null || sInstance != MiStepHost.this) {
-                    return;
-                }
-                if (scene != ACTIVE || !screenOn || root.getVisibility() != View.VISIBLE) {
-                    main.postDelayed(this, 4000L);
-                    return;
-                }
-                if (layout != null && !holdsLiveFlipZoom()
-                        && android.os.SystemClock.uptimeMillis() >= zoomAnimUntil) {
-                    writeZoom(true);
-                }
-                if (carrierSlotIndex >= 0) {
-                    reassertCarrier();
-                }
-                if (!zoomed && !HotZoneGesture.isAttached()) {
-                    log("hotzone heartbeat: re-raise");
-                    HotZoneGesture.raiseAll(ctx);
-                }
-                // v1.1.3：转场可能覆盖 leash 的位置/矩阵（"只显示一部分"），心跳里周期性重发。
-                for (Slot s : slots) {
-                    if (holdsLiveFlipZoom()) continue;
-                    if (s.carrier || s.index == leashPocSlot) {
-                        continue;
-                    }
-                    ensureCellBackground(s);
-                    if (!s.occupied || s.promoting) {
-                        continue;
-                    }
-                    reapplyScale(s);
-                    if (!s.taskVisible) scheduleSideVisibilityRepair(s);
-                }
-                main.postDelayed(this, 4000L);
-            }
-        }, 4000L);
-        startPromotionWatchdog();
-    }
+    private void buildLayout() { cellLayout.buildLayout(); }
 
     static MiStepHost current() { return sInstance; }
 
@@ -1243,7 +1073,7 @@ TopTaskGeometry topGeometry() {
     static boolean ownsTopNativeCaption(Object info) { return HostTopTaskController.ownsTopNativeCaption(info); }
     void resetTopForSuspend() { topCtrl.resetTopForSuspend(); }
     private void createTopTaskControls() { topCtrl.createTopTaskControls(); }
-    private void updateTopTaskGeometry() { topCtrl.updateTopTaskGeometry(); }
+    void updateTopTaskGeometry() { topCtrl.updateTopTaskGeometry(); }
     private void openTopFace(boolean manual) { topCtrl.openTopFace(manual); }
     private void releaseTopTask(boolean front, boolean dismissed, Runnable after) { topCtrl.releaseTopTask(front, dismissed, after); }
 
@@ -1254,7 +1084,7 @@ TopTaskGeometry topGeometry() {
     private long promotionWatchdogSince;
     private boolean promotionWatchdogNudged;
 
-    private void startPromotionWatchdog() {
+    void startPromotionWatchdog() {
         main.postDelayed(new Runnable() {
             @Override
             public void run() {
@@ -1416,100 +1246,17 @@ TopTaskGeometry topGeometry() {
     }
 
     /** An empty TaskView keeps its last resize background; hide that container, not a screenshot. */
-    void updateCellSurfaceVisibility(Slot slot) {
-        // Shell owns the borrowed task parents until the whole handoff finishes.
-        // clearSlot/bindTask is only a logical replacement during a native swap;
-        // an independent hide here would blank the just-committed real task.
-        if (slot.promoting || slot.launching || cellMotion != null
-                || (promotion != null && promotion.nativeSwap && !promotion.cancelled)) return;
-        boolean visible = slot.occupied && !slot.parked && slot.taskToken != null
-                && controllerOwns(slot, slot.taskId, slot.taskToken)
-                && (slot.index!=SLOT_TOP || topCtrl.topFace);
-        // An empty native container can be re-shown by SurfaceView's next position frame.
-        // Its RenderNode must also be transparent; keep its surface alive for the next launch.
-        if (slot.view != null) slot.view.setAlpha(visible ? 1f : 0f);
-        Object surface = getSurfaceField(slot.controller, "mSurfaceControl");
-        if (surface == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(surface, "isValid"))) return;
-        Object tx = null;
-        try {
-            tx = Class.forName("android.view.SurfaceControl$Transaction").getDeclaredConstructor().newInstance();
-            XposedHelpers.callMethod(tx, "setAlpha", surface, visible ? workspaceAlpha : 0f);
-            XposedHelpers.callMethod(tx, visible ? "show" : "hide", surface);
-            XposedHelpers.callMethod(tx, "apply");
-        } catch (Throwable error) { log("cell container visibility: " + error); }
-        finally { closeSurfaceObject(tx, "close"); }
-    }
+    void updateCellSurfaceVisibility(Slot slot) { cellLayout.updateCellSurfaceVisibility(slot); }
 
     /** Open the destination hole while its opaque empty hint still covers it.
      * Native preparation owns show/hide; only make its eventual parent nontransparent.
      */
-    void prepareCellSurface(Slot slot) {
-        if (slot.view != null) slot.view.setAlpha(1f);
-        Object surface = getSurfaceField(slot.controller, "mSurfaceControl");
-        if (surface == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(surface, "isValid"))) return;
-        Object tx = null;
-        try {
-            tx = Class.forName("android.view.SurfaceControl$Transaction").getDeclaredConstructor().newInstance();
-            XposedHelpers.callMethod(tx, "setAlpha", surface, workspaceAlpha);
-            XposedHelpers.callMethod(tx, "apply");
-        } catch (Throwable error) { log("cell destination preparation: " + error); }
-        finally { closeSurfaceObject(tx, "close"); }
-    }
+    void prepareCellSurface(Slot slot) { cellLayout.prepareCellSurface(slot); }
 
     /** A host-owned backing stays inside the cell, below the real task, even for translucent apps. */
-    private void ensureCellBackground(Slot slot) {
-        if (wallpaperBackdrop != null) applyWallpaperBackdrops();
-        if (!slot.occupied || slot.parked) {
-            removeCellBackground(slot);
-            return;
-        }
-        if (root == null || slot.index <= SLOT_MAIN || slot.controller == null || slot.rect == null) {
-            return;
-        }
-        Object parent = getSurfaceField(slot.controller, "mSurfaceControl");
-        if (parent == null) return;
-        int width = slot.rect[2] - slot.rect[0];
-        int height = slot.rect[3] - slot.rect[1];
-        if (parent == slot.cellBackgroundParent && width == slot.cellBackgroundWidth
-                && height == slot.cellBackgroundHeight) return;
-        removeCellBackground(slot);
-        // Remember a failed attempt too: no allocation/log loop for the same surface generation.
-        slot.cellBackgroundParent = parent;
-        slot.cellBackgroundWidth = width;
-        slot.cellBackgroundHeight = height;
-        Object background = null;
-        Object transaction = null;
-        try {
-            Object builder = Class.forName("android.view.SurfaceControl$Builder")
-                    .getDeclaredConstructor().newInstance();
-            XposedHelpers.callMethod(builder, "setName", "MiStepCellBacking" + slot.index);
-            XposedHelpers.callMethod(builder, "setColorLayer");
-            XposedHelpers.callMethod(builder, "setParent", parent);
-            background = XposedHelpers.callMethod(builder, "build");
-            transaction = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            int page = HyperOsStyle.page(ctx);
-            XposedHelpers.callMethod(transaction, "setColor", background,
-                    new float[]{android.graphics.Color.red(page) / 255f,
-                            android.graphics.Color.green(page) / 255f,
-                            android.graphics.Color.blue(page) / 255f});
-            XposedHelpers.callMethod(transaction, "setWindowCrop", background,
-                    new Rect(0, 0, width, height));
-            XposedHelpers.callMethod(transaction, "setLayer", background, -1);
-            XposedHelpers.callMethod(transaction, "show", background);
-            XposedHelpers.callMethod(transaction, "apply");
-            slot.cellBackground = background;
-            background = null; // The slot owns only the newly created backing, never the parent.
-            log("cell backing ready slot=" + slot.index);
-        } catch (Throwable failure) {
-            log("cell backing failed slot=" + slot.index + ": " + failure);
-        } finally {
-            closeSurfaceObject(transaction, "close");
-            if (background != null) destroyCellSurface(background);
-        }
-    }
+    private void ensureCellBackground(Slot slot) { cellLayout.ensureCellBackground(slot); }
 
-    private void registerDefaultDisplayListener() {
+    void registerDefaultDisplayListener() {
         if (displayListener != null) return;
         try {
             displayManager = (DisplayManager) ctx.getSystemService(Context.DISPLAY_SERVICE);
@@ -1529,7 +1276,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void readDisplayGeometry() { geometry.readDisplayGeometry(); }
+    void readDisplayGeometry() { geometry.readDisplayGeometry(); }
 
     void scheduleDisplayGeometryRefresh() { geometry.scheduleDisplayGeometryRefresh(); }
 
@@ -1559,7 +1306,7 @@ TopTaskGeometry topGeometry() {
 
 
     /** 只取桌面壁纸做高斯模糊底（不使用应用内容），供顶栏/侧栏格子的液态玻璃使用。 */
-    private void loadWallpaperBackdrop() {
+    void loadWallpaperBackdrop() {
         if (wallpaperBackdropRequested) return;
         if (wallpaperBackdrop != null && !wallpaperBackdrop.isRecycled()) {
             applyWallpaperBackdrops();
@@ -1791,10 +1538,7 @@ TopTaskGeometry topGeometry() {
     }
 
 
-    MiStepLayout makeAdaptiveLayout(boolean right) {
-        android.util.DisplayMetrics metrics = ctx.getResources().getDisplayMetrics();
-        return MiStepLayout.of(screenW, screenH, right, metrics.density);
-    }
+    MiStepLayout makeAdaptiveLayout(boolean right) { return cellLayout.makeAdaptiveLayout(right); }
 
 
     /** 调试广播入口：打印宿主 View 树（定位残带/残留视图）。 */
@@ -1842,7 +1586,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void launchQuick(QuickApp entry) {
+    void launchQuick(QuickApp entry) {
         if (entry == null || entry.component == null || scene != ACTIVE
                 || promotion != null || transferBusy) return;
         for (Slot slot : slots) {
@@ -1869,7 +1613,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void openSettingsInMain() {
+    void openSettingsInMain() {
         if (scene != ACTIVE || promotion != null || transferBusy) return;
         for (Slot slot : slots) {
             if (slot.index > SLOT_MAIN && sideTaskMatchesUser(slot, currentUserId())
@@ -1891,14 +1635,14 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void beginWindowDrag(MotionEvent event) {
+    void beginWindowDrag(MotionEvent event) {
         dragMoved = false;
         dragStartRawX = event.getRawX();
         dragStartRawY = event.getRawY();
         dragTarget = null;
     }
 
-    private void updateWindowDrag(MotionEvent event) {
+    void updateWindowDrag(MotionEvent event) {
         float dx = event.getRawX() - dragStartRawX;
         float dy = event.getRawY() - dragStartRawY;
         if (!dragMoved && dx * dx + dy * dy < dp(10) * dp(10)) return;
@@ -1916,7 +1660,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void finishWindowDrag(MotionEvent event) {
+    void finishWindowDrag(MotionEvent event) {
         boolean cancelled = event.getActionMasked() == MotionEvent.ACTION_CANCEL;
         boolean moved = dragMoved;
         Slot target = slotAtPoint(event.getRawX(), event.getRawY());
@@ -1994,41 +1738,13 @@ TopTaskGeometry topGeometry() {
         return null;
     }
 
-    int dp(float value) {
-        return Math.round(ctx.getResources().getDisplayMetrics().density * value);
-    }
+    int dp(float value) { return cellLayout.dp(value); }
 
-    void removeCellBackground(Slot slot) {
-        Object background = slot.cellBackground;
-        slot.cellBackground = null;
-        slot.cellBackgroundParent = null;
-        if (background == null) return;
-        destroyCellSurface(background);
-    }
+    void removeCellBackground(Slot slot) { cellLayout.removeCellBackground(slot); }
 
-    private void destroyCellSurface(Object background) {
-        Object transaction = null;
-        try {
-            transaction = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            XposedHelpers.callMethod(transaction, "remove", background);
-            XposedHelpers.callMethod(transaction, "apply");
-        } catch (Throwable failure) {
-            log("cell backing cleanup failed: " + failure);
-        } finally {
-            closeSurfaceObject(transaction, "close");
-            closeSurfaceObject(background, "release");
-        }
-    }
+    private void destroyCellSurface(Object background) { cellLayout.destroyCellSurface(background); }
 
-    void closeSurfaceObject(Object object, String method) {
-        if (object == null) return;
-        try {
-            XposedHelpers.callMethod(object, method);
-        } catch (Throwable failure) {
-            log("cell backing " + method + " failed: " + failure);
-        }
-    }
+    void closeSurfaceObject(Object object, String method) { cellLayout.closeSurfaceObject(object, method); }
 
     private int slotIndexOfView(View view) {
         for (Slot s : slots) {
@@ -2039,32 +1755,7 @@ TopTaskGeometry topGeometry() {
         return -1;
     }
 
-    void applyRect(Slot slot) {
-        if (slot.rect == null) {
-            return;
-        }
-        if (slot.view != null) {
-            slot.view.setX(slot.rect[0]);
-            slot.view.setY(slot.rect[1]);
-            if (slot.view.getLayoutParams() instanceof FrameLayout.LayoutParams) {
-                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) slot.view.getLayoutParams();
-                lp.width = slot.rect[2] - slot.rect[0];
-                lp.height = slot.rect[3] - slot.rect[1];
-                slot.view.setLayoutParams(lp);
-            }
-        }
-        if (slot.hint != null) {
-            slot.hint.setX(slot.rect[0]);
-            slot.hint.setY(slot.rect[1]);
-            if (slot.hint.getLayoutParams() instanceof FrameLayout.LayoutParams) {
-                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) slot.hint.getLayoutParams();
-                lp.width = slot.rect[2] - slot.rect[0];
-                lp.height = slot.rect[3] - slot.rect[1];
-                slot.hint.setLayoutParams(lp);
-            }
-        }
-        ensureCellBackground(slot);
-    }
+    void applyRect(Slot slot) { cellLayout.applyRect(slot); }
 
     /**
      * Exchange the whole main/side orientation. The official layout keeps the two
@@ -2082,39 +1773,10 @@ TopTaskGeometry topGeometry() {
     }
 
     /** Host geometry only. A live flip sends its correlated WMS zoom separately. */
-    void applyMainLayout(MiStepLayout target) {
-        if (target == null || target.width != screenW || target.height != screenH)
-            throw new IllegalArgumentException("stale Host layout");
-        mainOnRight = target.mainOnRight;
-        layout = target;
-        MiStepStatusBarSampling.geometryChanged();
-        if (topBar != null) topBar.setMainOnRight(mainOnRight);
-        log("main side layout: " + (mainOnRight ? "right" : "left") + " " + layout.describe());
-        applyWallpaperBackdrops();
-        if (root == null) return;
-        for (int i = 1; i < CELL_SLOT_COUNT; i++) {
-            Slot slot = slots[i];
-            slot.rect = slotBounds(slot);
-            applyRect(slot);
-            updateTouchRegion(slot);
-        }
-        for (int i = 1; i < CELL_SLOT_COUNT; i++) {
-            View backing = sideBackingViews[i];
-            if (backing == null
-                    || !(backing.getLayoutParams() instanceof FrameLayout.LayoutParams)) continue;
-            FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) backing.getLayoutParams();
-            params.leftMargin = target.mainOnRight ? 0 : target.mainWidth;
-            params.topMargin = sideSegmentTop(i);
-            params.width = target.sideWidth;
-            params.height = sideSegmentHeight(i);
-            backing.setLayoutParams(params);
-        }
-        root.requestLayout();
-        root.invalidate();
-    }
+    void applyMainLayout(MiStepLayout target) { cellLayout.applyMainLayout(target); }
 
     /** Only the top strip / side column receive host input; transitions may cover the display. */
-    private void installHostTouchRegion() {
+    void installHostTouchRegion() {
         Class<?> listenerClass = XposedHelpers.findClass(
                 "android.view.ViewTreeObserver$OnComputeInternalInsetsListener", ctx.getClassLoader());
         Object listener = Proxy.newProxyInstance(listenerClass.getClassLoader(),
@@ -2261,7 +1923,7 @@ TopTaskGeometry topGeometry() {
         swapController.swapWithMain(slotIndex);
     }
 
-    private void acquireTransitionInputWindow() { swapController.acquireTransitionInputWindow(); }
+    void acquireTransitionInputWindow() { swapController.acquireTransitionInputWindow(); }
 
     private void releaseTransitionInputWindow() { swapController.releaseTransitionInputWindow(); }
 
@@ -2275,7 +1937,7 @@ TopTaskGeometry topGeometry() {
         swapController.drawLiveEmptyHints(canvas, original, target, revealEmptySlots);
     }
 
-    private boolean holdsLiveFlipZoom() { return swapController.holdsLiveFlipZoom(); }
+    boolean holdsLiveFlipZoom() { return swapController.holdsLiveFlipZoom(); }
 
     void finishLiveSwap(Promotion ticket, MiStepLiveSwap.Result result) { swapController.finishLiveSwap(ticket, result); }
 
@@ -2411,7 +2073,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void syncSlotWindowState(Slot slot) {
+    void syncSlotWindowState(Slot slot) {
         if (slot != null && slot.windowState != null) {
             slot.windowState.slotIndex = slot.index;
         }
@@ -2851,161 +2513,17 @@ TopTaskGeometry topGeometry() {
     /**
      * v0.9.9：副格是"栈"——某个格子空了，后面的占用格子自动往上排（官方 SideAreaStackView 的紧凑排列）。
      */
-    void compactCells() {
-        if (root == null || layout == null) return;
-        if (scene != ACTIVE || promotion != null || transferBusy || cellMotion != null) {
-            compactPending = true;
-            return;
-        }
-        // Pending callbacks and an active host gesture keep their owner geometry fixed.
-        for (Slot s : slots) {
-            if (s.promoting || s.launching || s.closing || s.nativeReleasePending
-                    || s.bufferedDown != null || s.injecting) {
-                compactPending = true;
-                return;
-            }
-        }
-        compactPending = false;
-        publishDesktopSideTasks();
-        java.util.List<CellMovePlan> moves = new java.util.ArrayList<>();
-        int initialEmptySlots = 0;
-        for (Slot slot : slots) if (slot.index > SLOT_MAIN && !slot.occupied)
-            initialEmptySlots |= 1 << slot.index;
-        for (int i = 1; i < CELL_SLOT_COUNT - 1; i++) {
-            Slot cur = slots[i];
-            if (cur.occupied) {
-                continue;
-            }
-            for (int j = i + 1; j < CELL_SLOT_COUNT; j++) {
-                Slot next = slots[j];
-                if (!next.occupied) {
-                    continue;
-                }
-                log("compactCells: slot" + j + " -> slot" + i + " (" + next.pkg + ")");
-                recycleBuffered(cur);
-                recycleBuffered(next);
-                Rect oldRect = next.rect == null ? null : new Rect(
-                        next.rect[0], next.rect[1], next.rect[2], next.rect[3]);
-                SlotPositions.swap(slots, i, j);
-                syncSlotWindowState(slots[i]);
-                syncSlotWindowState(slots[j]);
-                cur.rect = layout.cellBounds(cur.index - 1);
-                next.rect = layout.cellBounds(next.index - 1);
-                if (oldRect != null) {
-                    moves.add(new CellMovePlan(next, oldRect));
-                }
-                break;
-            }
-        }
-        if (!moves.isEmpty()) animateCellMoves(moves, initialEmptySlots);
-    }
+    void compactCells() { cellLayout.compactCells(); }
 
-    void requestCompaction() {
-        if (scene != ACTIVE || root == null) return;
-        compactPending = true;
-        main.post(this::compactCells);
-    }
+    void requestCompaction() { cellLayout.requestCompaction(); }
 
-    private void finishCellLayout() {
-        updateTopTaskGeometry();
-        for (int i = 1; i < SLOT_COUNT; i++) {
-            Slot slot = slots[i];
-            applyRect(slot);
-            updateHint(slot);
-            updateTouchRegion(slot);
-            reapplyScale(slot);
-        }
-        applyWallpaperBackdrops();
-        publishDesktopSideTasks();
-        if (root != null) { root.requestLayout(); root.invalidate(); }
-    }
+    private void finishCellLayout() { cellLayout.finishCellLayout(); }
 
-    private boolean cellMoveCurrent(Slot slot, FrameLayout movingRoot, long epoch, long binding,
-            int id, Object token, Object controller, View movingView, Object surface) {
-        String changed = root != movingRoot ? "root" : sceneEpoch != epoch ? "scene"
-                : !isActive(slot) ? "slot" : slot.taskEpoch != binding ? "binding"
-                : slot.taskId != id ? "task" : !java.util.Objects.equals(slot.taskToken, token) ? "token"
-                : slot.controller != controller ? "controller" : slot.view != movingView ? "view"
-                : getSurfaceField(controller, "mSurfaceControl") != surface ? "surface"
-                : !Boolean.TRUE.equals(XposedHelpers.callMethod(surface, "isValid")) ? "invalid surface" : null;
-        if (changed != null) log("real cell motion binding changed: " + changed + " slot=" + slot.index
-                + " task=" + id + " current=" + slot.taskId);
-        return changed == null;
-    }
+    private boolean cellMoveCurrent(Slot slot, FrameLayout movingRoot, long epoch, long binding,            int id, Object token, Object controller, View movingView, Object surface) { return cellLayout.cellMoveCurrent(slot, movingRoot, epoch, binding, id, token, controller, movingView, surface); }
 
-    private static int compactionHintMask(int initialEmptySlots, int occupiedSlots) { return HostStaticUtil.compactionHintMask(initialEmptySlots, occupiedSlots); }
+    static int compactionHintMask(int initialEmptySlots, int occupiedSlots) { return HostCellLayoutController.compactionHintMask(initialEmptySlots, occupiedSlots); }
 
-    private void animateCellMoves(java.util.List<CellMovePlan> plans, int initialEmptySlots) {
-        final FrameLayout movingRoot = root;
-        final long epoch = sceneEpoch;
-        final java.util.List<MiStepCellMotion.Move> moves = new java.util.ArrayList<>();
-        final java.util.List<LiveSwapVisualLease> hints = new java.util.ArrayList<>();
-        MiStepLiveBackdrop wallpaper = null;
-        try {
-            int occupiedSlots = 0;
-            for (Slot slot : slots) if (slot.index > SLOT_MAIN && slot.occupied)
-                occupiedSlots |= 1 << slot.index;
-            for (CellMovePlan plan : plans) {
-                Slot slot = plan.slot;
-                final long binding = slot.taskEpoch;
-                final int id = slot.taskId;
-                final Object token = slot.taskToken, controller = slot.controller;
-                final Object surface = getSurfaceField(controller, "mSurfaceControl");
-                if (!canRender(slot) || surface == null) continue;
-                final View movingView = slot.view;
-                moves.add(new MiStepCellMotion.Move(movingView, plan.from.left, plan.from.top,
-                        slot.rect[0], slot.rect[1], () -> cellMoveCurrent(slot, movingRoot, epoch, binding,
-                        id, token, controller, movingView, surface)));
-            }
-            if (moves.isEmpty()) { finishCellLayout(); return; }
-            // Preserve existing empty pluses and reveal vacated sources. An occupied
-            // intermediate destination never acquires a one-frame '+' during travel.
-            final int revealEmptySlots = compactionHintMask(initialEmptySlots, occupiedSlots);
-            final MiStepLayout motionGeometry = layout;
-            Rect strip = liveSideStrip(motionGeometry);
-            wallpaper = MiStepLiveBackdrop.create(liveHostRootSurface(), wallpaperBackdrop, screenW, screenH,
-                    strip, strip, canvas -> drawLiveEmptyHints(canvas, motionGeometry, motionGeometry,
-                            revealEmptySlots), MiStepHost::log);
-            // One wallpaper/plus owner covers the complete strip during compaction.
-            // Static backings otherwise cover its pluses and reappear between layouts.
-            for (Slot slot : slots) if (slot.index > 0)
-                hints.add(new LiveSwapVisualLease(sideBackingViews[slot.index], slot.hint));
-            final MiStepLiveBackdrop backing = wallpaper;
-            final MiStepCellMotion[] run = new MiStepCellMotion[1];
-            run[0] = new MiStepCellMotion(movingRoot, moves,
-                    () -> {
-                        if (root != movingRoot || sceneEpoch != epoch) return;
-                        finishCellLayout();
-                        // Restore Host chrome in the SAME draw that retires the temporary
-                        // layer, before waiting for that frame's committed callback.
-                        for (LiveSwapVisualLease hint : hints) hint.restore();
-                        backing.closeAfterFrame(movingRoot);
-                    },
-                    () -> {
-                        for (LiveSwapVisualLease hint : hints) hint.restore();
-                        movingRoot.invalidate();
-                        backing.closeAfterFrame(movingRoot);
-                        if (cellMotion != run[0]) return;
-                        cellMotion = null;
-                        transferBusy = false;
-                        // finishCellLayout ran while cellMotion still owned visibility.
-                        // Reconcile now, including the empty old source's resize background.
-                        for (Slot cell : slots) updateCellSurfaceVisibility(cell);
-                        if (compactPending) compactCells();
-                        finishPendingSuspend();
-                    }, MiStepHost::log);
-            cellMotion = run[0];
-            transferBusy = true;
-            run[0].start();
-        } catch (Throwable error) {
-            for (LiveSwapVisualLease hint : hints) hint.restore();
-            if (wallpaper != null) wallpaper.closeAfterFrame(movingRoot);
-            cellMotion = null;
-            transferBusy = false;
-            finishCellLayout();
-            log("real cell motion unavailable: " + error);
-        }
-    }
+    private void animateCellMoves(java.util.List<CellMovePlan> plans, int initialEmptySlots) { cellLayout.animateCellMoves(plans, initialEmptySlots); }
 
     /** 诊断用：从 RunningTaskInfo 里取 appCompatTaskInfo.topActivityAppBounds（px）。 */
     private static String appBoundsOf(Object info) { return HostStaticUtil.appBoundsOf(info); }
@@ -3160,11 +2678,11 @@ TopTaskGeometry topGeometry() {
 
     // ---------------------------------------------------------------- v0.9 等比缩小（自绘矩阵）
 
-    private float mainScale() {
+    float mainScale() {
         return layout.mainScale;
     }
 
-    private float cellScale() {
+    float cellScale() {
         return layout.cellScale(0);
     }
 
