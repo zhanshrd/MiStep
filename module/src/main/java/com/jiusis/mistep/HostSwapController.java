@@ -22,15 +22,17 @@ import de.robv.android.xposed.XposedHelpers;
  * 状态字段 sideDismiss / sideDismissSlot 留在宿主（suspend 等路径也在用），经 h.* 读写。
  */
 final class HostSwapController {
-    private final MiStepHost h;
+    final MiStepHost h;
+    private final HostLiveSwapFinishController finishCtl;
 
     HostSwapController(MiStepHost host) {
+        finishCtl = new HostLiveSwapFinishController(this, host);
         h = host;
     }
 
     private View transitionInputWindow;
-    private BroadcastReceiver liveZoomReceiver;
-    private LiveZoomRequest pendingLiveZoom;
+    BroadcastReceiver liveZoomReceiver;
+    LiveZoomRequest pendingLiveZoom;
 
     // ---------------------------------------------------------------- v0.9 触摸仲裁与定向注入
 
@@ -859,337 +861,30 @@ final class HostSwapController {
     }
 
     /** Commit the Host visual/input hole itself before moving real tasks below its window. */
-    void afterLiveHostFrame(Promotion ticket, Runnable action) {
-        final View drawingRoot = h.root;
-        if (!h.externalPromotionCurrent(ticket) || drawingRoot == null
-                || !drawingRoot.isAttachedToWindow() || !drawingRoot.isHardwareAccelerated()) {
-            h.failPromotion(ticket, "live Host draw cannot commit");
-            return;
-        }
-        try {
-            drawingRoot.getViewTreeObserver().registerFrameCommitCallback(() -> h.main.post(() -> {
-                if (h.root == drawingRoot && h.externalPromotionCurrent(ticket)) action.run();
-                else h.failPromotion(ticket, "live Host frame scene changed");
-            }));
-            drawingRoot.invalidate();
-        } catch (Throwable error) { h.failPromotion(ticket, "live Host frame registration: " + error); }
-    }
+    void afterLiveHostFrame(Promotion ticket, Runnable action) { finishCtl.afterLiveHostFrame(ticket, action); }
 
-    boolean holdsLiveFlipZoom() {
-        Promotion active = h.promotion;
-        return active != null && active.nativeFlip && !active.cancelled;
-    }
+    boolean holdsLiveFlipZoom() { return finishCtl.holdsLiveFlipZoom(); }
 
     /** Recovery may run after screen-off, so this deliberately omits entry-only guards. */
-    boolean livePromotionBound(Promotion ticket) {
-        return h.promotion == ticket && !ticket.cancelled && h.isActive(ticket.slot)
-                && h.sceneEpoch == ticket.sceneEpoch && ticket.slot.taskEpoch == ticket.bindingEpoch
-                && ticket.slot.taskId == ticket.taskId && ticket.token.equals(ticket.slot.taskToken);
-    }
+    boolean livePromotionBound(Promotion ticket) { return finishCtl.livePromotionBound(ticket); }
 
-    private final class LiveZoomRequest implements Runnable {
-        final Promotion ticket;
-        final LiveSwapZoom.Zoom expected;
-        final java.util.function.Consumer<LiveSwapZoom.Ack> completed;
-        boolean delivered;
-        LiveZoomRequest(Promotion ticket, LiveSwapZoom.Zoom expected,
-                java.util.function.Consumer<LiveSwapZoom.Ack> completed) {
-            this.ticket = ticket; this.expected = expected; this.completed = completed;
-        }
-        void complete(LiveSwapZoom.Ack ack) {
-            if (delivered) return;
-            delivered = true;
-            h.main.removeCallbacks(this);
-            if (pendingLiveZoom == this) pendingLiveZoom = null;
-            completed.accept(ack);
-        }
-        void failed(String reason) {
-            complete(new LiveSwapZoom.Ack(expected.generation, 0L,
-                    expected.scale, expected.x, expected.y, false, reason));
-        }
-        @Override public void run() { failed("WMS live zoom commit timed out"); }
-    }
 
-    private boolean registerLiveZoomReceiver() {
-        if (liveZoomReceiver != null) return true;
-        BroadcastReceiver receiver = new BroadcastReceiver() {
-            @Override public void onReceive(Context context, Intent intent) {
-                LiveZoomRequest pending = pendingLiveZoom;
-                if (intent == null || !LiveSwapZoomProtocol.ACK.equals(intent.getAction())) return;
-                Object replay;
-                try {
-                    replay = intent.getParcelableExtra(LiveSwapZoomProtocol.FINISH_REPLAY,
-                            android.view.SurfaceControl.Transaction.class);
-                } catch (RuntimeException unreadable) {
-                    if (pending != null) pending.failed("WMS finish replay parcel unreadable");
-                    return;
-                }
-                if (pending == null || intent == null
-                        || !LiveSwapZoomProtocol.ACK.equals(intent.getAction())
-                        || intent.getLongExtra(LiveSwapZoomProtocol.GENERATION, -1L)
-                                != pending.expected.generation) {
-                    LiveSwapZoom.closeReplay(replay); return;
-                }
-                if (!livePromotionBound(pending.ticket)) {
-                    LiveSwapZoom.closeReplay(replay);
-                    pending.failed("live zoom ticket changed before WMS commit");
-                    return;
-                }
-                pending.complete(new LiveSwapZoom.Ack(pending.expected.generation,
-                        intent.getLongExtra(LiveSwapZoomProtocol.TRANSACTION, 0L),
-                        Float.intBitsToFloat(intent.getIntExtra(LiveSwapZoomProtocol.SCALE, 0)),
-                        Float.intBitsToFloat(intent.getIntExtra(LiveSwapZoomProtocol.X, 0)),
-                        Float.intBitsToFloat(intent.getIntExtra(LiveSwapZoomProtocol.Y, 0)),
-                        intent.getBooleanExtra(LiveSwapZoomProtocol.COMMITTED, false),
-                        intent.getStringExtra(LiveSwapZoomProtocol.ERROR), replay));
-            }
-        };
-        try {
-            h.ctx.registerReceiver(receiver, new IntentFilter(LiveSwapZoomProtocol.ACK),
-                    LiveSwapZoomProtocol.PERMISSION, h.main, Context.RECEIVER_EXPORTED);
-            liveZoomReceiver = receiver;
-            return true;
-        } catch (Throwable error) {
-            MiStepHost.log("live zoom receiver unavailable: " + error);
-            return false;
-        }
-    }
+    private boolean registerLiveZoomReceiver() { return finishCtl.registerLiveZoomReceiver(); }
 
     /** WMS acknowledgement only; the native driver separately awaits the Host h.layout frame. */
-    private void applyLiveZoom(Promotion ticket, LiveSwapZoom.Zoom target,
-            java.util.function.Consumer<LiveSwapZoom.Ack> completed) {
-        h.main.post(() -> {
-            LiveZoomRequest request = new LiveZoomRequest(ticket, target, completed);
-            if (!livePromotionBound(ticket) || !ticket.nativeFlip
-                    || !registerLiveZoomReceiver()) {
-                request.failed("live zoom ticket/receiver unavailable");
-                return;
-            }
-            if (pendingLiveZoom != null) pendingLiveZoom.failed("live zoom superseded by recovery");
-            pendingLiveZoom = request;
-            h.zoomCommandGeneration = Math.max(h.zoomCommandGeneration, target.generation);
-            h.zoomAnimUntil = SystemClock.uptimeMillis() + LiveSwapZoomProtocol.REQUEST_TIMEOUT_MS;
-            ticket.liveZoomGuardUntil = h.zoomAnimUntil;
-            long issuedAt = System.currentTimeMillis();
-            // ZOOM64 renews the WM lease itself. Ordinary transports would eagerly
-            // reset the leashes while they still belong to the animation parent.
-            // Publish their steady tuple only after the native finish commits.
-            Intent intent = new Intent(LiveSwapZoomProtocol.APPLY).setPackage("android");
-            intent.putExtra(LiveSwapZoomProtocol.GENERATION, target.generation);
-            intent.putExtra(LiveSwapZoomProtocol.SCALE, Float.floatToIntBits(target.scale));
-            intent.putExtra(LiveSwapZoomProtocol.X, Float.floatToIntBits(target.x));
-            intent.putExtra(LiveSwapZoomProtocol.Y, Float.floatToIntBits(target.y));
-            intent.putExtra(LiveSwapZoomProtocol.ISSUED, issuedAt);
-            intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY);
-            h.main.postDelayed(request, LiveSwapZoomProtocol.REQUEST_TIMEOUT_MS);
-            try { h.ctx.sendBroadcast(intent, LiveSwapZoomProtocol.PERMISSION); }
-            catch (Throwable error) { request.failed("live zoom dispatch failed: " + error); }
-        });
-    }
+    private void applyLiveZoom(Promotion ticket, LiveSwapZoom.Zoom target,            java.util.function.Consumer<LiveSwapZoom.Ack> completed) { finishCtl.applyLiveZoom(ticket, target, completed); }
 
     /** This callback confirms only the target Host frame, never the WMS scaling transaction. */
-    private void applyLiveMainLayout(Promotion ticket, LiveSwapZoom.Zoom zoom, boolean restoring,
-            java.util.function.Consumer<LiveSwapZoom.FrameAck> completed) {
-        h.main.post(() -> {
-            MiStepLayout target = restoring ? ticket.previousLayout : ticket.targetLayout;
-            View drawingRoot = h.root;
-            java.util.concurrent.atomic.AtomicBoolean delivered = new java.util.concurrent.atomic.AtomicBoolean();
-            java.util.function.Consumer<String> fail = error -> {
-                if (delivered.compareAndSet(false, true))
-                    completed.accept(new LiveSwapZoom.FrameAck(zoom.generation, false, error));
-            };
-            if (!livePromotionBound(ticket) || !ticket.nativeFlip || target == null
-                    || !zoom.sameTuple(target.mainScale, target.mainOffsetX, target.mainOffsetY)
-                    || drawingRoot == null || !drawingRoot.isAttachedToWindow()
-                    || !drawingRoot.isHardwareAccelerated()) {
-                fail.accept("live Host layout generation/scene unavailable");
-                return;
-            }
-            Runnable timeout = () -> fail.accept("live Host layout frame timed out");
-            try {
-                drawingRoot.getViewTreeObserver().registerFrameCommitCallback(() -> h.main.post(() -> {
-                    if (!livePromotionBound(ticket) || h.root != drawingRoot || h.layout != target) {
-                        fail.accept("live Host layout changed before frame commit");
-                    } else if (delivered.compareAndSet(false, true)) {
-                        h.main.removeCallbacks(timeout);
-                        completed.accept(new LiveSwapZoom.FrameAck(zoom.generation, true, null));
-                    }
-                }));
-                h.main.postDelayed(timeout, LiveSwapZoomProtocol.REQUEST_TIMEOUT_MS);
-                h.applyMainLayout(target);
-            } catch (Throwable error) {
-                h.main.removeCallbacks(timeout);
-                fail.accept("live Host layout failed: " + error);
-            }
-        });
-    }
+    private void applyLiveMainLayout(Promotion ticket, LiveSwapZoom.Zoom zoom, boolean restoring,            java.util.function.Consumer<LiveSwapZoom.FrameAck> completed) { finishCtl.applyLiveMainLayout(ticket, zoom, restoring, completed); }
 
     /** Already on Shell's completion turn, after exact roles and the finish Surface commit. */
-    void finishLiveResult(Promotion ticket, MiStepLiveSwap.Result result) {
-        boolean mainReady = result.rolesConfirmed && (ticket.nativeCollect ? result.sideOwned
-                : ticket.nativeHome ? result.succeeded && !result.sideOwned : result.sideOwned);
-        if (mainReady && h.externalPromotionCurrent(ticket)) {
-            try { ticket.liveMainFocusResult = requestLiveMainFocus(ticket); }
-            catch (Throwable error) {
-                ticket.liveMainFocusResult = PromotionFocusTransfer.Result.UNAVAILABLE;
-                MiStepHost.log("live main focus request unavailable: " + error);
-            }
-            ticket.liveMainFocusPrepared = true;
-            MiStepHost.log("live main focus result=" + ticket.liveMainFocusResult + " task="
-                    + (ticket.nativeCollect ? ticket.collectionHome == null ? -1
-                            : ticket.collectionHome.id : ticket.taskId)
-                    + " uptime=" + SystemClock.uptimeMillis());
-        }
-        h.main.post(() -> {
-            if (ticket.nativeCollect) finishLiveCollect(ticket, result);
-            else if (ticket.nativeHome) finishLiveHome(ticket, result);
-            else finishLiveSwap(ticket, result);
-        });
-    }
+    void finishLiveResult(Promotion ticket, MiStepLiveSwap.Result result) { finishCtl.finishLiveResult(ticket, result); }
 
-    private PromotionFocusTransfer.Result requestLiveMainFocus(Promotion ticket) throws Exception {
-        final LiveTask home = ticket.nativeCollect ? ticket.collectionHome : null;
-        if (ticket.nativeCollect && home == null) return PromotionFocusTransfer.Result.UNAVAILABLE;
-        final int id = home == null ? ticket.taskId : home.id;
-        final Object token = home == null ? ticket.token : home.token;
-        final int user = ticket.liveMainUserId;
-        if (user < 0) return PromotionFocusTransfer.Result.UNAVAILABLE;
-        Object service = XposedHelpers.callStaticMethod(
-                Class.forName("android.app.ActivityTaskManager"), "getService");
-        java.util.List<?> roots = (java.util.List<?>) XposedHelpers.callMethod(service, "getAllRootTaskInfos");
-        if (home != null) for (Object info : roots) {
-            if (XposedHelpers.getIntField(info, "displayId") != 0
-                    || !XposedHelpers.getBooleanField(info, "isFocused")) continue;
-            Object focused = XposedHelpers.getObjectField(info, "token");
-            // A new h.main app or native freeform has priority over returning Home.
-            // The collected task and other exact side tasks never own h.main input.
-            if (!token.equals(focused) && !ticket.token.equals(focused)
-                    && !ticket.otherSideTokens.contains(focused))
-                return PromotionFocusTransfer.Result.UNAVAILABLE;
-        }
-        return PromotionFocusTransfer.request(new PromotionFocusTransfer.Tasks() {
-            public PromotionFocusTransfer.State read(int taskId) {
-                for (Object info : roots) {
-                    if (XposedHelpers.getIntField(info, "taskId") != taskId
-                            || (home == null ? !h.ordinaryRoot(info, 1)
-                                    : !h.isHomeRoot(info) || h.windowModeOf(info) != 1)) continue;
-                    return new PromotionFocusTransfer.State(XposedHelpers.getObjectField(info, "token"),
-                            XposedHelpers.getIntField(info, "displayId"),
-                            XposedHelpers.getIntField(info, "userId"), h.windowModeOf(info),
-                            h.mainTaskVisible(info),
-                            XposedHelpers.getBooleanField(info, "isFocused"));
-                }
-                return null;
-            }
-            public void focus(int taskId) { XposedHelpers.callMethod(service, "setFocusedTask", taskId); }
-        }, id, token, user);
-    }
+    private PromotionFocusTransfer.Result requestLiveMainFocus(Promotion ticket) throws Exception { return finishCtl.requestLiveMainFocus(ticket); }
 
-    void finishLiveSwap(Promotion ticket, MiStepLiveSwap.Result result) {
-        if (h.promotion != ticket || ticket.cancelled || ticket.nativeCompleting || !h.isActive(ticket.slot)) return;
-        if (h.sceneEpoch != ticket.sceneEpoch || ticket.slot.taskEpoch != ticket.bindingEpoch
-                || ticket.slot.taskId != ticket.taskId || !ticket.token.equals(ticket.slot.taskToken)) {
-            MiStepHost.log("stale native completion rejected; scene or original slot binding changed");
-            forceAbandonLivePromotion(ticket, "stale native completion", true);
-            return;
-        }
-        ticket.nativeCompleting = true;
-        // This is a confirmed native finish, after the exact WMS/Host commits.
-        // REQUEST_TIMEOUT_MS is a pending-request deadline, not a tap cooldown.
-        if (result.rolesConfirmed && ticket.nativeFlip && pendingLiveZoom == null
-                && ticket.liveZoomGuardUntil > 0L && h.zoomAnimUntil == ticket.liveZoomGuardUntil) {
-            h.zoomAnimUntil = 0L;
-            h.writeZoom(true);
-        }
-        Slot slot = ticket.slot;
-        if (result.sideOwned) {
-            // Facade has retired B and bound the same controller to A already.
-            // Clear only the old logical slot; never adopt/relaunch A a second time.
-            h.ownedTasks.remove(ticket.token);
-            h.clearSlot(slot);
-            h.bindTask(slot, ticket.previousMain.id, ticket.previousMain.token);
-            if (ticket.previousMainCandidate != null) ticket.previousMainCandidate.recoveryCandidate = false;
-            slot.pkg = ticket.previousMain.pkg;
-            slot.occupied = true;
-            slot.taskVisible = true;
-            slot.windowMode = 6;
-            slot.promoting = false;
-            slot.launching = false;
-            slot.parked = false;
-            h.updateHint(slot);
-            h.finishPromotionFocus(ticket, () -> {
-                if (h.promotion != ticket || ticket.cancelled) return;
-                h.traceSwapEvent("single-native-finish-and-focus");
-                ticket.cancelled = true;
-                h.promotion = null;
-                h.coveredHome = null;
-                restoreLiveSwapVisual(ticket);
-                h.statusBar.finish(ticket);
-                h.publishDesktopSideTasks();
-                MiStepHost.log("single native swap roles settled main=" + ticket.taskId + " side="
-                        + slot.taskId + " animated=" + result.succeeded + " error=" + result.error);
-                h.finishPendingSuspend();
-            }, 0);
-        } else {
-            ticket.cancelled = true;
-            h.promotion = null;
-            boolean original = h.controllerOwns(slot, ticket.taskId, ticket.token)
-                    && h.mayWriteSideSurface(slot) && result.rolesConfirmed;
-            if (original) {
-                if (ticket.previousMainCandidate != null)
-                    h.ownedTasks.remove(ticket.previousMainCandidate.token, ticket.previousMainCandidate);
-                OwnedTask retained = h.ownedTasks.get(ticket.token);
-                if (retained != null) retained.recoveryCandidate = false;
-            } else if (!ticket.nativeSubmitted && ticket.previousMainCandidate != null) {
-                // Facade refused before a WCT, so this fullscreen A was never ours.
-                h.ownedTasks.remove(ticket.previousMainCandidate.token, ticket.previousMainCandidate);
-            }
-            slot.promoting = !original;
-            slot.frozen = !original;
-            restoreLiveSwapVisual(ticket);
-            h.statusBar.finish(ticket);
-            h.publishDesktopSideTasks();
-            MiStepHost.log("single native swap unconfirmed; original side retained=" + original + " error=" + result.error);
-            h.finishPendingSuspend();
-        }
-    }
+    void finishLiveSwap(Promotion ticket, MiStepLiveSwap.Result result) { finishCtl.finishLiveSwap(ticket, result); }
 
-    void finishLiveHome(Promotion ticket, MiStepLiveSwap.Result result) {
-        if (ticket.nativeCompleting) return;
-        if (!livePromotionBound(ticket)) {
-            if (h.promotion == ticket && !ticket.cancelled)
-                forceAbandonLivePromotion(ticket, "stale live home completion", true);
-            return;
-        }
-        ticket.nativeCompleting = true;
-        Slot slot = ticket.slot;
-        if (result.succeeded && !result.sideOwned && result.rolesConfirmed) {
-            // The facade already gave B to the existing fullscreen listener and committed finishT.
-            ticket.handoffAttempted = ticket.handoffComplete = true;
-            h.ownedTasks.remove(ticket.token);
-            h.clearSlot(slot);
-            h.finishPromotionFocus(ticket, () -> {
-                if (h.promotion != ticket || ticket.cancelled) return;
-                restoreLiveSwapVisual(ticket);
-                h.statusBar.finish(ticket);
-                h.completeHomePromotion(ticket);
-            }, 0);
-        } else {
-            boolean original = result.sideOwned && result.rolesConfirmed
-                    && h.controllerOwns(slot, ticket.taskId, ticket.token) && h.mayWriteSideSurface(slot);
-            OwnedTask retained = h.ownedTasks.get(ticket.token);
-            if (retained != null && original) retained.recoveryCandidate = false;
-            ticket.cancelled = true;
-            h.promotion = null;
-            slot.promoting = !original;
-            slot.frozen = !original;
-            restoreLiveSwapVisual(ticket);
-            h.statusBar.finish(ticket);
-            h.publishDesktopSideTasks();
-            MiStepHost.log("live Home promotion unconfirmed; original side retained=" + original + " error=" + result.error);
-            h.finishPendingSuspend();
-        }
-    }
+    void finishLiveHome(Promotion ticket, MiStepLiveSwap.Result result) { finishCtl.finishLiveHome(ticket, result); }
 
     /** Last-resort teardown when the native cancellation path is proven inert (watchdog
      *  force) or a completion arrives stale: releases every global latch with NO WM
@@ -1200,51 +895,7 @@ final class HostSwapController {
      *  inert-cancellation wedge, where a transition may still be mid-flight and
      *  reconciliation would fight it; it heals at session exit per the
      *  unconfirmed-completion convention. */
-    void forceAbandonLivePromotion(Promotion ticket, String reason, boolean keepCellUnfrozen) {
-        if (h.promotion != ticket || ticket.cancelled) return;
-        ticket.cancelled = true;
-        h.promotion = null;
-        Slot slot = ticket.slot;
-        slot.promoting = !keepCellUnfrozen;
-        slot.frozen = !keepCellUnfrozen;
-        restoreLiveSwapVisual(ticket);
-        // 对齐 completeLiveCollect 约定：按槽位状态重新推导提示与触区
-        // （collect 的 prepareCollectHandoff 在租约外把 hint 置 GONE，必须显式恢复）。
-        h.updateHint(slot);
-        h.updateTouchRegion(slot);
-        h.statusBar.finish(ticket);
-        h.publishDesktopSideTasks();
-        MiStepHost.log("native promotion force-abandoned; cell frozen=" + !keepCellUnfrozen + ": " + reason);
-        h.finishPendingSuspend();
-    }
+    void forceAbandonLivePromotion(Promotion ticket, String reason, boolean keepCellUnfrozen) { finishCtl.forceAbandonLivePromotion(ticket, reason, keepCellUnfrozen); }
 
-    void restoreLiveSwapVisual(Promotion ticket) {
-        LiveSwapVisualLease visual = ticket.liveVisual;
-        ticket.liveVisual = null;
-        if (visual != null) visual.restore();
-        for (LiveSwapVisualLease peer : ticket.peerVisuals) peer.restore();
-        ticket.peerVisuals.clear();
-        // Native ownership and the final logical bindings now agree. Reconcile
-        // once, after the replacement, rather than hiding between clear/bind.
-        for (Slot cell : h.slots) if (cell.index > MiStepHost.SLOT_MAIN) h.updateCellSurfaceVisibility(cell);
-        if (h.root != null) { h.root.requestLayout(); h.root.invalidate(); }
-        if (ticket.liveBackdrop != null) {
-            ticket.liveBackdrop.closeAfterFrame(h.root); ticket.liveBackdrop = null;
-        }
-        if (h.geometryRefreshAfterLive) {
-            h.geometryRefreshAfterLive = false;
-            h.scheduleDisplayGeometryRefresh();
-        }
-        // The draw also restores backing/hints and removes the wallpaper lease.
-        // A gesture begun while the real tasks were borrowed remains consumed to UP.
-        setLiveSwapInputBlocked(false);
-        h.resumeNotificationLaunch(ticket);
-        // The WMS ACK receiver outlived its consumer once the ticket is done; park it.
-        // registerLiveZoomReceiver lazily re-arms it on the next flip.
-        if (pendingLiveZoom == null && liveZoomReceiver != null) {
-            try { h.ctx.unregisterReceiver(liveZoomReceiver); }
-            catch (Throwable error) { MiStepHost.log("live zoom receiver unregister failed: " + error); }
-            liveZoomReceiver = null;
-        }
-    }
+    void restoreLiveSwapVisual(Promotion ticket) { finishCtl.restoreLiveSwapVisual(ticket); }
 }
