@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostSurfaceController surfaceCtl;
     final HostGeometryController geometry;
     final HostDebugController debugCtrl;
     private View sideBacking;
@@ -141,10 +142,10 @@ public final class MiStepHost {
     boolean suspendRequested;
     boolean landscapeSuspended;
     boolean transferBusy;
-    private boolean overlayRefreshScheduled;
+    boolean overlayRefreshScheduled;
     static boolean boundsHooksReady;
-    private static boolean surfaceHooksReady;
-    private Object surfaceObserver;
+    static boolean surfaceHooksReady;
+    Object surfaceObserver;
     volatile boolean traceNextSwap;
     volatile MiStepSwapTrace swapTrace;
     boolean compactPending;
@@ -160,8 +161,8 @@ public final class MiStepHost {
     MiStepTransitionInput transitionInput;
     private final android.os.IBinder desktopSceneOwner = new android.os.Binder();
     private volatile long desktopRegistrationSequence;
-    private final FinishTransactions<RenderBinding> finishTransactions = new FinishTransactions<>(16);
-    private final FinishTransactions<Long> workspaceFinishes = new FinishTransactions<>(16);
+    final FinishTransactions<RenderBinding> finishTransactions = new FinishTransactions<>(16);
+    final FinishTransactions<Long> workspaceFinishes = new FinishTransactions<>(16);
 
     final java.util.Map<Object, OwnedTask> ownedTasks = new java.util.HashMap<>();
 
@@ -257,8 +258,8 @@ public final class MiStepHost {
         OwnedTask(int id, Object token) { this.id = id; this.token = token; }
     }
 
-    private final FinishTransactions<NativeObservation> nativeObservations = new FinishTransactions<>(16);
-    private volatile NativeObservation pendingNativeObservation;
+    final FinishTransactions<NativeObservation> nativeObservations = new FinishTransactions<>(16);
+    volatile NativeObservation pendingNativeObservation;
 
     /** One commit signal or the bounded watchdog starts the same state verification. */
     final class NativeObservation implements Runnable {
@@ -454,6 +455,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        surfaceCtl = new HostSurfaceController(this);
         geometry = new HostGeometryController(this);
         debugCtrl = new HostDebugController(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
@@ -972,7 +974,7 @@ TopTaskGeometry topGeometry() {
 
 
 
-    private static final class RenderBinding {
+    static final class RenderBinding {
         final Slot slot;
         final int id;
         final Object token, leash, parent;
@@ -983,232 +985,23 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void installRetainedSurfaces(ClassLoader cl) {
-        if (!surfaceHooksReady) {
-            java.util.List<XC_MethodHook.Unhook> installed = new java.util.ArrayList<>();
-            try {
-                Class<?> tx = Class.forName("android.view.SurfaceControl$Transaction");
-                installed.addAll(XposedBridge.hookAllMethods(tx, "merge", new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam p) {
-                        MiStepHost h = sInstance;
-                        if (h != null && !p.hasThrowable() && p.args.length == 1) {
-                            h.finishTransactions.merge(p.thisObject, p.args[0]);
-                            h.workspaceFinishes.merge(p.thisObject, p.args[0]);
-                            h.nativeObservations.merge(p.thisObject, p.args[0]);
-                        }
-                    }
-                }));
-                installed.addAll(XposedBridge.hookAllMethods(tx, "apply", new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        MiStepHost h = sInstance;
-                        if (h == null) return;
-                        java.util.List<RenderBinding> frames = h.finishTransactions.take(p.thisObject);
-                        if (!frames.isEmpty()) h.appendRetainedSurfaces(p.thisObject, frames);
-                        h.appendWorkspaceSurfaces(p.thisObject, h.workspaceFinishes.take(p.thisObject));
-                        java.util.List<NativeObservation> checks = h.nativeObservations.take(p.thisObject);
-                        if (!checks.isEmpty()) {
-                            try {
-                                Executor uiExecutor = action -> h.main.post(action);
-                                // SDK 37: 监听参数类型是 SurfaceControl$TransactionCommittedListener
-                                //（onTransactionCommitted()）；传 Runnable 会反射失配、提交信号全失。
-                                Class<?> callbackType = XposedHelpers.findClass(
-                                        "android.view.SurfaceControl$TransactionCommittedListener",
-                                        p.thisObject.getClass().getClassLoader());
-                                Object callback = java.lang.reflect.Proxy.newProxyInstance(
-                                        callbackType.getClassLoader(), new Class<?>[]{callbackType},
-                                        (proxy, method, args) -> {
-                                            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
-                                            if ("equals".equals(method.getName())) return args != null && proxy == args[0];
-                                            if ("toString".equals(method.getName())) return "MiStepNativeObservation";
-                                            if ("onTransactionCommitted".equals(method.getName())) {
-                                                for (NativeObservation check : checks) check.run();
-                                            }
-                                            return null;
-                                        });
-                                XposedHelpers.callMethod(p.thisObject, "addTransactionCommittedListener",
-                                        uiExecutor, callback);
-                            } catch (Throwable unavailable) {
-                                log("commit signal unavailable; retain bounded observation watchdog");
-                            }
-                        }
-                    }
-                }));
-                installed.addAll(XposedBridge.hookAllMethods(tx, "close", new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam p) {
-                        MiStepHost h = sInstance;
-                        if (h != null) {
-                            h.finishTransactions.forget(p.thisObject);
-                            h.workspaceFinishes.forget(p.thisObject);
-                            h.nativeObservations.forget(p.thisObject);
-                        }
-                    }
-                }));
-                if (installed.size() < 3) throw new IllegalStateException("missing finish transaction hooks");
-                surfaceHooksReady = true;
-            } catch (Throwable error) {
-                for (XC_MethodHook.Unhook hook : installed) hook.unhook();
-                log("retained surface hooks unavailable: " + error);
-                return;
-            }
-        }
-        executeOnShell(() -> {
-            try {
-                Class<?> iface = XposedHelpers.findClass(
-                        "com.android.wm.shell.transition.Transitions$TransitionObserver", cl);
-                surfaceObserver = Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[]{iface},
-                        (self, method, args) -> {
-                            try {
-                                String name = method.getName();
-                                if ("onTransitionReady".equals(name) && args != null && args.length == 4) {
-                                    MiStepSwapTrace trace = swapTrace;
-                                    if (trace != null) trace.transition(args[1], args[2], args[3]);
-                                    trackRetainedSurfaces(args[1], args[3]);
-                                    scheduleOverlayRefresh();
-                                }
-                                else if ("onTransitionMerged".equals(name)
-                                        || "onTransitionFinished".equals(name)) traceSwapEvent(name);
-                                else if ("hashCode".equals(name)) return System.identityHashCode(self);
-                                else if ("equals".equals(name)) return self == args[0];
-                                else if ("toString".equals(name)) return "MiStepRetainedSurfaceObserver";
-                                // Target onTransitionFinished precedes finishT.apply: never restore here.
-                            } catch (Throwable error) { log("surface observer stopped: " + error); }
-                            return null;
-                        });
-                Object shellTransitions = XposedHelpers.getObjectField(transitions, "mTransitions");
-                XposedHelpers.callMethod(shellTransitions, "registerObserver", surfaceObserver);
-                log("retained surface observer registered; restore only in marked final apply");
-            } catch (Throwable error) { log("surface observer unavailable: " + error); }
-        });
-    }
+    private void installRetainedSurfaces(ClassLoader cl) { surfaceCtl.installRetainedSurfaces(cl); }
 
-    private void trackRetainedSurfaces(Object info, Object finish) {
-        NativeObservation observation = pendingNativeObservation;
-        if (observation != null && !observation.consumed.get()) {
-            java.util.List<?> observedChanges = (java.util.List<?>) XposedHelpers.callMethod(info, "getChanges");
-            for (Object change : observedChanges) {
-                Object task = XposedHelpers.callMethod(change, "getTaskInfo");
-                if (task != null && observation.token.equals(XposedHelpers.getObjectField(task, "token"))) {
-                    nativeObservations.mark(finish, java.util.Collections.singletonList(observation));
-                    break;
-                }
-            }
-        }
-        if (!screenOn || (scene != ACTIVE && scene != RESUMING) || root == null) return;
-        // A main activity's rotation/cleanup can reparent a previously adopted side
-        // task even when that side token is absent from TransitionInfo. Resolve its
-        // current canonical binding at the final apply, after native merges.
-        workspaceFinishes.mark(finish, java.util.Collections.singletonList(sceneEpoch));
-        boolean relevant = promotion != null || transferBusy;
-        for (Slot slot : slots) if (slot.launching) relevant = true;
-        java.util.List<?> changes = (java.util.List<?>) XposedHelpers.callMethod(info, "getChanges");
-        for (Object change : changes) {
-            Object task = XposedHelpers.callMethod(change, "getTaskInfo");
-            if (task == null) continue;
-            Object token = XposedHelpers.getObjectField(task, "token");
-            if (isSideToken(token)) relevant = true;
-        }
-        if (!relevant) return;
-        java.util.List<RenderBinding> frames = new java.util.ArrayList<>();
-        for (Slot slot : slots) {
-            if (!canRender(slot) || !slot.occupied || slot.promoting || slot.launching || slot.frozen
-                    || !mayWriteSideSurface(slot)
-                    || !controllerOwns(slot, slot.taskId, slot.taskToken)) continue;
-            Object leash = getSurfaceField(slot.controller, "mTaskLeash");
-            Object parent = getSurfaceField(slot.controller, "mSurfaceControl");
-            if (leash != null && parent != null && leash != parent)
-                frames.add(new RenderBinding(slot, sceneEpoch, leash, parent));
-        }
-        if (!frames.isEmpty() && !finishTransactions.mark(finish, frames))
-            log("retained finish transaction cap; do not retry or touch unrelated transactions");
-    }
+    private void trackRetainedSurfaces(Object info, Object finish) { surfaceCtl.trackRetainedSurfaces(info, finish); }
 
     /**
      * WindowManager reports this overlay visible throughout fixed-rotation launches,
      * but MIUI can leave its last buffer under the transition until the next redraw.
      * Refresh only around a transition; this does not resize or recreate the host.
      */
-    private void scheduleOverlayRefresh() {
-        if (overlayRefreshScheduled) return;
-        overlayRefreshScheduled = true;
-        main.postDelayed(() -> {
-            overlayRefreshScheduled = false;
-            refreshOverlayAfterTransition();
-        }, 60L);
-        main.postDelayed(this::refreshOverlayAfterTransition, 380L);
-    }
+    private void scheduleOverlayRefresh() { surfaceCtl.scheduleOverlayRefresh(); }
 
-    private void refreshOverlayAfterTransition() {
-        if (scene != ACTIVE || root == null) return;
-        for (Slot slot : slots) if (slot.closing) {
-            main.postDelayed(this::refreshOverlayAfterTransition, 120L);
-            return;
-        }
-        if (swapPreview != null || cellMovePreview != null || promotion != null
-                || transferBusy) {
-            // Relayouting the host window during the visible bridge brings its
-            // SurfaceView children forward for one composition. Retry after handoff.
-            main.postDelayed(this::refreshOverlayAfterTransition, 120L);
-            return;
-        }
-        try {
-            root.setVisibility(View.VISIBLE);
-            root.setAlpha(1f);
-            root.requestLayout();
-            root.invalidate();
-            if (root.getWindowToken() != null && wm != null && lp != null)
-                wm.updateViewLayout(root, lp);
-            log("overlay refreshed for transition");
-        } catch (Throwable error) {
-            log("overlay refresh failed: " + error);
-        }
-    }
+    private void refreshOverlayAfterTransition() { surfaceCtl.refreshOverlayAfterTransition(); }
 
     /** Append after native finish operations have merged, before the very same apply. */
-    private void appendWorkspaceSurfaces(Object tx, java.util.List<Long> epochs) {
-        if (!screenOn || (scene != ACTIVE && scene != RESUMING) || root == null
-                || !epochs.contains(sceneEpoch)) return;
-        java.util.List<RenderBinding> frames = new java.util.ArrayList<>();
-        for (Slot slot : slots) {
-            if (slot.index <= SLOT_MAIN || !canRender(slot) || !slot.occupied
-                    || slot.parked || slot.promoting || slot.launching || slot.frozen
-                    || !mayWriteSideSurface(slot)
-                    || !controllerOwns(slot, slot.taskId, slot.taskToken)) continue;
-            Object leash = getSurfaceField(slot.controller, "mTaskLeash");
-            Object parent = getSurfaceField(slot.controller, "mSurfaceControl");
-            if (leash != null && parent != null && leash != parent)
-                frames.add(new RenderBinding(slot, sceneEpoch, leash, parent));
-        }
-        appendRetainedSurfaces(tx, frames);
-    }
+    void appendWorkspaceSurfaces(Object tx, java.util.List<Long> epochs) { surfaceCtl.appendWorkspaceSurfaces(tx, epochs); }
 
-    private void appendRetainedSurfaces(Object tx, java.util.List<RenderBinding> frames) {
-        java.util.Set<Slot> restored = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-        int count = 0;
-        for (RenderBinding frame : frames) {
-            Slot slot = frame.slot;
-            if (restored.contains(slot) || !canRender(slot) || slot.promoting || slot.launching || slot.frozen
-                    || !mayWriteSideSurface(slot)
-                    || frame.scene != sceneEpoch || frame.binding != slot.taskEpoch
-                    || frame.id != slot.taskId || !frame.token.equals(slot.taskToken)
-                    || !controllerOwns(slot, frame.id, frame.token)
-                    || frame.leash != getSurfaceField(slot.controller, "mTaskLeash")
-                    || frame.parent != getSurfaceField(slot.controller, "mSurfaceControl")) continue;
-            try {
-                // Same parent/crop/position/show contract as target TaskViewTransitions.updateSurface.
-                XposedHelpers.callMethod(tx, "reparent", frame.leash, frame.parent);
-                XposedHelpers.callMethod(tx, "setLayer", frame.leash, 0);
-                XposedHelpers.callMethod(tx, "setPosition", frame.leash, 0f, 0f);
-                XposedHelpers.callMethod(tx, "setWindowCrop", frame.leash, logicalBounds(slot));
-                float scale = scaleFor(slot);
-                XposedHelpers.callMethod(tx, "setMatrix", frame.leash, scale, 0f, 0f, scale);
-                XposedHelpers.callMethod(tx, "setAlpha", frame.leash, 1f);
-                XposedHelpers.callMethod(tx, "show", frame.leash);
-                restored.add(slot);
-                count++;
-            } catch (Throwable error) { log("retained surface skipped task=" + frame.id + ": " + error); }
-        }
-        if (count > 0) log("final transaction retained own side surfaces=" + count);
-    }
+    void appendRetainedSurfaces(Object tx, java.util.List<RenderBinding> frames) { surfaceCtl.appendRetainedSurfaces(tx, frames); }
 
 
     void setZoomState(boolean on) {
@@ -2559,7 +2352,7 @@ TopTaskGeometry topGeometry() {
                 && slot.index < SLOT_COUNT && slots[slot.index] == slot;
     }
 
-    private boolean canRender(Slot slot) {
+    boolean canRender(Slot slot) {
         return isActive(slot) && !slot.parked && screenOn
                 && (scene == ACTIVE || scene == RESUMING)
                 && root.getVisibility() == View.VISIBLE;
@@ -3376,7 +3169,7 @@ TopTaskGeometry topGeometry() {
     }
 
     /** Only side tasks are hosted; the system handles main-screen scaling. */
-    private float scaleFor(Slot slot) {
+    float scaleFor(Slot slot) {
         return slot.index == SLOT_TOP ? topGeometry().scale : layout.cellScale(slot.index - 1);
     }
 
@@ -3496,30 +3289,10 @@ TopTaskGeometry topGeometry() {
     }
 
     /** A late mode6 finish must never pull a task selected by Launcher back into a cell. */
-    boolean mayWriteSideSurface(Slot slot) {
-        if(slot!=null && slot.index==SLOT_TOP && !topCtrl.topFace)return false;
-        if (slot == null || slot.windowMode != 6 || slot.controller == null) return false;
-        PendingSidePromotion pending = slot.pendingSidePromotion;
-        if (pending != null && pending.desktopLaunch) return false;
-        try {
-            // Controller.onTaskInfoChanged forwards info without replacing its
-            // mTaskInfo on this ROM. Read the organizer's current canonical info.
-            Object organizer = XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
-            Object lock = XposedHelpers.getObjectField(organizer, "mLock");
-            synchronized (lock) {
-                Object tasks = XposedHelpers.getObjectField(organizer, "mTasks");
-                Object appeared = XposedHelpers.callMethod(tasks, "get", slot.taskId);
-                Object info = appeared == null ? null : XposedHelpers.callMethod(appeared, "getTaskInfo");
-                return info != null && XposedHelpers.getIntField(info, "taskId") == slot.taskId
-                        && slot.taskToken != null && slot.taskToken.equals(
-                                XposedHelpers.getObjectField(info, "token"))
-                        && Integer.valueOf(6).equals(XposedHelpers.callMethod(info, "getWindowingMode"));
-            }
-        } catch (Throwable unavailable) { return false; }
-    }
+    boolean mayWriteSideSurface(Slot slot) { return surfaceCtl.mayWriteSideSurface(slot); }
 
     /** 按字段名取 SurfaceControl（先本类后父类；取不到返回 null）。 */
-    static Object getSurfaceField(Object target, String name) { return HostStaticUtil.getSurfaceField(target, name); }
+    static Object getSurfaceField(Object target, String name) { return HostSurfaceController.getSurfaceField(target, name); }
 
     boolean applyWct(String what, Object wct) {
         Throwable first = null;
