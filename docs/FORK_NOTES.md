@@ -185,3 +185,7 @@ git diff 32555b4...upstream/main --stat    # 上游改动面
 - ZoomTarget 去掉 owner 字段（入口静态化后无需实例回调）。
 - HostEntry 一批实例方法转静态（原依赖全静态状态，语义等价）。
 - build.ps1 runtime-marker 校验从单文件改为模块目录计数（第三个标记随 hookSystemServer 迁移）。
+
+
+### 版本提升（同日）
+拆分收尾随发布提升为 **1.3.0 / 1003000**（runtimeMarker build=1.3.0 release ×3，随 hookSystemServer 分驻 HostEntry×2 + HostEntrySupport×1；build.ps1 与 port_retest F-11 均按模块目录计数）。1.2.0 构建归档于 dist/archive-1.2.0-pre-split/。

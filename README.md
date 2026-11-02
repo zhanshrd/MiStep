@@ -1,7 +1,7 @@
 # Mi Step · zhanshrd 维护分支
 
 > 状态栏**双角横滑**唤出的多任务工作区：1 个主区 + 3 个副任务 + **1 个顶部横屏任务**，主区整屏缩放、副格独立运行。
-> 基于 [JIUSIS/MiStep](https://github.com/JIUSIS/MiStep)（九思ing，锤子科技 One Step 开源项目的复刻）**v1.0.1 语义移植**，叠加本分支的 **HyperOS 4 / Android 17 实机适配、bug 修复与工程化重构**。当前版本 **1.2.0**。
+> 基于 [JIUSIS/MiStep](https://github.com/JIUSIS/MiStep)（九思ing，锤子科技 One Step 开源项目的复刻）**v1.0.1 语义移植**，叠加本分支的 **HyperOS 4 / Android 17 实机适配、bug 修复与工程化重构**。当前版本 **1.3.0**。
 
 - 上游项目：https://github.com/JIUSIS/MiStep （酷安发布帖作者：九思ing）
 - 本分支实测环境：**Xiaomi 17 Max (byron) · HyperOS 4.0.3.0.XAFCNXM · Android 17 (SDK 37) · Magisk 30.7 + Zygisk Next 1.5.2 + LSPosed v2.2.0**
@@ -14,7 +14,7 @@
 - **已完整同步上游 v1.0.1**（移植基线 `55172b5`，逐行对账核对）：顶部横屏任务与双指翻面、应用分身支持、快捷应用自定义（毛玻璃选择框）、全屏防误触入口规则、歌词译文排列、剪贴板修复、控制中心原生图标、剪贴板样式统一等。
 - **有意分歧**（详见 [`docs/FORK_NOTES.md`](docs/FORK_NOTES.md)）：
   - 推荐作用域**保留 4 项**：本机实测 LSPosed 写入 `android` 值会被静默忽略，系统框架须以 `system` 勾选（BUG-3）；上游 1.0.1 起收窄为 2 项，本分支不跟随。
-  - fork 版本线独立（`1.2.0` / `1002000`），不采用上游的特性串 marker。
+  - fork 版本线独立（`1.3.0` / `1003000`），不采用上游的特性串 marker。
   - 保留本分支全部修复与看门狗（见下）。
 
 ## 本分支的修复（相对上游）
@@ -29,18 +29,36 @@
 
 上游曾在说明中标注「分身应用不支持进入 Mi Step」——**1.0.1 已支持分身，本分支已同步**（本体与分身可同时收纳、分别切换，桌面打开对应各自任务）。
 
-## 重构（行为不变，持续进行）
+## 重构（行为不变，已完成）
 
-`MiStepHost` 原 7200+ 行，拆分为协作类（编译器断言式搬移 + 真机冒烟验证，每步独立提交）：
+单文件 ≤1000 行的硬性目标**已达成**：177 个 java 文件、0 超标。`MiStepHost`（原 7200+ 行）拆到 983 行，`HostEntry`（原 3376 行）拆到 658 行。全部拆分以**掩码保护的结构化改写**完成（字符串/注释永不被触碰），每批独立提交 + 23 项移植回归断言 + 真机 5 项冒烟，台账见 [`docs/FORK_NOTES.md`](docs/FORK_NOTES.md) §13。
 
-- `HostStaticUtil` —— 纯静态工具（日志/反射读取/窗口模式解析等）
-- `ZoomTransport` —— 主区缩放指令三通道发射端（私有文件 / Settings.Global / 广播）
-- `HostMirrorController` —— 镜像层与 fullscreen-only 应用载体
+宿主与入口现在由 16 个协作类组成：
+
+**MiStepHost 侧（宿主状态机）**
 - `HostSwapController` —— 触摸仲裁/收起/收集、主副交换、双任务交换管线
+- `HostLiveSwapFinishController` —— live 交换收尾/焦点归还/缩放接收器/视觉恢复
 - `HostPromotionController` —— 提升完成、失败汇总与回滚、原生观察
+- `HostAdoptionController` —— 收养/归还/外部提升管线
+- `HostTaskEventController` —— 任务事件回调与 slot 生命周期
+- `HostLifecycleController` —— suspend/resume/park 会话生命周期
 - `HostTopTaskController` —— 顶部横屏任务子系统（翻面手势、收放管线、方向观测）
+- `HostCellLayoutController` —— 格子布局构建/紧缩/格移动动画
+- `HostWindowController` —— 拖拽/格缩放/WCT 事务/触摸区域/窗口状态
+- `HostGeometryController` —— 显示几何与逻辑边界钩子
+- `HostSurfaceController` —— 保留表面重挂与覆盖层刷新
+- `HostChromeController` —— 提示条/空格十字/壁纸底图/快捷应用刷新
+- `HostLaunchController` —— 侧格启动/桌面图标发布/Home 任务识别
+- `HostStateController` —— 任务用户缓存/原生观察/缩放状态/提升看门狗
+- `HostDebugController` —— 调试广播/POC/链路追踪
+- `HostStaticUtil` + `ZoomTransport` + 9 个顶层状态类（Slot、Promotion、LiveTask 等）
 
-目标：单文件 ≤1000 行。当前 `MiStepHost` 5122 行 / `HostEntry` 3376 行，拆分持续进行。
+**HostEntry 侧（Xposed 入口）**
+- `HostEntryZoom` —— 放大/显示缩放（WMS magnification 桥、live zoom、设置监听）
+- `HostEntryRotation` —— 固定主区旋转与任务旋转解析
+- `HostEntryNativeFreeform` —— 原生 freeform 共存（层级/触摸排除/pin）
+- `HostEntrySupport` —— 系统服务钩子/触发器/调试广播分发
+- `HostEntryLaunch` —— TaskView 创建/装载/启动链
 
 ### 工程化
 
@@ -91,7 +109,7 @@ pwsh -File build.ps1     # 产物在 dist\，附 build-info.json 与 SHA256SUMS.
 
 构建细节、双档调试循环、移植对账与踩坑记录见 [`docs/FORK_NOTES.md`](docs/FORK_NOTES.md)。
 
-> 1.2.0 说明：上游 v1.0.1 特性为语义移植，移植部分当前以桌面端静态验证 + 构建断言为主，真机回归持续进行中；如遇异常请反馈机型与日志。
+> 1.3.0 说明：v1.0.1 上游特性与重构均已在 Xiaomi 17 Max（HyperOS 4.0.3.0 / Android 17）真机回归通过（开→侧格→交换→收起全链路、顶部横屏、分身、5 项 root 广播冒烟、logcat 零 FATAL）。如在其他机型遇到异常，请反馈机型与日志。
 
 ## 许可
 
