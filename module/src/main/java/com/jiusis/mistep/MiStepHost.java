@@ -62,14 +62,14 @@ public final class MiStepHost {
     static final int SLOT_TOP = CELL_SLOT_COUNT;
     static final int SLOT_COUNT = CELL_SLOT_COUNT + 1;
     static final String TOP_TASK_STATE_ACTION = "com.jiusis.mistep.TOP_TASK_STATE";
-    private static final long LAUNCH_TIMEOUT_MS = 4000L;
+    static final long LAUNCH_TIMEOUT_MS = 4000L;
     static final long SIDE_PROMOTION_TIMEOUT_MS = 3500L;
 
     static volatile MiStepHost sInstance;
 
     final Context ctx;
-    private final Executor executor;
-    private final Object factory;
+    final Executor executor;
+    final Object factory;
     final Object transitions;
     final Handler main = new Handler(Looper.getMainLooper());
 
@@ -97,7 +97,7 @@ public final class MiStepHost {
     private volatile long taskUserIdsReadAt;
     private volatile String taskUserIdsReadError;
     volatile boolean screenOn = true;
-    private Slot launchCurrentSlot;
+    Slot launchCurrentSlot;
     Promotion promotion;
     SwapPreview swapPreview;
     Object swapPreviewStatusOwner;
@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostTaskEventController taskEvents;
     final HostChromeController chrome;
     final HostCellLayoutController cellLayout;
     final HostSurfaceController surfaceCtl;
@@ -457,6 +458,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        taskEvents = new HostTaskEventController(this);
         chrome = new HostChromeController(this);
         cellLayout = new HostCellLayoutController(this);
         surfaceCtl = new HostSurfaceController(this);
@@ -1074,7 +1076,7 @@ TopTaskGeometry topGeometry() {
     static void onTopTaskState(Intent intent) { HostTopTaskController.onTopTaskState(intent); }
     static boolean ownsTopNativeCaption(Object info) { return HostTopTaskController.ownsTopNativeCaption(info); }
     void resetTopForSuspend() { topCtrl.resetTopForSuspend(); }
-    private void createTopTaskControls() { topCtrl.createTopTaskControls(); }
+    void createTopTaskControls() { topCtrl.createTopTaskControls(); }
     void updateTopTaskGeometry() { topCtrl.updateTopTaskGeometry(); }
     private void openTopFace(boolean manual) { topCtrl.openTopFace(manual); }
     private void releaseTopTask(boolean front, boolean dismissed, Runnable after) { topCtrl.releaseTopTask(front, dismissed, after); }
@@ -1121,74 +1123,17 @@ TopTaskGeometry topGeometry() {
         }, 4000L);
     }
 
-    private void createSubViews() {
-        createNext(1);
-    }
+    private void createSubViews() { taskEvents.createSubViews(); }
 
-    private void createNext(final int index) {
-        if (index >= SLOT_COUNT) {
-            log("three side and one upper TaskView ready; system main region has no TaskView");
-            return;
-        }
-        Consumer<Object> onCreated = new Consumer<Object>() {
-            @Override
-            public void accept(Object taskViewObj) {
-                log("TaskView created slot=" + index + " -> " + taskViewObj);
-                main.post(() -> onTaskViewCreated(index, taskViewObj));
-            }
-        };
-        XposedHelpers.callMethod(factory, "create", ctx, executor, onCreated);
-    }
+    private void createNext(final int index) { taskEvents.createNext(index); }
 
-    private void onTaskViewCreated(int index, Object taskViewObj) {
-        try {
-            Slot slot = slots[index];
-            View view = (View) taskViewObj;
-            slot.view = view;
-            slot.controller = XposedHelpers.callMethod(view, "getController");
-            slot.rect = slotBounds(slot);
-
-            Object listener = makeListener(index);
-            XposedHelpers.callMethod(view, "setListener", executor, listener);
-
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    slot.rect[2] - slot.rect[0], slot.rect[3] - slot.rect[1]);
-            if (!boundsHooksReady) throw new IllegalStateException("logical bounds hooks unavailable");
-            root.addView(view, lp);
-            applyRect(slot);
-            ensureCellBackground(slot);
-
-            if(index==SLOT_TOP) {
-                createTopTaskControls();
-                updateHint(slot); updateTouchRegion(slot);
-                log("upper landscape TaskView ready");
-                createNext(index+1); return;
-            }
-            slot.hint = makeEmptyHint();
-            slot.hint.setOnClickListener(v -> onSlotTapped(slot.index));
-            root.addView(slot.hint, hintParams(slot));
-            // 修：hint 在 applyRect 之后才创建，之前一直停在 (0,0)（屏幕上左上角那个多余的加号）。
-            applyRect(slot);
-            updateHint(slot);
-
-            if (workspaceAlpha < 1f) setWorkspaceAlpha(workspaceAlpha);
-
-            view.setOnClickListener(v -> onSlotTapped(slotIndexOfView(v)));
-            view.setOnTouchListener((v, e) -> canRender(slot) && scene == ACTIVE && onSlotTouch(slot.index, e));
-            updateTouchRegion(slot);
-            log("slot " + index + " attached rect=" + java.util.Arrays.toString(slot.rect));
-        } catch (Throwable t) {
-            log("onTaskViewCreated slot=" + index + " FAILED: " + t);
-            XposedBridge.log(t);
-        }
-        createNext(index + 1);
-    }
+    private void onTaskViewCreated(int index, Object taskViewObj) { taskEvents.onTaskViewCreated(index, taskViewObj); }
 
     TextView makeEmptyHint() { return chrome.makeEmptyHint(); }
 
     void drawEmptyCellPlus(android.graphics.Canvas canvas, int width, int height,            int color, android.graphics.Paint plus) { chrome.drawEmptyCellPlus(canvas, width, height, color, plus); }
 
-    private FrameLayout.LayoutParams hintParams(Slot slot) { return chrome.hintParams(slot); }
+    FrameLayout.LayoutParams hintParams(Slot slot) { return chrome.hintParams(slot); }
 
     /** 空格子显示"+"提示；有任务时隐藏。 */
     void updateHint(Slot slot) { chrome.updateHint(slot); }
@@ -1372,7 +1317,7 @@ TopTaskGeometry topGeometry() {
 
 
 
-    private void scheduleSideSurfaceRestore(Slot slot, int taskId, Object token,
+    void scheduleSideSurfaceRestore(Slot slot, int taskId, Object token,
             long bindingEpoch, long epoch) {
         for (long delay : new long[]{90L, 320L, 800L}) {
             main.postDelayed(() -> {
@@ -1399,41 +1344,7 @@ TopTaskGeometry topGeometry() {
 
 
     /** 交换确认后把新主任务 leash 完全复位：position/matrix/alpha/crop，避免副格残留变换把画面顶到主区上方。 */
-    void resetMainTaskLeash(int taskId) {
-        if (taskId < 0) return;
-        try {
-            Object organizer = shellOrganizer();
-            if (organizer == null) return;
-            Object leash = XposedHelpers.callMethod(organizer, "getTaskLeash",
-                    new Class<?>[]{int.class}, taskId);
-            if (leash == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
-                return;
-            }
-            Object tx = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            try {
-                XposedHelpers.callMethod(tx, "setPosition",
-                        new Class<?>[]{Class.forName("android.view.SurfaceControl"),
-                                float.class, float.class}, leash, 0f, 0f);
-                XposedHelpers.callMethod(tx, "setMatrix",
-                        new Class<?>[]{Class.forName("android.view.SurfaceControl"),
-                                float.class, float.class, float.class, float.class},
-                        leash, 1f, 0f, 0f, 1f);
-                XposedHelpers.callMethod(tx, "setAlpha",
-                        new Class<?>[]{Class.forName("android.view.SurfaceControl"),
-                                float.class}, leash, 1f);
-                XposedHelpers.callMethod(tx, "setCrop",
-                        new Class<?>[]{Class.forName("android.view.SurfaceControl"),
-                                android.graphics.Rect.class}, leash, null);
-                XposedHelpers.callMethod(tx, "apply");
-            } finally {
-                try { XposedHelpers.callMethod(tx, "close"); } catch (Throwable ignored) {}
-            }
-            log("main task leash reset task=" + taskId);
-        } catch (Throwable error) {
-            log("reset main task leash failed task=" + taskId + ": " + error);
-        }
-    }
+    void resetMainTaskLeash(int taskId) { taskEvents.resetMainTaskLeash(taskId); }
 
     void launchQuick(QuickApp entry) {
         if (entry == null || entry.component == null || scene != ACTIVE
@@ -1595,7 +1506,7 @@ TopTaskGeometry topGeometry() {
 
     void closeSurfaceObject(Object object, String method) { cellLayout.closeSurfaceObject(object, method); }
 
-    private int slotIndexOfView(View view) {
+    int slotIndexOfView(View view) {
         for (Slot s : slots) {
             if (s.view == view) {
                 return s.index;
@@ -1688,7 +1599,7 @@ TopTaskGeometry topGeometry() {
      *   副格有任务 → 轻点=与主区交换；滑动取消轻点，始终不操作副任务；
      *   空槽 → 不消费，交给宿主点击处理。
      */
-    private boolean onSlotTouch(int slotIndex, MotionEvent e) { return swapController.onSlotTouch(slotIndex, e); }
+    boolean onSlotTouch(int slotIndex, MotionEvent e) { return swapController.onSlotTouch(slotIndex, e); }
 
     void recycleBuffered(Slot slot) { swapController.recycleBuffered(slot); }
 
@@ -1809,85 +1720,18 @@ TopTaskGeometry topGeometry() {
 
     void failPromotion(Promotion ticket, String reason) { promotionController.failPromotion(ticket, reason); }
 
-    void clearSlot(Slot slot) {
-        if(slot.index==SLOT_TOP && topCtrl.topTaskState.owner()!=null) {
-            topCtrl.topTaskState.release(topCtrl.topTaskState.owner(),false); topCtrl.topOriginalSlot=null;
-        }
-        if(slot.index==SLOT_TOP)topCtrl.releaseRetainedTopSnapshot();
-        slot.taskEpoch++;
-        slot.removalCheckTask = -1;
-        slot.retiredTaskId = slot.taskId;
-        slot.occupied = false;
-        slot.parked = false;
-        slot.frozen = false;
-        slot.promoting = false;
-        slot.taskVisible = false;
-        slot.taskId = -1;
-        slot.taskToken = null;
-        slot.windowMode = -1;
-        slot.nativeReleasePending = false;
-        slot.pendingSidePromotion = null;
-        slot.launching = false;
-        slot.injecting = false;
-        slot.modeGuardUntil = 0L;
-        if (slot.windowState != null) {
-            slot.windowState.clear();
-            synchronized (taskWindowStatesLock) {
-                taskWindowStates.remove(slot.windowState.taskId);
-            }
-            slot.windowState = null;
-        }
-        slot.taskUid = 0;
-        slot.pkg = null;
-        slot.modeAdmissionPending = false;
-        slot.modeRepairAttempts = 0;
-        slot.scaleSurface = null;
-        slot.scaleOnLeash = false;
-        slot.scaleTaskId = Integer.MIN_VALUE;
-        slot.scaleApplied = -1f;
-        slot.scaleAttempts = 0;
-        slot.reassertPending = false;
-        slot.visibilityRepair.reset();
-        recycleBuffered(slot);
-        updateHint(slot);
-        updateTouchRegion(slot);
-        publishDesktopSideTasks();
-        requestCompaction();
-    }
+    void clearSlot(Slot slot) { taskEvents.clearSlot(slot); }
 
-    boolean isActive(Slot slot) {
-        return root != null && sInstance == this && slot.index > 0
-                && slot.index < SLOT_COUNT && slots[slot.index] == slot;
-    }
+    boolean isActive(Slot slot) { return taskEvents.isActive(slot); }
 
-    boolean canRender(Slot slot) {
-        return isActive(slot) && !slot.parked && screenOn
-                && (scene == ACTIVE || scene == RESUMING)
-                && root.getVisibility() == View.VISIBLE;
-    }
+    boolean canRender(Slot slot) { return taskEvents.canRender(slot); }
 
-    void postForSlot(Slot slot, Consumer<Slot> callback) {
-        main.post(() -> { if (isActive(slot)) callback.accept(slot); });
-    }
+    void postForSlot(Slot slot, Consumer<Slot> callback) { taskEvents.postForSlot(slot, callback); }
 
     /** Reject late callbacks from a task the native controller has already relinquished. */
-    boolean controllerOwns(Slot slot, int taskId, Object token) {
-        try {
-            Object info = XposedHelpers.getObjectField(slot.controller, "mTaskInfo");
-            Object current = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
-            if (info != null) {
-                ComponentName base = (ComponentName) XposedHelpers.getObjectField(info, "baseActivity");
-                if (base != null && "com.miui.home".equals(base.getPackageName())) return false;
-            }
-            return info != null && current != null
-                    && XposedHelpers.getIntField(info, "taskId") == taskId
-                    && (token == null || token.equals(current));
-        } catch (Throwable t) {
-            return false;
-        }
-    }
+    boolean controllerOwns(Slot slot, int taskId, Object token) { return taskEvents.controllerOwns(slot, taskId, token); }
 
-    void bindTask(Slot slot, int taskId, Object token) { promotionController.bindTask(slot, taskId, token); }
+    void bindTask(Slot slot, int taskId, Object token) { taskEvents.bindTask(slot, taskId, token); }
 
     static int windowModeOf(Object info) { return HostStaticUtil.windowModeOf(info); }
 
@@ -1895,7 +1739,7 @@ TopTaskGeometry topGeometry() {
 
     static int requestedOrientationOf(Object info) { return HostStaticUtil.requestedOrientationOf(info); }
 
-    private void updateTaskWindowState(int slotIndex, Object info, int taskId, boolean active) {
+    void updateTaskWindowState(int slotIndex, Object info, int taskId, boolean active) {
         if (info == null || taskId < 0) return;
         try {
             int mode = windowModeOf(info);
@@ -1950,14 +1794,7 @@ TopTaskGeometry topGeometry() {
      * TaskViewTaskController keeps mTaskNotFound after an idle task vanished without a token.
      * Reusing that controller otherwise makes the framework remove the next task immediately.
      */
-    void resetIdleTaskView(Slot slot) {
-        if (slot == null || slot.controller == null) return;
-        try {
-            MiStepIdleTaskView.reset(slot.controller, text -> log(text + " slot=" + slot.index));
-        } catch (Throwable error) {
-            log("reset idle TaskView slot=" + (slot == null ? -1 : slot.index) + " failed: " + error);
-        }
-    }
+    void resetIdleTaskView(Slot slot) { taskEvents.resetIdleTaskView(slot); }
 
 
 
@@ -2068,293 +1905,27 @@ TopTaskGeometry topGeometry() {
         })) { slot.launching = false; log("no Shell queue for selection"); }
     }
 
-    private void startSlot(final Slot slot, Intent launch, String label) {
-        if (!isActive(slot) || scene != ACTIVE || slot.promoting) { slot.launching = false; return; }
-        final int index = slot.index;
-        resetIdleTaskView(slot);
-        prepareCellSurface(slot);
-        slot.modeGuardUntil = SystemClock.uptimeMillis() + 2500L;
-        slot.modeRepairAttempts = 0;
-        slot.modeAdmissionPending = true;
-        slot.pkg = launch.getComponent() != null
-                ? launch.getComponent().getPackageName() : launch.getPackage();
-        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        // v0.9：任务一律按"整屏手机"起（1080×2460），完整 UI 不受窗口最小宽限制；
-        // 显示时用矩阵缩放塞进格子（官方Mi Step的等比缩小语义）。
-        Rect rect = new Rect(0, 0, screenW, screenH);
-        PendingIntent pi = PendingIntent.getActivity(ctx, 1000 + index, launch,
-                PendingIntent.FLAG_IMMUTABLE);
-        ActivityOptions options = ActivityOptions.makeBasic();
-        callHidden(options, "setLaunchWindowingMode", 6);          // WINDOWING_MODE_MULTI_WINDOW
-        callHidden(options, "setRemoveWithTaskOrganizer", Boolean.FALSE);
-        try {
-            Method start = findStartActivity(slot.view.getClass());
-            if (start == null) {
-                slot.launching = false;
-                log("startSlot " + index + ": startActivity not found");
-                return;
-            }
-            start.setAccessible(true);
-            start.invoke(slot.view, pi, launch, options, rect);
-            launchCurrentSlot = slot;
-            main.postDelayed(() -> {
-                if (launchCurrentSlot == slot) {
-                    launchCurrentSlot = null;
-                    slot.launching = false;
-                    log("launch watchdog fired slot=" + index + " label=" + label);
-                    finishPendingSuspend();
-                }
-            }, LAUNCH_TIMEOUT_MS);
-            log("startActivity slot=" + index + " label=" + label
-                    + " pkg=" + launch.getPackage() + " rect=" + rect);
-        } catch (Throwable t) {
-            slot.launching = false;
-            log("startSlot " + index + " FAILED: " + t);
-            XposedBridge.log(t);
-        }
-    }
+    private void startSlot(final Slot slot, Intent launch, String label) { taskEvents.startSlot(slot, launch, label); }
 
-    private static void callHidden(Object target, String name, Object... args) { HostStaticUtil.callHidden(target, name, args); }
+    static void callHidden(Object target, String name, Object... args) { HostStaticUtil.callHidden(target, name, args); }
 
-    private static Method findStartActivity(Class<?> cls) { return HostStaticUtil.findStartActivity(cls); }
+    static Method findStartActivity(Class<?> cls) { return HostStaticUtil.findStartActivity(cls); }
 
     // ---------------------------------------------------------------- 任务状态 / 密度 / 可见性
 
-    private Object makeListener(final int slotIndex) {
-        final Slot owner = slots[slotIndex];
-        try {
-            Class<?> iface = XposedHelpers.findClass(
-                    "com.android.wm.shell.taskview.TaskView$Listener", ctx.getClassLoader());
-            return Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[]{iface},
-                    new InvocationHandler() {
-                        @Override
-                        public Object invoke(Object proxy, Method method, Object[] args) {
-                            try {
-                                String name = method.getName();
-                                if ("onTaskCreated".equals(name) && args != null && args.length >= 1) {
-                                    final int taskId = (Integer) args[0];
-                                    postForSlot(owner, s -> onTaskIdKnown(s.index, taskId));
-                                } else if ("onTaskInfoChanged".equals(name)
-                                        && args != null && args.length >= 1) {
-                                    final Object info = args[0];
-                                    postForSlot(owner, s -> onTaskInfo(s.index, info));
-                                } else if ("onTaskVisibilityChanged".equals(name)
-                                        && args != null && args.length >= 2) {
-                                    final int taskId = (Integer) args[0];
-                                    final boolean visible = (Boolean) args[1];
-                                    postForSlot(owner, s -> onTaskVisibility(s.index, taskId, visible));
-                                } else if ("onTaskRemovalStarted".equals(name)
-                                        && args != null && args.length >= 1) {
-                                    final int taskId = (Integer) args[0];
-                                    postForSlot(owner, s -> onTaskRemovalStarted(s.index, taskId));
-                                } else if ("onInitialized".equals(name)) {
-                                    log("listener#onInitialized slot=" + owner.index);
-                                    postForSlot(owner, s -> { updateHint(s); setWorkspaceAlpha(workspaceAlpha); });
-                                } else {
-                                    log("listener#" + name + " slot=" + slotIndex);
-                                }
-                            } catch (Throwable t) {
-                                log("listener dispatch failed: " + t);
-                            }
-                            return null;
-                        }
-                    });
-        } catch (Throwable t) {
-            log("makeListener failed: " + t);
-            return null;
-        }
-    }
+    private Object makeListener(final int slotIndex) { return taskEvents.makeListener(slotIndex); }
 
-    private void onTaskIdKnown(int slotIndex, int taskId) {
-        Slot slot = slots[slotIndex];
-        if (slot.promoting || slot.parked || slot.retiredTaskId == taskId || !controllerOwns(slot, taskId, null)) return;
-        Object token = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
-        if (token == null || !controllerOwns(slot, taskId, token)) return;
-        bindTask(slot, taskId, token);
-        slot.occupied = true;
-        slot.launching = false;
-        if (slot == launchCurrentSlot) {
-            launchCurrentSlot = null;
-        }
-        log("onTaskCreated slot=" + slotIndex + " taskId=" + taskId);
-        updateHint(slot);
-        updateTouchRegion(slot);
-        finishPendingSuspend();
-        main.postDelayed(this::compactCells, 120L);
-        if (slotIndex > SLOT_MAIN) scheduleSideModeResolution(slot, taskId);
-    }
+    private void onTaskIdKnown(int slotIndex, int taskId) { taskEvents.onTaskIdKnown(slotIndex, taskId); }
 
     /** 目标机 TaskView 的主要状态回调：taskId / token / 可见性都从这里取。 */
-    private void onTaskInfo(int slotIndex, Object info) {
-        Slot slot = slots[slotIndex];
-        try {
-            int taskId = XposedHelpers.getIntField(info, "taskId");
-            if (slot.promoting || slot.parked || slot.retiredTaskId == taskId) return;
-            boolean visible = XposedHelpers.getBooleanField(info, "isVisible");
-            boolean running = XposedHelpers.getBooleanField(info, "isRunning");
-            Object token = XposedHelpers.getObjectField(info, "token");
-            int mode = windowModeOf(info);
-            if(slotIndex==SLOT_TOP && mode==1 && slot.occupied && taskId==slot.taskId
-                    && token!=null && token.equals(slot.taskToken)) {
-                topCtrl.releaseTopTask(true,false,null);return;
-            }
-            if (slotIndex > SLOT_MAIN && mode == 5 && slot.occupied
-                    && taskId == slot.taskId && token != null && token.equals(slot.taskToken)) {
-                releaseNativeFreeformSide(slot, taskId, token);
-                return;
-            }
-            if (token == null || !controllerOwns(slot, taskId, token)) return;
-            boolean surfaceGeometryChanged = slot.taskId != taskId || slot.windowMode != mode;
-            boolean changed = slot.taskId != taskId || slot.occupied != running
-                    || slot.taskVisible != visible || slot.windowMode != mode;
-            bindTask(slot, taskId, token);
-            ComponentName actual = (ComponentName) XposedHelpers.getObjectField(info, "baseActivity");
-            if (actual != null) slot.pkg = actual.getPackageName();
-            slot.occupied = running;
-            slot.taskVisible = visible;
-            slot.windowMode = mode;
-            if (!running && changed) requestCompaction();
-            if (slotIndex > SLOT_MAIN && mode == 6) {
-                slot.modeAdmissionPending = false;
-                slot.modeRepairAttempts = 0;
-            }
-            updateTaskWindowState(slotIndex, info, taskId, running);
-            if (changed) {
-                log("taskInfo slot=" + slotIndex + " task=" + taskId
-                        + " running=" + running + " visible=" + visible
-                        + " mode=" + mode
-                        + " appBounds=" + appBoundsOf(info));
-                updateHint(slot);
-                updateTouchRegion(slot);
-            }
-            if (running) {
-                // Wait for the native leash first. Early bounds writes can interrupt prepareOpen.
-                reapplyScale(slot);
-            }
-            if (running && slotIndex > SLOT_MAIN && mode == 6 && surfaceGeometryChanged) {
-                scheduleSideSurfaceRestore(slot, taskId, token, slot.taskEpoch, sceneEpoch);
-            }
-            if (running && !visible) scheduleSideVisibilityRepair(slot);
-            if (running && mode == 1 && slotIndex > SLOT_MAIN
-                    && !slot.promoting && !slot.launching && !slot.parked) {
-                if (slot.modeAdmissionPending) {
-                    if (SystemClock.uptimeMillis() >= slot.modeGuardUntil)
-                        repairSideWindowMode(slot, taskId);
-                    else scheduleSideModeResolution(slot, taskId);
-                } else promoteExternalLaunch(slot);
-            } else if (slot.pendingSidePromotion != null
-                    && !slot.pendingSidePromotion.desktopLaunch && mode != 1) {
-                slot.pendingSidePromotion = null;
-            }
-            if (changed) publishDesktopSideTasks();
-        } catch (Throwable t) {
-            log("onTaskInfo slot=" + slotIndex + " failed: " + t);
-        }
-    }
+    private void onTaskInfo(int slotIndex, Object info) { taskEvents.onTaskInfo(slotIndex, info); }
 
 
-    private void onTaskVisibility(int slotIndex, int taskId, boolean visible) {
-        Slot slot = slots[slotIndex];
-        if (slot.taskId != taskId || slot.promoting || slot.parked) return;
-        slot.taskVisible = visible;
-        log("taskVisibility slot=" + slotIndex + " task=" + taskId + " visible=" + visible);
-        if (!visible) scheduleSideVisibilityRepair(slot);
-    }
+    private void onTaskVisibility(int slotIndex, int taskId, boolean visible) { taskEvents.onTaskVisibility(slotIndex, taskId, visible); }
 
-    java.util.List<MiStepSideClose> closingTasks(Object info) {
-        java.util.List<MiStepSideClose> result = new java.util.ArrayList<>();
-        if (scene != ACTIVE || promotion != null || transferBusy || cellMotion != null || root == null) return result;
-        try {
-            MiStepLiveSwapSession.ShellBackend backend = new MiStepLiveSwapSession.ShellBackend(
-                    XposedHelpers.getObjectField(transitions, "mTransitions"), ctx.getClassLoader());
-            backend.assertShellThread();
-            for (Object change : (java.util.List<?>) XposedHelpers.callMethod(info, "getChanges")) {
-                if ((Integer) XposedHelpers.callMethod(change, "getMode") != 2) continue;
-                Object task = XposedHelpers.callMethod(change, "getTaskInfo");
-                if (task == null) continue;
-                int id = XposedHelpers.getIntField(task, "taskId");
-                Object token = XposedHelpers.getObjectField(task, "token");
-                for (Slot slot : slots) {
-                    if (slot.index == 0 || slot.taskId != id || !java.util.Objects.equals(slot.taskToken, token)
-                            || !slot.occupied || slot.promoting || slot.parked || slot.closing || slot.frozen
-                            || !controllerOwns(slot, id, token)) continue;
-                    Object parent = getSurfaceField(slot.controller, "mSurfaceControl");
-                    Object leash = XposedHelpers.callMethod(change, "getLeash");
-                    if (parent == null || leash == null || slot.rect == null) continue;
-                    long epoch = slot.taskEpoch;
-                    FrameLayout closeRoot = root;
-                    final MiStepLayout closeGeometry = layout;
-                    Rect strip = liveSideStrip(closeGeometry);
-                    MiStepLiveBackdrop wallpaper = MiStepLiveBackdrop.create(liveHostRootSurface(), wallpaperBackdrop,
-                            screenW, screenH, strip, strip,
-                            canvas -> drawLiveEmptyHints(canvas, closeGeometry, closeGeometry,
-                                    1 << slot.index), MiStepHost::log);
-                    slot.closing = true;
-                    result.add(new MiStepSideClose(backend, slot.controller, leash, parent, slot.cellBackground, scaleFor(slot),
-                            slot.rect[2] - slot.rect[0], slot.rect[3] - slot.rect[1],
-                            () -> isActive(slot) && scene == ACTIVE && slot.taskId == id && slot.taskEpoch == epoch,
-                            () -> { slot.closing = false; main.post(() -> {
-                                if (!isActive(slot) || slot.taskId != id || slot.taskEpoch != epoch) {
-                                    wallpaper.closeAfterFrame(closeRoot);
-                                    return;
-                                }
-                                if (!executeOnShell(() -> {
-                                    boolean stillOwned = controllerOwns(slot, id, token);
-                                    if (!stillOwned) resetIdleTaskView(slot);
-                                    main.post(() -> {
-                                        if (isActive(slot) && slot.taskId == id && slot.taskEpoch == epoch) {
-                                            if (stillOwned) onTaskRemovalStarted(slot.index, id);
-                                            else { clearSlot(slot); compactCells(); }
-                                        }
-                                        wallpaper.closeAfterFrame(closeRoot);
-                                    });
-                                })) {
-                                    onTaskRemovalStarted(slot.index, id);
-                                    wallpaper.closeAfterFrame(closeRoot);
-                                }
-                            }); }, MiStepHost::log));
-                    log("real side close task=" + id + " slot=" + slot.index);
-                }
-            }
-        } catch (Throwable error) {
-            for (MiStepSideClose close : result) close.abandon();
-            result.clear();
-            log("side close admission: " + error);
-        }
-        return result;
-    }
+    java.util.List<MiStepSideClose> closingTasks(Object info) { return taskEvents.closingTasks(info); }
 
-    private void onTaskRemovalStarted(int slotIndex, int taskId) {
-        Slot slot = slots[slotIndex];
-        log("onTaskRemovalStarted slot=" + slotIndex + " taskId=" + taskId
-                + " current=" + slot.taskId);
-        if (slot.closing || slot.nativeReleasePending) return;
-        if (slot.promoting || slot.parked) {
-            log("early removal notification retained for promotion task=" + taskId);
-            return;
-        }
-        if (slot.taskId != taskId || slot.removalCheckTask == taskId) return;
-        slot.removalCheckTask = taskId;
-        final long expectedEpoch = slot.taskEpoch;
-        main.postDelayed(() -> {
-            if (!isActive(slot) || slot.promoting || slot.taskId != taskId
-                    || slot.taskEpoch != expectedEpoch) return;
-            executeOnShell(() -> {
-                boolean stillOwned = controllerOwns(slot, taskId, slot.taskToken);
-                if (!stillOwned) resetIdleTaskView(slot);
-                postForSlot(slot, owner -> {
-                    if (owner.taskId != taskId || owner.taskEpoch != expectedEpoch || owner.promoting) return;
-                    owner.removalCheckTask = -1;
-                    if (stillOwned) {
-                        log("removal not detached; retain task=" + taskId);
-                        return;
-                    }
-                    clearSlot(owner);
-                    compactCells();
-                });
-            });
-        }, 250L);
-    }
+    private void onTaskRemovalStarted(int slotIndex, int taskId) { taskEvents.onTaskRemovalStarted(slotIndex, taskId); }
 
     /**
      * v0.9.9：副格是"栈"——某个格子空了，后面的占用格子自动往上排（官方 SideAreaStackView 的紧凑排列）。
@@ -2372,125 +1943,15 @@ TopTaskGeometry topGeometry() {
     private void animateCellMoves(java.util.List<CellMovePlan> plans, int initialEmptySlots) { cellLayout.animateCellMoves(plans, initialEmptySlots); }
 
     /** 诊断用：从 RunningTaskInfo 里取 appCompatTaskInfo.topActivityAppBounds（px）。 */
-    private static String appBoundsOf(Object info) { return HostStaticUtil.appBoundsOf(info); }
+    static String appBoundsOf(Object info) { return HostStaticUtil.appBoundsOf(info); }
 
     /** An external fullscreen task can be reordered above our roots without killing them. */
-    void scheduleSideVisibilityRepair(Slot slot) {
-        if (!canRender(slot) || scene != ACTIVE || !screenOn || keyguardLocked
-                || slot.promoting || slot.launching
-                || slot.frozen || !slot.occupied || slot.taskVisible || slot.reassertPending) return;
-        final long epoch = sceneEpoch, binding = slot.taskEpoch;
-        final int taskId = slot.taskId;
-        final Object token = slot.taskToken;
-        slot.reassertPending = true;
-        main.postDelayed(() -> {
-            slot.reassertPending = false;
-            if (!visibilityRepairCurrent(slot, epoch, binding, taskId, token)) return;
-            for (Slot side : slots) if (side.promoting || side.launching || side.frozen) return;
-            executeOnShell(() -> {
-                try {
-                    if (!visibilityRepairCurrent(slot, epoch, binding, taskId, token)
-                            || !controllerOwns(slot, taskId, token)) return;
-                    Object foreground = null;
-                    java.util.List<?> roots = rootInfos();
-                    for (Object info : roots) {
-                        if (!XposedHelpers.getBooleanField(info, "isVisible")
-                                || !Integer.valueOf(1).equals(XposedHelpers.callMethod(info, "getWindowingMode"))
-                                || isSideToken(XposedHelpers.getObjectField(info, "token"))) continue;
-                        int type = (Integer) XposedHelpers.callMethod(info, "getActivityType");
-                        if (type != 1 && type != 2) continue;
-                        if (foreground != null) return; // Ambiguous split/overlay scene: do not guess.
-                        foreground = XposedHelpers.getObjectField(info, "token");
-                    }
-                    if (!slot.visibilityRepair.admit(epoch, foreground)) return;
-                    Object wct = Class.forName("android.window.WindowContainerTransaction")
-                            .getDeclaredConstructor().newInstance();
-                    int count = 0;
-                    for (Slot side : slots) {
-                        if (!canRender(side) || side.promoting || side.launching || side.frozen
-                                || !side.occupied || !controllerOwns(side, side.taskId, side.taskToken)) continue;
-                        Object core = null;
-                        for (Object info : roots) if (new LiveTask(side).matches(info)) { core = info; break; }
-                        if (!ordinaryRoot(core, 6)) continue;
-                        XposedHelpers.callMethod(wct, "setHidden", side.taskToken, false);
-                        XposedHelpers.callMethod(wct, "setForceTranslucent", side.taskToken, true);
-                        XposedHelpers.callMethod(wct, "setAlwaysOnTop", side.taskToken, true);
-                        XposedHelpers.callMethod(wct, "setFocusable", side.taskToken, true);
-                        XposedHelpers.callMethod(wct, "reorder", side.taskToken, true);
-                        count++;
-                    }
-                    if (count == 0 || !visibilityRepairCurrent(slot, epoch, binding, taskId, token)) return;
-                    boolean applied = applyWct("retain-side-order", wct);
-                    if (applied) {
-                        for (Slot side : slots) {
-                            if (canRender(side) && side.occupied && !side.promoting && !side.frozen
-                                    && controllerOwns(side, side.taskId, side.taskToken))
-                                XposedHelpers.callMethod(transitions, "setTaskViewVisible", side.controller, true);
-                        }
-                    }
-                    log("side order repair kept live tasks=" + count + " foreground=" + foreground
-                            + " applied=" + applied + "; no remove/relaunch");
-                } catch (Throwable error) {
-                    log("side order repair stopped; retain original task: " + error);
-                }
-            });
-        }, 160L);
-    }
+    void scheduleSideVisibilityRepair(Slot slot) { taskEvents.scheduleSideVisibilityRepair(slot); }
 
     /** Idempotently show every live side TaskView after a task-set change. */
-    void reassertSideTaskViews(String reason) {
-        final long epoch = sceneEpoch;
-        if (!executeOnShell(() -> {
-            if (!screenOn || (scene != ACTIVE && scene != RESUMING)
-                    || root == null || epoch != sceneEpoch) return;
-            int count = 0;
-            java.util.List<RenderBinding> frames = new java.util.ArrayList<>();
-            for (Slot side : slots) {
-                if (side.index <= SLOT_MAIN || !canRender(side) || !side.occupied
-                        || (side.index==SLOT_TOP && !topCtrl.topFace) || side.parked || side.promoting || side.launching || side.frozen
-                        || side.controller == null
-                        || !controllerOwns(side, side.taskId, side.taskToken)) continue;
-                try {
-                    XposedHelpers.callMethod(transitions, "setTaskViewVisible", side.controller, true);
-                    Object leash = getSurfaceField(side.controller, "mTaskLeash");
-                    Object parent = getSurfaceField(side.controller, "mSurfaceControl");
-                    if (leash != null && parent != null && leash != parent)
-                        frames.add(new RenderBinding(side, epoch, leash, parent));
-                    count++;
-                } catch (Throwable error) {
-                    log("side reassert failed slot=" + side.index + ": " + error);
-                }
-            }
-            if (!frames.isEmpty()) {
-                Object tx = null;
-                try {
-                    tx = Class.forName("android.view.SurfaceControl$Transaction")
-                            .getDeclaredConstructor().newInstance();
-                    // setTaskViewVisible is a no-op for an already-visible task.
-                    // A rotation finish can still have returned its canonical leash
-                    // to the display. Restore the owned parent and geometry together.
-                    appendRetainedSurfaces(tx, frames);
-                    XposedHelpers.callMethod(tx, "apply");
-                } catch (Throwable error) {
-                    log("side parent reassert failed reason=" + reason + ": " + error);
-                } finally { closeSurfaceObject(tx, "close"); }
-            }
-            final int visible = count;
-            main.post(() -> {
-                for (Slot side : slots) {
-                    if (side.index > SLOT_MAIN && side.occupied && !side.promoting && !side.parked)
-                        reapplyScale(side);
-                }
-                log("side TaskViews reasserted reason=" + reason + " count=" + visible);
-            });
-        })) log("side TaskView reassert skipped reason=" + reason + ": no Shell queue");
-    }
+    void reassertSideTaskViews(String reason) { taskEvents.reassertSideTaskViews(reason); }
 
-    private boolean visibilityRepairCurrent(Slot slot, long epoch, long binding, int id, Object token) {
-        return canRender(slot) && scene == ACTIVE && !slot.promoting && !slot.launching && !slot.frozen
-                && sceneEpoch == epoch && slot.taskEpoch == binding && slot.taskId == id
-                && token != null && token.equals(slot.taskToken);
-    }
+    private boolean visibilityRepairCurrent(Slot slot, long epoch, long binding, int id, Object token) { return taskEvents.visibilityRepairCurrent(slot, epoch, binding, id, token); }
 
     String describeTasks() {
         StringBuilder sb = new StringBuilder();
