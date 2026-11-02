@@ -111,8 +111,8 @@ public final class MiStepHost {
     Bitmap mainBackdrop;
     View topStripBacking;
     Bitmap wallpaperBackdrop;
-    private boolean wallpaperBackdropRequested;
-    private BroadcastReceiver wallpaperReceiver;
+    boolean wallpaperBackdropRequested;
+    BroadcastReceiver wallpaperReceiver;
     private BroadcastReceiver desktopIconReceiver;
     private boolean mainBackdropRequested;
     /** mirror 承载时主区显示的桌面/上一主区快照（避免隐藏任务后主区全黑）。 */
@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostChromeController chrome;
     final HostCellLayoutController cellLayout;
     final HostSurfaceController surfaceCtl;
     final HostGeometryController geometry;
@@ -456,6 +457,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        chrome = new HostChromeController(this);
         cellLayout = new HostCellLayoutController(this);
         surfaceCtl = new HostSurfaceController(this);
         geometry = new HostGeometryController(this);
@@ -1182,68 +1184,14 @@ TopTaskGeometry topGeometry() {
         createNext(index + 1);
     }
 
-    TextView makeEmptyHint() {
-        TextView tv = new TextView(ctx) {
-            private final android.graphics.Paint plus = new android.graphics.Paint(
-                    android.graphics.Paint.ANTI_ALIAS_FLAG);
-            @Override protected void onDraw(android.graphics.Canvas canvas) {
-                super.onDraw(canvas);
-                if (length() != 0) return;
-                drawEmptyCellPlus(canvas, getWidth(), getHeight(), getCurrentTextColor(), plus);
-            }
-        };
-        // SurfaceView clears a hole through the host. Paint above that hole while empty.
-        tv.setBackground(HyperOsStyle.emptyCell(ctx));
-        tv.setText("");
-        tv.setTextColor(HyperOsStyle.textSecondary(ctx));
-        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 38f);
-        tv.setTypeface(android.graphics.Typeface.create(
-                "sans-serif-light", android.graphics.Typeface.NORMAL));
-        tv.setGravity(Gravity.CENTER);
-        tv.setContentDescription("空白窗口，点按添加应用");
-        return tv;
-    }
+    TextView makeEmptyHint() { return chrome.makeEmptyHint(); }
 
-    void drawEmptyCellPlus(android.graphics.Canvas canvas, int width, int height,
-            int color, android.graphics.Paint plus) {
-        plus.setColor(color);
-        plus.setStrokeWidth(HyperOsStyle.dp(ctx, 1.25f));
-        plus.setStrokeCap(android.graphics.Paint.Cap.ROUND);
-        float x = width * .5f, y = height * .5f;
-        float radius = HyperOsStyle.dp(ctx, 10f);
-        canvas.drawLine(x - radius, y, x + radius, y, plus);
-        canvas.drawLine(x, y - radius, x, y + radius, plus);
-    }
+    void drawEmptyCellPlus(android.graphics.Canvas canvas, int width, int height,            int color, android.graphics.Paint plus) { chrome.drawEmptyCellPlus(canvas, width, height, color, plus); }
 
-    private FrameLayout.LayoutParams hintParams(Slot slot) {
-        return new FrameLayout.LayoutParams(
-                slot.rect[2] - slot.rect[0], slot.rect[3] - slot.rect[1]);
-    }
+    private FrameLayout.LayoutParams hintParams(Slot slot) { return chrome.hintParams(slot); }
 
     /** 空格子显示"+"提示；有任务时隐藏。 */
-    void updateHint(Slot slot) {
-        if(slot.index==SLOT_TOP) {
-            ensureCellBackground(slot); updateCellSurfaceVisibility(slot);
-            if(topCtrl.topTaskPane!=null)topCtrl.topTaskPane.occupied(slot.occupied && !slot.parked);
-            return;
-        }
-        ensureCellBackground(slot);
-        updateCellSurfaceVisibility(slot);
-        if (slot.hint == null) {
-            return;
-        }
-        if (slot.hint instanceof TextView) {
-            TextView label = (TextView) slot.hint;
-            label.setText(slot.parked ? "恢复" : "");
-            label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP,
-                    slot.parked ? 15f : 38f);
-            label.setTextColor(slot.parked
-                    ? HyperOsStyle.accent(ctx) : HyperOsStyle.textSecondary(ctx));
-            label.setContentDescription(slot.parked
-                    ? "已保留的窗口，点按恢复" : "空白窗口，点按添加应用");
-        }
-        slot.hint.setVisibility(slot.occupied && !slot.parked ? View.GONE : View.VISIBLE);
-    }
+    void updateHint(Slot slot) { chrome.updateHint(slot); }
 
     /** An empty TaskView keeps its last resize background; hide that container, not a screenshot. */
     void updateCellSurfaceVisibility(Slot slot) { cellLayout.updateCellSurfaceVisibility(slot); }
@@ -1254,7 +1202,7 @@ TopTaskGeometry topGeometry() {
     void prepareCellSurface(Slot slot) { cellLayout.prepareCellSurface(slot); }
 
     /** A host-owned backing stays inside the cell, below the real task, even for translucent apps. */
-    private void ensureCellBackground(Slot slot) { cellLayout.ensureCellBackground(slot); }
+    void ensureCellBackground(Slot slot) { cellLayout.ensureCellBackground(slot); }
 
     void registerDefaultDisplayListener() {
         if (displayListener != null) return;
@@ -1282,123 +1230,24 @@ TopTaskGeometry topGeometry() {
 
     private void refreshDisplayGeometry() { geometry.refreshDisplayGeometry(); }
 
-    void refreshQuickApps() {
-        if (topBar == null || root == null) return;
-        final MiStepTopBar readyBar = topBar;
-        final FrameLayout readyRoot = root;
-        final long readyEpoch = sceneEpoch;
-        MiStepWarmup.whenQuickAppsReady(ctx, apps -> {
-            if (sInstance == this && topBar == readyBar && root == readyRoot
-                && sceneEpoch == readyEpoch && screenOn && !keyguardLocked)
-                readyBar.setQuickApps(apps);
-        });
-    }
+    void refreshQuickApps() { chrome.refreshQuickApps(); }
 
-    void updateTopBarState() {
-        if (workspaceAnimator != null || workspaceAlpha < 1f) return;
-        boolean available = scene == ACTIVE && screenOn && !keyguardLocked
-                && promotion == null && !transferBusy;
-        if (topBar != null) topBar.setAlpha(available ? 1f : 0.92f);
-    }
+    void updateTopBarState() { chrome.updateTopBarState(); }
 
 
 
 
 
     /** 只取桌面壁纸做高斯模糊底（不使用应用内容），供顶栏/侧栏格子的液态玻璃使用。 */
-    void loadWallpaperBackdrop() {
-        if (wallpaperBackdropRequested) return;
-        if (wallpaperBackdrop != null && !wallpaperBackdrop.isRecycled()) {
-            applyWallpaperBackdrops();
-            return;
-        }
-        if (screenW <= 0 || screenH <= 0) return;
-        wallpaperBackdropRequested = true;
-        Thread loader = new Thread(() -> {
-            Bitmap ready = null;
-            try {
-                ready = MiStepWarmup.wallpaper(ctx, screenW, screenH);
-            } catch (Throwable error) {
-                log("wallpaper blur failed: " + error);
-            }
-            final Bitmap bitmap = ready;
-            main.post(() -> {
-                wallpaperBackdropRequested = false;
-                if (bitmap == null || bitmap.isRecycled()) {
-                    log("wallpaper blur unavailable");
-                    return;
-                }
-                if (wallpaperBackdrop != null) {
-                    MiStepClipboard.get(ctx).close();
-                    wallpaperBackdrop.recycle();
-                }
-                wallpaperBackdrop = bitmap;
-                log("wallpaper gaussian backdrop ready " + bitmap.getWidth() + "x" + bitmap.getHeight());
-                applyWallpaperBackdrops();
-            });
-        }, "MiStepWallpaperBlur");
-        loader.start();
-    }
+    void loadWallpaperBackdrop() { chrome.loadWallpaperBackdrop(); }
 
-    void applyWallpaperBackdrops() {
-        if (wallpaperBackdrop == null || wallpaperBackdrop.isRecycled() || layout == null) return;
-        if (topBar != null) topBar.setWallpaperBackdrop(wallpaperBackdrop, screenW, screenH);
-        if (topStripBacking != null) {
-            topStripBacking.setBackground(new WallpaperCropDrawable(wallpaperBackdrop, screenW, screenH,
-                    0, 0, HyperOsStyle.topWallpaperTint(ctx)));
-        }
-        Slot upper=slots[SLOT_TOP];
-        if(upper!=null && upper.hint!=null && !upper.occupied)
-            upper.hint.setBackground(new WallpaperCropDrawable(wallpaperBackdrop,screenW,screenH,
-                    0,0,HyperOsStyle.topWallpaperTint(ctx)));
-        int x = layout.mainOnRight ? 0 : layout.mainWidth;
-        for (int i = 1; i < CELL_SLOT_COUNT; i++) {
-            View backing = sideBackingViews[i];
-            if (backing == null) continue;
-            backing.setBackground(new WallpaperCropDrawable(wallpaperBackdrop, screenW, screenH,
-                    x, sideSegmentTop(i), HyperOsStyle.topWallpaperTint(ctx)));
-            Slot slot = slots[i];
-            if (slot == null || slot.hint == null || slot.occupied || slot.rect == null) continue;
-            slot.hint.setBackground(new WallpaperCropDrawable(wallpaperBackdrop, screenW, screenH,
-                    slot.rect[0], slot.rect[1], HyperOsStyle.topWallpaperTint(ctx)));
-        }
-    }
+    void applyWallpaperBackdrops() { chrome.applyWallpaperBackdrops(); }
 
     /** 角部滑动起手在状态栏区域时 MIUI 通知栏/控制中心会被顺带拉出并盖住主区；打开一步后主动收起。 */
-    void collapseStatusBarPanels() {
-        try {
-            Object sbm = ctx.getSystemService(Context.STATUS_BAR_SERVICE);
-            if (sbm == null) return;
-            java.lang.reflect.Method method = sbm.getClass().getMethod("collapsePanels");
-            method.invoke(sbm);
-            log("status bar panels collapsed");
-        } catch (Throwable error) {
-            log("collapse status bar panels failed: " + error);
-        }
-    }
+    void collapseStatusBarPanels() { chrome.collapseStatusBarPanels(); }
 
     /** 换壁纸后自动重算模糊底，避免一步里还是旧壁纸。 */
-    private void registerWallpaperReceiver() {
-        if (wallpaperReceiver != null) return;
-        try {
-            wallpaperReceiver = new BroadcastReceiver() {
-                @Override public void onReceive(Context context, Intent intent) {
-                    log("wallpaper changed; reloading blur backdrop");
-                    MiStepClipboard.get(ctx).close();
-                    if (wallpaperBackdrop != null) {
-                        wallpaperBackdrop.recycle();
-                        wallpaperBackdrop = null;
-                    }
-                    wallpaperBackdropRequested = false;
-                    loadWallpaperBackdrop();
-                }
-            };
-            ctx.registerReceiver(wallpaperReceiver, new IntentFilter(Intent.ACTION_WALLPAPER_CHANGED));
-            log("wallpaper change receiver registered");
-        } catch (Throwable error) {
-            log("wallpaper receiver failed: " + error);
-        }
-    }
+    private void registerWallpaperReceiver() { chrome.registerWallpaperReceiver(); }
 
     private void registerDesktopIconReceiver() {
         if (desktopIconReceiver != null) return;
@@ -1932,10 +1781,7 @@ TopTaskGeometry topGeometry() {
     Rect liveSideStrip(MiStepLayout geometry) { return swapController.liveSideStrip(geometry); }
 
     /** Paint only empty Host controls; real app buffers remain the original task surfaces. */
-    void drawLiveEmptyHints(android.graphics.Canvas canvas, MiStepLayout original,
-            MiStepLayout target, int revealEmptySlots) {
-        swapController.drawLiveEmptyHints(canvas, original, target, revealEmptySlots);
-    }
+    void drawLiveEmptyHints(android.graphics.Canvas canvas, MiStepLayout original,            MiStepLayout target, int revealEmptySlots) { chrome.drawLiveEmptyHints(canvas, original, target, revealEmptySlots); }
 
     boolean holdsLiveFlipZoom() { return swapController.holdsLiveFlipZoom(); }
 
