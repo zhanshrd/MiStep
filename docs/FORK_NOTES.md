@@ -152,3 +152,36 @@ git diff 32555b4...upstream/main --stat    # 上游改动面
 - R3-A2（HotZoneGesture 65ms 延迟触发 × 并发 opener 的跨源竞态：刚开的会话被延迟 toggle 关闭）：机制确认，但**无干净修法**——延迟 runnable 里加任何场景门都会同时杀掉 F-A5 的合法「RESUMING 期间再次滑动=取消」；区分两种场景需要从 HotZoneGesture 向 MiStepHost 传入打开归因状态（结构性改动，无真机验证条件）。记为 **F-A5 的已知接受代价**（65ms 窗口、可恢复、零状态损伤）。
 - R3-A3（三处休眠接线）：`AppRawInputHook.install` 全包零调用（app 进程在 handleLoadPackage 提前返回，永不武装；被 `NativeRawInputBridge.install` 取代）；`MiStepWeChatNative.install/.request` 仅 tests/ 引用（生产走 `MiStepWeChatShortcut.open`，tests 保留作 WeChat 更新形状金丝雀）；`HostMirrorController.attachMirrorCarrier` private 零调用——**连带**：`slot.carrier=true` 仅在其中赋值，整套 carrier 下游（reassertCarrier/restoreCarrierToMain 的 carrier 分支/carrier 底板）当前为惰性空转。接线前勿假设生效（与 B7 同族）。
 - R3-B2（接收器在 pendingLiveZoom≠null 时跳过停靠、事后无人补停）：**维持台账**——严格窄于 R1 修复前的已裁决状态（修复前永不注销），pending 窗口必有界自终止（ACK 或 ≤1.5s 超时），正确性无损；无新严重度证据，不构成 finding。
+## 13. 全仓文件拆分收尾（2026-11-02，批次 F-V）
+
+目标：所有源文件 ≤1000 行。起点 MiStepHost 4240 / HostEntry 3377 / HostSwapController 1251，终点 177 个 java 文件全部达标、0 超标。
+
+### 批次链（每批独立提交，javac + port_retest 23 项全过后提交）
+- F：debug/POC/trace → HostDebugController（批次 E 重试，掩码方案）
+- G：显示几何 → HostGeometryController（旧批次 4 重试）
+- H：保留表面 → HostSurfaceController
+- I：格子布局/动画 → HostCellLayoutController
+- J：提示条/壁纸/顶栏 → HostChromeController
+- K：任务事件/slot 生命周期 → HostTaskEventController
+- L：启动/桌面图标发布 → HostLaunchController
+- M：拖拽/缩放/WCT/窗口状态 → HostWindowController
+- N：任务用户缓存/根枚举/看门狗 → HostStateController
+- P：9 个嵌套数据类提升为顶层（Slot/Promotion/LiveTask 等），全模块 MiStepHost.X 改名
+- Q：live 交换收尾 → HostLiveSwapFinishController（首个 controller-of-controller 批次）
+- R/S/T/U/V：HostEntry 拆为 Zoom / Rotation / NativeFreeform / Support / Launch（static-src 模式）
+- MiStepHost 4240→983，HostEntry 3377→658，HostSwapController 1251→901
+
+### 工具（tools/splitkit.py）
+掩码保护改写（字符串/注释永不被改写）+ 三类白名单（实例→h.、静态/嵌套→MiStepHost.）+ 局部名遮蔽排除 + shim 按需生成（一律包私有、保留 throws 子句）。修过的坑：声明类型可含标点/纯空格、'==' 不是赋值、'return new X(' 假方法、多声明符字段、构造器被当成员、0 缩进成员、内部类 h.new X、this::/MiStepHost.this/sInstance==this 语义、checked exceptions、controller-of-controller 与 static-src 模式。
+
+### 真机回归
+每次部署后 root 广播 5 项冒烟（TOGGLE 开 / DEBUG slot+pkg 侧启 / --ez swap true 交换 / TOGGLE 关 / logcat 零 FATAL）。最终构建 SHA256=a0c1b1e6 5/5 全过。
+- 准入守卫语义：熄屏/锁屏时 toggleOrStart 静默拒绝（canOpen=false）——观察端假象，不是回归。测试前 `su -c 'svc power stayon true'` + WAKEUP。
+- HyperOS 拒绝 shell 身份触发 EXPORTED 接收器，广播必须走 su（已录 learning）。
+
+### 已知行为改动（有意）
+- 9 个嵌套数据类从 MiStepHost 内嵌提升为包级类；引用点全模块改写。
+- LiveZoomRequest/NativeObservation 保持引用宿主，但前者改为顶层类显式传 (host, sc)。
+- ZoomTarget 去掉 owner 字段（入口静态化后无需实例回调）。
+- HostEntry 一批实例方法转静态（原依赖全静态状态，语义等价）。
+- build.ps1 runtime-marker 校验从单文件改为模块目录计数（第三个标记随 hookSystemServer 迁移）。
