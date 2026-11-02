@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostWindowController winCtl;
     final HostLaunchController launcher;
     final HostTaskEventController taskEvents;
     final HostChromeController chrome;
@@ -133,11 +134,11 @@ public final class MiStepHost {
     /** 侧栏按格分段的不透明底板；承载格需要把它藏起来让下面的真实任务画面透出来。 */
     final View[] sideBackingViews = new View[SLOT_COUNT];
     boolean mainOnRight;
-    private View dragGhost;
-    private boolean dragMoved;
-    private float dragStartRawX;
-    private float dragStartRawY;
-    private Slot dragTarget;
+    View dragGhost;
+    boolean dragMoved;
+    float dragStartRawX;
+    float dragStartRawY;
+    Slot dragTarget;
     View keyguardMask;
     boolean keyguardLocked;
     static final int ACTIVE = 0, SUSPENDING = 1, SUSPENDED = 2, RESUMING = 3;
@@ -459,6 +460,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        winCtl = new HostWindowController(this);
         launcher = new HostLaunchController(this);
         taskEvents = new HostTaskEventController(this);
         chrome = new HostChromeController(this);
@@ -679,25 +681,10 @@ public final class MiStepHost {
     Rect logicalBounds() { return geometry.logicalBounds(); }
     Rect logicalBounds(Slot slot) { return geometry.logicalBounds(slot); }
     Slot slotForObject(Object object) { return geometry.slotForObject(object); }
-TopTaskGeometry topGeometry() {
-        return new TopTaskGeometry(screenW,screenH,layout.topStrip,DeviceProfile.statusBarHeightPx(ctx),
-                ctx.getResources().getDisplayMetrics().density);
-    }
+    TopTaskGeometry topGeometry() { return winCtl.topGeometry(); }
     /** Keep app metrics in the same logical viewport as the hosted surface and input. */
-    void applyTopConfiguration(Object wct, Object token, Slot slot) {
-        if (slot == null || slot.index != SLOT_TOP) return;
-        TopTaskGeometry geometry = topGeometry();
-        XposedHelpers.callMethod(wct, "setAppBounds", token, logicalBounds(slot));
-        // Inherit native density so retained app Views never mix cached px at two DPIs.
-        XposedHelpers.callMethod(wct, "setDensityDpi", token, 0);
-        int widthDp = Math.max(1, Math.round(geometry.logicalWidth * 160f / geometry.densityDpi));
-        int heightDp = Math.max(1, Math.round(geometry.logicalHeight * 160f / geometry.densityDpi));
-        XposedHelpers.callMethod(wct, "setScreenSizeDp", token, widthDp, heightDp);
-        XposedHelpers.callMethod(wct, "setSmallestScreenWidthDp", token, Math.min(widthDp, heightDp));
-    }
-    int[] slotBounds(Slot slot) {
-        return slot.index==SLOT_TOP ? topGeometry().bounds() : layout.cellBounds(slot.index-1);
-    }
+    void applyTopConfiguration(Object wct, Object token, Slot slot) { winCtl.applyTopConfiguration(wct, token, slot); }
+    int[] slotBounds(Slot slot) { return winCtl.slotBounds(slot); }
 
     java.util.Set<Integer> supportedTaskUsers() {
         long now = SystemClock.uptimeMillis();
@@ -737,20 +724,9 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    boolean supportsTaskUser(int userId) {
-        java.util.Set<Integer> ids = supportedTaskUsers();
-        return TaskUserPolicy.allows(userId, currentUserId(), ids);
-    }
+    boolean supportsTaskUser(int userId) { return winCtl.supportsTaskUser(userId); }
 
-    int currentUserId() {
-        try {
-            return (Integer) XposedHelpers.callStaticMethod(
-                    Class.forName("android.app.ActivityManager"), "getCurrentUser");
-        } catch (Throwable ignored) {
-            return (Integer) XposedHelpers.callStaticMethod(UserHandle.class, "getUserId",
-                    android.os.Process.myUid());
-        }
-    }
+    int currentUserId() { return winCtl.currentUserId(); }
 
     boolean ownsViewOrController(Object object) {
         if (object == null) return false;
@@ -1181,108 +1157,23 @@ TopTaskGeometry topGeometry() {
 
     void openSettingsInMain() { launcher.openSettingsInMain(); }
 
-    void beginWindowDrag(MotionEvent event) {
-        dragMoved = false;
-        dragStartRawX = event.getRawX();
-        dragStartRawY = event.getRawY();
-        dragTarget = null;
-    }
+    void beginWindowDrag(MotionEvent event) { winCtl.beginWindowDrag(event); }
 
-    void updateWindowDrag(MotionEvent event) {
-        float dx = event.getRawX() - dragStartRawX;
-        float dy = event.getRawY() - dragStartRawY;
-        if (!dragMoved && dx * dx + dy * dy < dp(10) * dp(10)) return;
-        dragMoved = true;
-        if (dragGhost == null) createDragGhost();
-        if (dragGhost != null) {
-            dragGhost.setX(event.getRawX() - dragGhost.getWidth() * 0.5f);
-            dragGhost.setY(event.getRawY() - dragGhost.getHeight() * 0.5f);
-        }
-        Slot target = slotAtPoint(event.getRawX(), event.getRawY());
-        if (target != dragTarget) {
-            setDropHighlight(dragTarget, false);
-            dragTarget = target;
-            setDropHighlight(dragTarget, true);
-        }
-    }
+    void updateWindowDrag(MotionEvent event) { winCtl.updateWindowDrag(event); }
 
-    void finishWindowDrag(MotionEvent event) {
-        boolean cancelled = event.getActionMasked() == MotionEvent.ACTION_CANCEL;
-        boolean moved = dragMoved;
-        Slot target = slotAtPoint(event.getRawX(), event.getRawY());
-        setDropHighlight(dragTarget, false);
-        if (dragGhost != null) {
-            root.removeView(dragGhost);
-            dragGhost = null;
-        }
-        dragTarget = null;
-        if (!moved || cancelled) return;
-        if (target == null) {
-            log("window drag ended outside side cells");
-            return;
-        }
-        if (target.occupied) {
-            log("window drag target occupied slot=" + target.index);
-            android.widget.Toast.makeText(ctx, "请拖到空白副槽",
-                    android.widget.Toast.LENGTH_SHORT).show();
-            return;
-        }
-        log("window drag collect main into slot=" + target.index);
-        captureMainIntoEmptySlot(target);
-    }
+    void finishWindowDrag(MotionEvent event) { winCtl.finishWindowDrag(event); }
 
-    private void createDragGhost() {
-        TextView ghost = new TextView(ctx);
-        ghost.setText("当前应用");
-        ghost.setTextColor(HyperOsStyle.textPrimary(ctx));
-        ghost.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f);
-        ghost.setTypeface(android.graphics.Typeface.create(
-                "sans-serif-medium", android.graphics.Typeface.NORMAL));
-        ghost.setGravity(Gravity.CENTER);
-        ghost.setAlpha(0.92f);
-        ghost.setElevation(1600f);
-        ghost.setBackground(HyperOsStyle.glassPill(ctx, 18f, true));
-        int width = dp(120), height = dp(56);
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(width, height);
-        params.leftMargin = Math.round(dragStartRawX - width * 0.5f);
-        params.topMargin = Math.round(dragStartRawY - height * 0.5f);
-        root.addView(ghost, params);
-        dragGhost = ghost;
-        root.requestLayout();
-    }
+    private void createDragGhost() { winCtl.createDragGhost(); }
 
-    private void setDropHighlight(Slot slot, boolean active) {
-        if (slot == null || slot.hint == null) return;
-        float scale = active ? 1.06f : 1f;
-        slot.hint.setScaleX(scale);
-        slot.hint.setScaleY(scale);
-        LiveSwapVisualLease.writeAlpha(slot.hint, 1f);
-    }
+    private void setDropHighlight(Slot slot, boolean active) { winCtl.setDropHighlight(slot, active); }
 
     /** 侧栏第 slotIndex 格的分段底板 top（与相邻格共享边界，保证列无缝）。 */
-    int sideSegmentTop(int slotIndex) {
-        if (slotIndex <= 1 || layout == null) return layout == null ? 0 : layout.topStrip;
-        int[] previous = layout.cellBounds(slotIndex - 2);
-        return previous[3];
-    }
+    int sideSegmentTop(int slotIndex) { return winCtl.sideSegmentTop(slotIndex); }
 
     /** 侧栏第 slotIndex 格的分段底板高度。 */
-    int sideSegmentHeight(int slotIndex) {
-        if (layout == null) return 1;
-        int top = sideSegmentTop(slotIndex);
-        int bottom = slotIndex >= CELL_SLOT_COUNT - 1 ? screenH : layout.cellBounds(slotIndex - 1)[3];
-        return Math.max(1, bottom - top);
-    }
+    int sideSegmentHeight(int slotIndex) { return winCtl.sideSegmentHeight(slotIndex); }
 
-    private Slot slotAtPoint(float x, float y) {
-        if (layout == null || y < layout.topStrip) return null;
-        for (Slot slot : slots) {
-            if (slot.index <= SLOT_MAIN || slot.index >= CELL_SLOT_COUNT || slot.rect == null) continue;
-            if (x >= slot.rect[0] && x < slot.rect[2]
-                    && y >= slot.rect[1] && y < slot.rect[3]) return slot;
-        }
-        return null;
-    }
+    private Slot slotAtPoint(float x, float y) { return winCtl.slotAtPoint(x, y); }
 
     int dp(float value) { return cellLayout.dp(value); }
 
@@ -1292,14 +1183,7 @@ TopTaskGeometry topGeometry() {
 
     void closeSurfaceObject(Object object, String method) { cellLayout.closeSurfaceObject(object, method); }
 
-    int slotIndexOfView(View view) {
-        for (Slot s : slots) {
-            if (s.view == view) {
-                return s.index;
-            }
-        }
-        return -1;
-    }
+    int slotIndexOfView(View view) { return winCtl.slotIndexOfView(view); }
 
     void applyRect(Slot slot) { cellLayout.applyRect(slot); }
 
@@ -1322,60 +1206,10 @@ TopTaskGeometry topGeometry() {
     void applyMainLayout(MiStepLayout target) { cellLayout.applyMainLayout(target); }
 
     /** Only the top strip / side column receive host input; transitions may cover the display. */
-    void installHostTouchRegion() {
-        Class<?> listenerClass = XposedHelpers.findClass(
-                "android.view.ViewTreeObserver$OnComputeInternalInsetsListener", ctx.getClassLoader());
-        Object listener = Proxy.newProxyInstance(listenerClass.getClassLoader(),
-                new Class<?>[]{listenerClass}, (proxy, method, args) -> {
-                    if (method.getDeclaringClass() == Object.class) {
-                        if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
-                        if ("equals".equals(method.getName())) return proxy == args[0];
-                        return "MiStepHostTouchRegion";
-                    }
-                    if (!"onComputeInternalInsets".equals(method.getName()) || root == null) {
-                        return null;
-                    }
-                    Object info = args[0];
-                    XposedHelpers.callMethod(info, "setTouchableInsets", 3); // TOUCHABLE_INSETS_REGION
-                    Region touchable = (Region) XposedHelpers.getObjectField(info, "touchableRegion");
-                    touchable.setEmpty();
-                    if (swapPreview != null || cellMovePreview != null) {
-                        touchable.set(0, 0, screenW, screenH);
-                    } else if (liveSwapInputBlocked) {
-                        touchable.set(0, 0, screenW, screenH);
-                    } else {
-                        touchable.set(0, 0, screenW, layout.topStrip);
-                        touchable.op(new Rect(layout.cellX, layout.topStrip,
-                                        layout.cellX + layout.cellWidth, screenH),
-                                Region.Op.UNION);
-                        Slot upper=slots[SLOT_TOP];
-                        if(topCtrl.topFace && topCtrl.topTaskPane!=null && !topCtrl.topTaskPane.choosing()
-                                && topCtrl.topRoll!=null && !topCtrl.topRoll.rolling() && upper.occupied && !upper.parked
-                                && !upper.promoting && upper.rect!=null)
-                            touchable.op(new Rect(upper.rect[0],upper.rect[1],upper.rect[2],upper.rect[3]),Region.Op.DIFFERENCE);
-                    }
-                    return null;
-                });
-        XposedHelpers.callMethod(root.getViewTreeObserver(),
-                "addOnComputeInternalInsetsListener", listener);
-        log("host input: top/side only; system main passes through");
-    }
+    void installHostTouchRegion() { winCtl.installHostTouchRegion(); }
 
     /** Side TaskViews return their touch areas to the host for tap/drag arbitration. */
-    void updateTouchRegion(Slot slot) {
-        try {
-            if (slot.view == null) {
-                return;
-            }
-            Method m = slot.view.getClass().getMethod("setObscuredTouchRegion", Region.class);
-            // Only side cells exist. Their own scaled contents still use targeted injection.
-            Object arg = liveSwapInputBlocked ? new Region(0, 0, screenW, screenH) : slot.index==SLOT_TOP ? null : slot.rect == null ? null
-                    : new Region(slot.rect[0], slot.rect[1], slot.rect[2], slot.rect[3]);
-            m.invoke(slot.view, arg);
-        } catch (Throwable t) {
-            log("updateTouchRegion slot=" + slot.index + " failed: " + t);
-        }
-    }
+    void updateTouchRegion(Slot slot) { winCtl.updateTouchRegion(slot); }
 
     // ---------------------------------------------------------------- v0.9 触摸仲裁与定向注入
 
@@ -1396,7 +1230,7 @@ TopTaskGeometry topGeometry() {
     /** Keep tap-to-swap, transfer a drag to its real window without reinjecting coordinates. */
     private void transferTouchToTask(Slot slot, long eventTime) { swapController.transferTouchToTask(slot, eventTime); }
 
-    private int uidOf(String pkg) { return HostStaticUtil.uidOf(ctx, pkg); }
+    private int uidOf(String pkg) { return winCtl.uidOf(pkg); }
 
     // ---------------------------------------------------------------- 点击 / 交换
 
@@ -1452,7 +1286,7 @@ TopTaskGeometry topGeometry() {
     }
 
     /** Official empty-cell flow: open an app from Home, then collect that exact task. */
-    private void captureMainIntoEmptySlot(Slot requestedSlot) { swapController.captureMainIntoEmptySlot(requestedSlot); }
+    void captureMainIntoEmptySlot(Slot requestedSlot) { swapController.captureMainIntoEmptySlot(requestedSlot); }
 
     /** Collect the actual fullscreen task; no captured app or desktop participates. */
     private void startLiveCollect(Slot slot, LiveTask task) { swapController.startLiveCollect(slot, task); }
@@ -1519,41 +1353,15 @@ TopTaskGeometry topGeometry() {
 
     void bindTask(Slot slot, int taskId, Object token) { taskEvents.bindTask(slot, taskId, token); }
 
-    static int windowModeOf(Object info) { return HostStaticUtil.windowModeOf(info); }
+    static int windowModeOf(Object info) { return HostWindowController.windowModeOf(info); }
 
-    static int configurationOrientationOf(Object info) { return HostStaticUtil.configurationOrientationOf(info); }
+    static int configurationOrientationOf(Object info) { return HostWindowController.configurationOrientationOf(info); }
 
-    static int requestedOrientationOf(Object info) { return HostStaticUtil.requestedOrientationOf(info); }
+    static int requestedOrientationOf(Object info) { return HostWindowController.requestedOrientationOf(info); }
 
-    void updateTaskWindowState(int slotIndex, Object info, int taskId, boolean active) {
-        if (info == null || taskId < 0) return;
-        try {
-            int mode = windowModeOf(info);
-            int configurationOrientation = configurationOrientationOf(info);
-            int requestedOrientation = requestedOrientationOf(info);
-            TaskWindowState state;
-            synchronized (taskWindowStatesLock) {
-                state = taskWindowStates.get(taskId);
-                if (state == null) {
-                    state = new TaskWindowState(taskId);
-                    taskWindowStates.put(taskId, state);
-                }
-            }
-            state.update(slotIndex, configurationOrientation, requestedOrientation,
-                    TaskWindowState.UNKNOWN_ROTATION, mode, mode == 1, active);
-            if (slotIndex > SLOT_MAIN && slotIndex < SLOT_COUNT) {
-                slots[slotIndex].windowState = state;
-            }
-        } catch (Throwable error) {
-            log("task window state update failed task=" + taskId + ": " + error);
-        }
-    }
+    void updateTaskWindowState(int slotIndex, Object info, int taskId, boolean active) { winCtl.updateTaskWindowState(slotIndex, info, taskId, active); }
 
-    void syncSlotWindowState(Slot slot) {
-        if (slot != null && slot.windowState != null) {
-            slot.windowState.slotIndex = slot.index;
-        }
-    }
+    void syncSlotWindowState(Slot slot) { winCtl.syncSlotWindowState(slot); }
 
     /**
      * TaskInfo 的多窗口能力标记：不支持的（例如相机）不是拒绝，而是走 mirror 承载。
@@ -1575,31 +1383,7 @@ TopTaskGeometry topGeometry() {
 
 
     /** 与气泡同原语：IStatusBarService.hideCurrentInputMethodForBubbles(displayId)（BC L776）。 */
-    void hideIme() {
-        try {
-            Class<?> sm = Class.forName("android.os.ServiceManager");
-            Object binder = sm.getMethod("getService", String.class).invoke(null, "statusbar");
-            Class<?> stub = Class.forName("com.android.internal.statusbar.IStatusBarService$Stub");
-            Object svc = stub.getMethod("asInterface", android.os.IBinder.class).invoke(null, binder);
-            Method m = null;
-            for (Class<?> c = svc.getClass(); c != null && m == null; c = c.getSuperclass()) {
-                try {
-                    m = c.getDeclaredMethod("hideCurrentInputMethodForBubbles", int.class);
-                } catch (NoSuchMethodException ignored) {
-                    // 继续往父类找
-                }
-            }
-            if (m == null) {
-                log("hideIme: method not found");
-                return;
-            }
-            m.setAccessible(true);
-            m.invoke(svc, 0);
-            log("hideIme invoked");
-        } catch (Throwable t) {
-            log("hideIme failed: " + t);
-        }
-    }
+    void hideIme() { winCtl.hideIme(); }
 
     // ---------------------------------------------------------------- 启动 / 关闭任务
 
@@ -1659,165 +1443,32 @@ TopTaskGeometry topGeometry() {
 
     private boolean visibilityRepairCurrent(Slot slot, long epoch, long binding, int id, Object token) { return taskEvents.visibilityRepairCurrent(slot, epoch, binding, id, token); }
 
-    String describeTasks() {
-        StringBuilder sb = new StringBuilder();
-        for (Slot s : slots) {
-            sb.append(" [").append(s.index).append(':')
-                    .append(s.taskId).append(s.occupied ? "" : "(empty)")
-                    .append(s.taskVisible ? "/vis" : "/hid");
-            if (s.windowState != null) {
-                sb.append("/o").append(s.windowState.configurationOrientation)
-                        .append("/r").append(s.windowState.resolvedRotation)
-                        .append("/m").append(s.windowState.windowingMode)
-                        .append(s.windowState.fullscreen ? "/full" : "/windowed");
-            }
-            sb.append(']');
-        }
-        return sb.toString();
-    }
+    String describeTasks() { return winCtl.describeTasks(); }
 
-    boolean executeOnShell(Runnable task) {
-        try {
-            Object shell = XposedHelpers.getObjectField(transitions, "mShellExecutor");
-            if (shell instanceof Executor) {
-                ((Executor) shell).execute(task);
-                return true;
-            }
-        } catch (Throwable t) {
-            log("Shell executor failed: " + t);
-        }
-        return false;
-    }
+    boolean executeOnShell(Runnable task) { return winCtl.executeOnShell(task); }
 
     // ---------------------------------------------------------------- v0.9 等比缩小（自绘矩阵）
 
-    float mainScale() {
-        return layout.mainScale;
-    }
+    float mainScale() { return winCtl.mainScale(); }
 
-    float cellScale() {
-        return layout.cellScale(0);
-    }
+    float cellScale() { return winCtl.cellScale(); }
 
     /** Only side tasks are hosted; the system handles main-screen scaling. */
-    float scaleFor(Slot slot) {
-        return slot.index == SLOT_TOP ? topGeometry().scale : layout.cellScale(slot.index - 1);
-    }
+    float scaleFor(Slot slot) { return winCtl.scaleFor(slot); }
 
     /**
      * 把任务内容按 k 等比缩放显示到槽位里（官方 DisplayContentSmtEx.applyZoomedMatrixSmt 的等价做法）。
      * 任务窗口保持满屏（应用按整屏手机排版），只对承载表面做矩阵缩放，视觉就是"整屏缩小"。
      */
-    void applySlotScale(Slot slot) {
-        if (holdsLiveFlipZoom() || !canRender(slot) || slot.promoting || !slot.occupied || slot.view == null
-                || !mayWriteSideSurface(slot)) {
-            return;
-        }
-        float k = scaleFor(slot);
-        Object liveLeash = getSurfaceField(slot.controller, "mTaskLeash");
-        if (!controllerOwns(slot, slot.taskId, slot.taskToken)) return;
-        if (liveLeash != null && slot.scaleSurface == liveLeash
-                && slot.scaleTaskId == slot.taskId && Math.abs(slot.scaleApplied - k) < 0.0005f) {
-            return;
-        }
-        // 顺序很重要（真机实测）：先读 leash 做缩放，再改整屏边界 —— 反过来会让
-        // TaskViewTransitions 把 mTaskLeash 清空重建，900ms 内都读不到。
-        if (liveLeash == null) {
-            if (slot.scaleAttempts >= 8) return;
-            slot.scaleAttempts++;
-            log("applySlotScale slot=" + slot.index + " leash not ready, retry #" + slot.scaleAttempts);
-            main.postDelayed(() -> applySlotScale(slot), 200L);
-            return;
-        }
-        slot.scaleAttempts = 0;
-        Object sc = liveLeash;
-        slot.scaleOnLeash = true;
-        if (applyScaleTransform(slot, sc)) {
-            slot.scaleSurface = sc;
-            slot.scaleTaskId = slot.taskId;
-            slot.scaleApplied = k;
-            OwnedTask accepted = ownedTasks.get(slot.taskToken);
-            if (accepted != null) accepted.surface = sc;
-            log("applySlotScale slot=" + slot.index + " task=" + slot.taskId
-                    + " k=" + k + " onLeash=" + slot.scaleOnLeash + " surface=" + sc);
-        }
-        // TaskView 会把任务边界同步成视图大小（真机实测 DeepSeek=[0,622][807,2460]、设置=550
-        // 宽右对齐）→ 改回整屏 1080×2460，应用才按"整屏手机"排版。放在缩放之后执行。
-        // The opening/bounds guards already enforce logical full-screen sizing.
-        // 转场/可见性变化可能覆盖矩阵：在几个延迟点重发。
-        main.postDelayed(() -> reapplyScale(slot), 300L);
-        main.postDelayed(() -> reapplyScale(slot), 1200L);
-    }
+    void applySlotScale(Slot slot) { winCtl.applySlotScale(slot); }
 
-    void reapplyScale(Slot slot) {
-        if (holdsLiveFlipZoom() || !canRender(slot) || slot.promoting || !slot.occupied || !mayWriteSideSurface(slot)) {
-            return;
-        }
-        if (!controllerOwns(slot, slot.taskId, slot.taskToken)) return;
-        Object current = getSurfaceField(slot.controller, "mTaskLeash");
-        if (current == null || current != slot.scaleSurface) {
-            applySlotScale(slot);
-            return;
-        }
-        if (!applyScaleTransform(slot, slot.scaleSurface)) {
-            // 表面可能已失效（任务重启/改边界后转场重建）：清缓存 + 放开去重门槛，
-            // 下次 TaskInfo 变化时重新解析并整套重来。
-            slot.scaleSurface = null;
-            slot.scaleTaskId = Integer.MIN_VALUE;
-            slot.scaleApplied = -1f;
-        }
-    }
+    void reapplyScale(Slot slot) { winCtl.reapplyScale(slot); }
 
     /** 把任务边界改回整屏（0,0,1080,2460），应用即按"整屏手机"排版。 */
-    void applyFullscreenBounds(Slot slot) {
-        if (holdsLiveFlipZoom() || !canRender(slot) || slot.promoting || slot.taskToken == null
-                || !mayWriteSideSurface(slot)) {
-            return;
-        }
-        if (!controllerOwns(slot, slot.taskId, slot.taskToken)
-                || getSurfaceField(slot.controller, "mTaskLeash") == null) return;
-        try {
-            Object wct = Class.forName("android.window.WindowContainerTransaction")
-                    .getDeclaredConstructor().newInstance();
-            XposedHelpers.callMethod(wct, "setForceTranslucent", slot.taskToken, true);
-            XposedHelpers.callMethod(wct, "setBounds", slot.taskToken,
-                    logicalBounds(slot));
-            applyTopConfiguration(wct, slot.taskToken, slot);
-            boolean ok = applyWct("fullscreenBounds(slot=" + slot.index + ")", wct);
-            log("fullscreenBounds slot=" + slot.index + " task=" + slot.taskId + " ok=" + ok);
-        } catch (Throwable t) {
-            log("fullscreenBounds slot=" + slot.index + " failed: " + t);
-        }
-    }
+    void applyFullscreenBounds(Slot slot) { winCtl.applyFullscreenBounds(slot); }
 
     /** 统一施加"缩放 + 归位"：leash 需要 setPosition(0,0)，容器表面不能动位置。 */
-    private boolean applyScaleTransform(Slot slot, Object sc) {
-        if (holdsLiveFlipZoom() || !canRender(slot) || slot.promoting || !mayWriteSideSurface(slot)) return false;
-        float k = scaleFor(slot);
-        Object tx = null;
-        try {
-            tx = Class.forName("android.view.SurfaceControl$Transaction")
-                    .getDeclaredConstructor().newInstance();
-            if (slot.scaleOnLeash) {
-                XposedHelpers.callMethod(tx, "setPosition", sc, 0f, 0f);
-                // v1.1.3：视口也要对齐 —— 只缩不放位置会"比例对但只显示一部分"（真机反馈）。
-                try {
-                    XposedHelpers.callMethod(tx, "setWindowCrop", sc,
-                            logicalBounds(slot));
-                } catch (Throwable ignored) {
-                    // 裁剪失败也继续，位置+矩阵仍是主体
-                }
-            }
-            XposedHelpers.callMethod(tx, "setMatrix", sc, k, 0f, 0f, k);
-            XposedHelpers.callMethod(tx, "apply");
-            return true;
-        } catch (Throwable t) {
-            log("applyScaleTransform slot=" + slot.index + " failed: " + t);
-            return false;
-        } finally {
-            closeSurfaceObject(tx, "close");
-        }
-    }
+    private boolean applyScaleTransform(Slot slot, Object sc) { return winCtl.applyScaleTransform(slot, sc); }
 
     /** A late mode6 finish must never pull a task selected by Launcher back into a cell. */
     boolean mayWriteSideSurface(Slot slot) { return surfaceCtl.mayWriteSideSurface(slot); }
@@ -1825,69 +1476,9 @@ TopTaskGeometry topGeometry() {
     /** 按字段名取 SurfaceControl（先本类后父类；取不到返回 null）。 */
     static Object getSurfaceField(Object target, String name) { return HostSurfaceController.getSurfaceField(target, name); }
 
-    boolean applyWct(String what, Object wct) {
-        Throwable first = null;
-        // 路线 A：框架公开类 WindowOrganizer（SystemUI 里可直接 new，真机已验证）。
-        try {
-            Class<?> c = Class.forName("android.window.WindowOrganizer");
-            Object organizer = c.getDeclaredConstructor().newInstance();
-            XposedHelpers.callMethod(organizer, "applyTransaction", wct);
-            log("wct(" + what + ") via WindowOrganizer");
-            return true;
-        } catch (Throwable t) {
-            first = t;
-        }
-        // 路线 B：从已捕获的 Shell 对象（transitions / controller）里找能 applyTransaction 的字段。
-        try {
-            Object applier = findWctApplier(wct);
-            if (applier != null) {
-                log("wct(" + what + ") via " + applier.getClass().getName());
-                return true;
-            }
-        } catch (Throwable t) {
-            log("wct fallback failed: " + t);
-        }
-        log("wct(" + what + ") FAILED: " + first);
-        return false;
-    }
+    boolean applyWct(String what, Object wct) { return winCtl.applyWct(what, wct); }
 
-    private Object findWctApplier(Object wct) {
-        Class<?> wctCls;
-        try {
-            wctCls = Class.forName("android.window.WindowContainerTransaction");
-        } catch (Throwable t) {
-            return null;
-        }
-        Object[] roots = {transitions, slots[0].controller, slots[1].controller,
-                slots[2].controller, slots[3].controller, slots[SLOT_TOP].controller};
-        for (Object r : roots) {
-            if (r == null) {
-                continue;
-            }
-            for (Class<?> c = r.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
-                for (Field f : c.getDeclaredFields()) {
-                    try {
-                        f.setAccessible(true);
-                        Object v = f.get(r);
-                        if (v == null || v == wct) {
-                            continue;
-                        }
-                        Method m;
-                        try {
-                            m = v.getClass().getMethod("applyTransaction", wctCls);
-                        } catch (NoSuchMethodException e) {
-                            continue;
-                        }
-                        m.invoke(v, wct);
-                        return v;
-                    } catch (Throwable ignored) {
-                        // 该字段不可读或不可用，继续找
-                    }
-                }
-            }
-        }
-        return null;
-    }
+    private Object findWctApplier(Object wct) { return winCtl.findWctApplier(wct); }
 
     static void log(String msg) { HostStaticUtil.log(msg); }
 }
