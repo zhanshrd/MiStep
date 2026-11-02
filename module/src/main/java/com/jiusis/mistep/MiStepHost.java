@@ -79,11 +79,11 @@ public final class MiStepHost {
     FrameLayout root;
     WindowManager wm;
     WindowManager.LayoutParams lp;
-    private DisplayManager displayManager;
+    DisplayManager displayManager;
     private DisplayManager.DisplayListener displayListener;
-    private volatile int displayRotation = -1;
-    private boolean geometryRefreshQueued;
-    private int geometryRefreshDeferrals;
+    volatile int displayRotation = -1;
+    boolean geometryRefreshQueued;
+    int geometryRefreshDeferrals;
     boolean geometryRefreshAfterLive;
     private int lpY = 0;
     boolean zoomed;
@@ -122,6 +122,7 @@ public final class MiStepHost {
     final HostTopTaskController topCtrl;
     final HostLifecycleController lifecycle;
     final HostAdoptionController adoption;
+    final HostGeometryController geometry;
     final HostDebugController debugCtrl;
     private View sideBacking;
     /** 侧栏按格分段的不透明底板；承载格需要把它藏起来让下面的真实任务画面透出来。 */
@@ -453,6 +454,7 @@ public final class MiStepHost {
         topCtrl = new HostTopTaskController(this);
         lifecycle = new HostLifecycleController(this);
         adoption = new HostAdoptionController(this);
+        geometry = new HostGeometryController(this);
         debugCtrl = new HostDebugController(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
         installRetainedSurfaces(ctx.getClassLoader());
@@ -572,7 +574,7 @@ public final class MiStepHost {
 
     Object shellOrganizer() { return mirrorController.shellOrganizer(); }
 
-    private void reassertCarrier() { mirrorController.reassertCarrier(); }
+    void reassertCarrier() { mirrorController.reassertCarrier(); }
 
     void restoreCarrierToMain() { mirrorController.restoreCarrierToMain(); }
 
@@ -634,86 +636,20 @@ public final class MiStepHost {
     void applyLeashTransform(Object leash, float x, float y, float sx, float sy) { debugCtrl.applyLeashTransform(leash, x, y, sx, sy); }
 
     /** Bounds of the visible main pane while the host owns the display zoom. */
-    static Rect activeMainBounds() {
-        MiStepHost h = sInstance;
-        if (h == null || h.scene != ACTIVE || !h.screenOn || h.layout == null) return null;
-        MiStepLayout active = h.layout;
-        return new Rect(active.mainX, active.mainY,
-                active.mainX + active.mainWidth, active.mainY + active.mainHeight);
-    }
+    static Rect activeMainBounds() { return HostGeometryController.activeMainBounds(); }
 
     /** Workspace matrix for a registered native main-task animation, never for a swap. */
-    static float[] activeMainTransform() {
-        MiStepHost h = sInstance;
-        if (h == null || !hostSceneActive() || h.layout == null
-                || h.promotion != null || h.transferBusy || h.keyguardLocked) return null;
-        MiStepLayout current = h.layout;
-        return new float[]{current.mainScale, current.mainOffsetY, current.mainOffsetX};
-    }
+    static float[] activeMainTransform() { return HostGeometryController.activeMainTransform(); }
 
-    static Rect nativeFreeformAnimationStart(Object change) {
-        MiStepHost h = sInstance;
-        float[] transform = activeMainTransform();
-        if (h == null || transform == null || change == null) return null;
-        try {
-            Object task = XposedHelpers.callMethod(change, "getTaskInfo");
-            if (task == null || windowModeOf(task) != 5
-                    || XposedHelpers.getIntField(task, "displayId") != 0
-                    || h.isSideToken(XposedHelpers.getObjectField(task, "token"))) return null;
-            int startRotation = (Integer) XposedHelpers.callMethod(change, "getStartRotation");
-            int endRotation = (Integer) XposedHelpers.callMethod(change, "getEndRotation");
-            if (startRotation < 0 || startRotation != endRotation) return null;
-            return NativeFreeformAnimation.startBounds(
-                    (Rect) XposedHelpers.callMethod(change, "getStartAbsBounds"),
-                    h.layout.width, h.layout.height, transform);
-        } catch (Throwable error) { return null; }
-    }
+    static Rect nativeFreeformAnimationStart(Object change) { return HostGeometryController.nativeFreeformAnimationStart(change); }
 
-    static float[] activeStatusBarTransform() {
-        MiStepHost h = sInstance;
-        if (h == null || !h.zoomed || !h.screenOn || h.keyguardLocked || h.layout == null
-                || h.root == null || h.root.getVisibility() != View.VISIBLE) return null;
-        MiStepLayout current = h.layout;
-        return new float[]{current.mainScale, current.mainOffsetY, current.mainOffsetX};
-    }
+    static float[] activeStatusBarTransform() { return HostGeometryController.activeStatusBarTransform(); }
 
-    static float[] activeIslandMonitorTransform() {
-        MiStepHost h = sInstance;
-        if (h == null || SystemClock.uptimeMillis() < h.zoomAnimUntil) return null;
-        return activeMainTransform();
-    }
+    static float[] activeIslandMonitorTransform() { return HostGeometryController.activeIslandMonitorTransform(); }
 
-    static boolean hostSceneActive() {
-        MiStepHost h = sInstance;
-        return h != null && h.zoomed && h.scene == ACTIVE && h.screenOn
-                && h.root != null && h.root.getVisibility() == View.VISIBLE;
-    }
+    static boolean hostSceneActive() { return HostGeometryController.hostSceneActive(); }
 
-    static boolean shouldClampAnimationBounds(Object info, Object change) {
-        MiStepHost h = sInstance;
-        if (h == null || info == null || change == null) return false;
-        try {
-            int transitionType = (Integer) XposedHelpers.callMethod(info, "getType");
-            int changeMode = (Integer) XposedHelpers.callMethod(change, "getMode");
-            Object task = XposedHelpers.callMethod(change, "getTaskInfo");
-            if (task == null) return false;
-            Object token = XposedHelpers.getObjectField(task, "token");
-            boolean sideTask = token == null || h.isSideToken(token) || windowModeOf(task) == 6;
-            int startRotation = -1;
-            int endRotation = -1;
-            try {
-                startRotation = (Integer) XposedHelpers.callMethod(change, "getStartRotation");
-                endRotation = (Integer) XposedHelpers.callMethod(change, "getEndRotation");
-            } catch (Throwable ignored) { }
-            boolean rotating = startRotation >= 0 && endRotation >= 0
-                    && startRotation != endRotation;
-            return TransitionAnimationPolicy.shouldClampOpenBounds(
-                    hostSceneActive(), h.promotion != null || h.transferBusy,
-                    transitionType, changeMode, sideTask, windowModeOf(task), rotating);
-        } catch (Throwable error) {
-            return false;
-        }
-    }
+    static boolean shouldClampAnimationBounds(Object info, Object change) { return HostGeometryController.shouldClampAnimationBounds(info, change); }
 
 
 
@@ -726,154 +662,13 @@ public final class MiStepHost {
 
 
     /** Process-wide hooks, restricted to these exact three view/controller identities. */
-    private static final ThreadLocal<java.util.List<MiStepSideClose>> nativeCloses = new ThreadLocal<>();
-    private static final ThreadLocal<Object> closeFinishTransaction = new ThreadLocal<>();
-    private static void installLogicalBoundsHooks(ClassLoader cl) {
-        if (boundsHooksReady) return;
-        java.util.List<XC_MethodHook.Unhook> installed = new java.util.ArrayList<>();
-        try {
-            Class<?> view = XposedHelpers.findClass("com.android.wm.shell.taskview.TaskView", cl);
-            Class<?> trans = XposedHelpers.findClass("com.android.wm.shell.taskview.TaskViewTransitions", cl);
-            Class<?> control = XposedHelpers.findClass("com.android.wm.shell.taskview.TaskViewTaskController", cl);
-            installed.addAll(XposedBridge.hookAllMethods(trans, "startAnimation", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
-                    MiStepHost h = sInstance;
-                    if (p.args.length != 6 || h == null || h.transitions != p.thisObject) return;
-                    java.util.List<MiStepSideClose> closes = h.closingTasks(p.args[1]);
-                    if (closes.isEmpty()) return;
-                    p.setObjectExtra("mistep.closes", closes);
-                    nativeCloses.set(closes);
-                    closeFinishTransaction.set(p.args[4]);
-                    Object original = p.args[5];
-                    Class<?> callback = Class.forName("com.android.wm.shell.transition.Transitions$TransitionFinishCallback", false, cl);
-                    java.util.concurrent.atomic.AtomicBoolean finished = new java.util.concurrent.atomic.AtomicBoolean();
-                    p.args[5] = java.lang.reflect.Proxy.newProxyInstance(cl, new Class<?>[]{callback}, (proxy, method, args) -> {
-                        if (!"onTransitionFinished".equals(method.getName())) return method.invoke(original, args);
-                        if (!finished.compareAndSet(false, true)) return null;
-                        java.util.concurrent.atomic.AtomicInteger remaining = new java.util.concurrent.atomic.AtomicInteger(closes.size());
-                        Runnable finish = () -> {
-                            if (remaining.decrementAndGet() == 0)
-                                XposedHelpers.callMethod(original, "onTransitionFinished", args[0]);
-                        };
-                        for (MiStepSideClose close : closes) close.animate(finish);
-                        return null;
-                    });
-                }
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    @SuppressWarnings("unchecked") java.util.List<MiStepSideClose> closes =
-                            (java.util.List<MiStepSideClose>) p.getObjectExtra("mistep.closes");
-                    if (closes == null) return;
-                    nativeCloses.remove();
-                    closeFinishTransaction.remove();
-                    if (p.hasThrowable() || !Boolean.TRUE.equals(p.getResult()))
-                        for (MiStepSideClose close : closes) close.abandon();
-                }
-            }));
-            installed.addAll(XposedBridge.hookAllMethods(control, "prepareCloseAnimation", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    java.util.List<MiStepSideClose> closes = nativeCloses.get();
-                    if (closes == null || p.hasThrowable() || p.args.length != 2) return;
-                    for (MiStepSideClose close : closes)
-                        if (close.controller == p.thisObject && close.surface == p.args[1]) {
-                            try { close.prepare(p.args[0], closeFinishTransaction.get()); }
-                            catch (Throwable error) { log("side close prepare: " + error); }
-                        }
-                }
-            }));
-            installed.add(XposedHelpers.findAndHookMethod(view, "onComputeInternalInsets",
-                    XposedHelpers.findClass("android.view.ViewTreeObserver$InternalInsetsInfo", cl),
-                    new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    MiStepHost h = sInstance;
-                    // TaskView normally punches its app hole out of the Host. Mi Step
-                    // owns the entire side strip for tap-to-promote. A moved/retired
-                    // TaskView must not subtract another cell after our Host listener.
-                    if (h != null && h.ownsViewOrController(p.thisObject)) p.setResult(null);
-                }
-            }));
-            installed.add(XposedHelpers.findAndHookMethod(view, "getCurrentBoundsOnScreen", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    MiStepHost h = sInstance;
-                    if (h != null && h.ownsViewOrController(p.thisObject)) p.setResult(h.logicalBounds(h.slotForObject(p.thisObject)));
-                }
-            }));
-            XC_MethodHook rectGuard = new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    MiStepHost h = sInstance;
-                    if (h != null && h.transitions == p.thisObject && h.ownsViewOrController(p.args[0]))
-                        p.args[1] = h.logicalBounds(h.slotForObject(p.args[0]));
-                }
-            };
-            installed.add(XposedHelpers.findAndHookMethod(trans, "setTaskBounds", control, Rect.class, rectGuard));
-            installed.add(XposedHelpers.findAndHookMethod(trans, "lambda$setTaskBounds$6", control, Rect.class, rectGuard));
-            java.util.Set<XC_MethodHook.Unhook> external = XposedBridge.hookAllMethods(trans,
-                    "isValidTaskView", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    MiStepHost h = sInstance;
-                    if (h != null && h.transitions == p.thisObject && p.args.length == 2
-                            && p.args[1] == null && h.leaveExternalChangeToNative(p.args[0]))
-                        p.setResult(false);
-                }
-            });
-            if (external.isEmpty()) throw new IllegalStateException("no external task change guard");
-            installed.addAll(external);
-            java.util.Set<XC_MethodHook.Unhook> unfold = XposedBridge.hookAllMethods(trans, "updateBoundsForUnfold", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    MiStepHost h = sInstance;
-                    if (h == null || h.transitions != p.thisObject || p.args.length < 2
-                            || !(p.args[0] instanceof Rect)) return;
-                    for (Object arg : p.args) {
-                        if (arg == null || !arg.getClass().getName().contains("RunningTaskInfo")) continue;
-                        Object controller = XposedHelpers.callMethod(p.thisObject, "findTaskView", arg);
-                        if (h.ownsViewOrController(controller)) {
-                            for (Slot slot : h.slots) {
-                                if (slot.controller == controller && !slot.parked
-                                        && h.controllerOwns(slot, XposedHelpers.getIntField(arg, "taskId"),
-                                        XposedHelpers.getObjectField(arg, "token"))) p.args[0] = h.logicalBounds(slot);
-                            }
-                        }
-                    }
-                }
-            });
-            if (unfold.isEmpty()) throw new IllegalStateException("no unfold bounds guard");
-            installed.addAll(unfold);
-            java.util.Set<XC_MethodHook.Unhook> opening = XposedBridge.hookAllMethods(trans, "prepareOpenAnimation", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    MiStepHost h = sInstance;
-                    if (h != null && h.transitions == p.thisObject && p.args.length == 7
-                            && h.ownsViewOrController(p.args[0])) {
-                        Object info = p.args[4];
-                        Object token = XposedHelpers.getObjectField(info, "token");
-                        Object wct = p.args[6];
-                        XposedHelpers.callMethod(wct, "setForceTranslucent", token, true);
-                        XposedHelpers.callMethod(wct, "setAlwaysOnTop", token, true);
-                        XposedHelpers.callMethod(wct, "setFocusable", token, true);
-                        Slot slot = h.slotForObject(p.args[0]);
-                        XposedHelpers.callMethod(wct, "setBounds", token, h.logicalBounds(slot));
-                        h.applyTopConfiguration(wct, token, slot);
-                    }
-                }
-            });
-            if (opening.isEmpty()) throw new IllegalStateException("no native opening guard");
-            installed.addAll(opening);
-            boundsHooksReady = true;
-            log("logical bounds guards installed: getter/queue/consumer/unfold");
-        } catch (Throwable error) {
-            for (XC_MethodHook.Unhook hook : installed) hook.unhook();
-            log("logical bounds guards unavailable; no task admission: " + error);
-        }
-    }
+    static final ThreadLocal<java.util.List<MiStepSideClose>> nativeCloses = new ThreadLocal<>();
+    static final ThreadLocal<Object> closeFinishTransaction = new ThreadLocal<>();
+    private static void installLogicalBoundsHooks(ClassLoader cl) { HostGeometryController.installLogicalBoundsHooks(cl); }
 
-    Rect logicalBounds() { return new Rect(0, 0, screenW, screenH); }
-    Rect logicalBounds(Slot slot) {
-        if(slot==null || slot.index!=SLOT_TOP)return logicalBounds();
-        TopTaskGeometry upper=topGeometry();
-        return new Rect(0,0,upper.logicalWidth,upper.logicalHeight);
-    }
-    Slot slotForObject(Object object) {
-        for(Slot slot:slots) if(slot.view==object || slot.controller==object)return slot;
-        return null;
-    }
+    Rect logicalBounds() { return geometry.logicalBounds(); }
+    Rect logicalBounds(Slot slot) { return geometry.logicalBounds(slot); }
+    Slot slotForObject(Object object) { return geometry.slotForObject(object); }
 TopTaskGeometry topGeometry() {
         return new TopTaskGeometry(screenW,screenH,layout.topStrip,DeviceProfile.statusBarHeightPx(ctx),
                 ctx.getResources().getDisplayMetrics().density);
@@ -947,7 +742,7 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private boolean ownsViewOrController(Object object) {
+    boolean ownsViewOrController(Object object) {
         if (object == null) return false;
         for (Slot slot : slots)
             if (slot.index > 0 && !slot.parked && (slot.view == object || slot.controller == object)) return true;
@@ -955,7 +750,7 @@ TopTaskGeometry topGeometry() {
     }
 
     /** External mode1 CHANGE belongs to Launcher, not TaskView's immediate side reparent. */
-    private boolean leaveExternalChangeToNative(Object change) {
+    boolean leaveExternalChangeToNative(Object change) {
         if (change == null || scene != ACTIVE || !screenOn || keyguardLocked || transferBusy) return false;
         try {
             int mode = (Integer) XposedHelpers.callMethod(change, "getMode");
@@ -1941,168 +1736,11 @@ TopTaskGeometry topGeometry() {
         }
     }
 
-    private void readDisplayGeometry() {
-        android.util.DisplayMetrics metrics = ctx.getResources().getDisplayMetrics();
-        int width = metrics.widthPixels;
-        int height = metrics.heightPixels;
-        try {
-            if (displayManager == null) {
-                displayManager = (DisplayManager) ctx.getSystemService(Context.DISPLAY_SERVICE);
-            }
-            Display display = displayManager == null
-                    ? null : displayManager.getDisplay(Display.DEFAULT_DISPLAY);
-            if (display != null) {
-                Point realSize = new Point();
-                display.getRealSize(realSize);
-                if (realSize.x > 0 && realSize.y > 0) {
-                    width = realSize.x;
-                    height = realSize.y;
-                }
-                displayRotation = display.getRotation();
-            }
-        } catch (Throwable error) {
-            log("display geometry read fell back to resources: " + error);
-        }
-        if (width > 0 && height > 0) {
-            // Mi Step always has one portrait workspace. A task's fixed rotation or
-            // a pending display transition must not rebuild it as a landscape scene.
-            screenW = FullscreenRotationPolicy.workspaceWidth(width, height);
-            screenH = FullscreenRotationPolicy.workspaceHeight(width, height);
-        }
-    }
+    private void readDisplayGeometry() { geometry.readDisplayGeometry(); }
 
-    void scheduleDisplayGeometryRefresh() {
-        if (geometryRefreshQueued) return;
-        geometryRefreshQueued = true;
-        main.postDelayed(() -> {
-            geometryRefreshQueued = false;
-            refreshDisplayGeometry();
-        }, 120L);
-    }
+    void scheduleDisplayGeometryRefresh() { geometry.scheduleDisplayGeometryRefresh(); }
 
-    private void refreshDisplayGeometry() {
-        if (root == null || displayManager == null) return;
-        if (cellMotion != null || promotion != null && promotion.nativeSwap) {
-            int oldWidth = screenW;
-            int oldHeight = screenH;
-            int oldRotation = displayRotation;
-            readDisplayGeometry();
-            int newWidth = screenW;
-            int newHeight = screenH;
-            int newRotation = displayRotation;
-            // Display notifications also report non-geometric changes. Keep the
-            // in-flight coordinate space intact until its finish or rollback.
-            screenW = oldWidth;
-            screenH = oldHeight;
-            displayRotation = oldRotation;
-            if (oldWidth == newWidth && oldHeight == newHeight && oldRotation == newRotation) {
-                if (cellMotion != null) log("unchanged display geometry retains real cell motion");
-                return;
-            }
-            if (cellMotion != null) {
-                cellMotion.finish();
-                scheduleDisplayGeometryRefresh();
-                return;
-            }
-            geometryRefreshAfterLive = true;
-            failPromotion(promotion, "display geometry changed during live swap "
-                    + oldWidth + "x" + oldHeight + " r" + oldRotation
-                    + " -> " + newWidth + "x" + newHeight + " r" + newRotation);
-            return;
-        }
-        if (transferBusy || swapPreview != null || cellMovePreview != null) {
-            if (geometryRefreshDeferrals++ < 8) {
-                scheduleDisplayGeometryRefresh();
-                return;
-            }
-        }
-        geometryRefreshDeferrals = 0;
-        int oldWidth = screenW;
-        int oldHeight = screenH;
-        int oldRotation = displayRotation;
-        readDisplayGeometry();
-        if (NativeLandscapePolicy.shouldRestoreFromDisplay(
-                landscapeSuspended, scene == SUSPENDED, displayRotation)) {
-            log("restore workspace after native landscape rotation=" + displayRotation);
-            resumeSession();
-            return;
-        }
-        if (displayRotation != FullscreenRotationPolicy.portraitDisplayRotation()) {
-            if (oldRotation != displayRotation) {
-                log("workspace retains portrait geometry during display rotation "
-                        + displayRotation + "; waiting for WM portrait configuration");
-            }
-            return;
-        }
-        if ((oldWidth == screenW && oldHeight == screenH && oldRotation == displayRotation)
-                || screenW <= 0 || screenH <= 0) return;
-
-        layout = makeAdaptiveLayout(mainOnRight);
-        FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(-1, layout.topStrip);
-        if (topStripBacking != null) topStripBacking.setLayoutParams(topParams);
-        if (topBar != null) {
-            topBar.setLayoutParams(new FrameLayout.LayoutParams(-1, layout.topStrip));
-            topBar.setStatusBarInset(DeviceProfile.statusBarHeightPx(ctx));
-        }
-        for (int i = 1; i < SLOT_COUNT; i++) {
-            Slot slot = slots[i];
-            slot.rect = slotBounds(slot);
-            applyRect(slot);
-            updateTouchRegion(slot);
-            updateHint(slot);
-            View backing = sideBackingViews[i];
-            if (backing != null) {
-                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                        layout.sideWidth, sideSegmentHeight(i));
-                params.leftMargin = layout.mainOnRight ? 0 : layout.mainWidth;
-                params.topMargin = sideSegmentTop(i);
-                backing.setLayoutParams(params);
-            }
-            if (slot.carrierTapView != null) {
-                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                        slot.rect[2] - slot.rect[0], slot.rect[3] - slot.rect[1]);
-                params.leftMargin = slot.rect[0];
-                params.topMargin = slot.rect[1];
-                slot.carrierTapView.setLayoutParams(params);
-            }
-        }
-        if (carrierBackdrop != null) {
-            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                    layout.mainDispWidth, layout.mainDispHeight);
-            params.leftMargin = layout.mainOffsetX;
-            params.topMargin = layout.mainOffsetY;
-            carrierBackdrop.setLayoutParams(params);
-        }
-        applyWallpaperBackdrops();
-        if (carrierSlotIndex >= 0) reassertCarrier();
-        if (wm != null && lp != null) {
-            try { wm.updateViewLayout(root, lp); }
-            catch (Throwable error) { log("host window resize refresh failed: " + error); }
-        }
-        root.requestLayout();
-        root.invalidate();
-        boolean activeRoot = ZoomLifecyclePolicy.shouldReassertGeometry(
-                scene == ACTIVE, root.getVisibility() == View.VISIBLE, screenOn);
-        if (activeRoot) writeZoom(true);
-        else log("display geometry changed while host inactive; skip zoom/task reassert");
-        boolean queued = activeRoot && executeOnShell(() -> {
-            if (scene != ACTIVE) return;
-            for (Slot slot : slots) {
-                if (slot.index > SLOT_MAIN && slot.occupied && !slot.carrier
-                        && !slot.promoting && !slot.launching) applyFullscreenBounds(slot);
-            }
-        });
-        main.postDelayed(() -> {
-            if (!ZoomLifecyclePolicy.shouldReassertGeometry(scene == ACTIVE,
-                    root != null && root.getVisibility() == View.VISIBLE, screenOn)) return;
-            for (Slot slot : slots) {
-                if (slot.index > SLOT_MAIN && slot.occupied && !slot.carrier) reapplyScale(slot);
-            }
-        }, queued ? 180L : 0L);
-        log("display geometry changed " + oldWidth + "x" + oldHeight + " r" + oldRotation
-                + " -> " + screenW + "x" + screenH + " r" + displayRotation
-                + " queuedTaskBounds=" + queued + " " + layout.describe());
-    }
+    private void refreshDisplayGeometry() { geometry.refreshDisplayGeometry(); }
 
     void refreshQuickApps() {
         if (topBar == null || root == null) return;
@@ -2162,7 +1800,7 @@ TopTaskGeometry topGeometry() {
         loader.start();
     }
 
-    private void applyWallpaperBackdrops() {
+    void applyWallpaperBackdrops() {
         if (wallpaperBackdrop == null || wallpaperBackdrop.isRecycled() || layout == null) return;
         if (topBar != null) topBar.setWallpaperBackdrop(wallpaperBackdrop, screenW, screenH);
         if (topStripBacking != null) {
@@ -2539,14 +2177,14 @@ TopTaskGeometry topGeometry() {
     }
 
     /** 侧栏第 slotIndex 格的分段底板 top（与相邻格共享边界，保证列无缝）。 */
-    private int sideSegmentTop(int slotIndex) {
+    int sideSegmentTop(int slotIndex) {
         if (slotIndex <= 1 || layout == null) return layout == null ? 0 : layout.topStrip;
         int[] previous = layout.cellBounds(slotIndex - 2);
         return previous[3];
     }
 
     /** 侧栏第 slotIndex 格的分段底板高度。 */
-    private int sideSegmentHeight(int slotIndex) {
+    int sideSegmentHeight(int slotIndex) {
         if (layout == null) return 1;
         int top = sideSegmentTop(slotIndex);
         int bottom = slotIndex >= CELL_SLOT_COUNT - 1 ? screenH : layout.cellBounds(slotIndex - 1)[3];
@@ -3322,7 +2960,7 @@ TopTaskGeometry topGeometry() {
         if (!visible) scheduleSideVisibilityRepair(slot);
     }
 
-    private java.util.List<MiStepSideClose> closingTasks(Object info) {
+    java.util.List<MiStepSideClose> closingTasks(Object info) {
         java.util.List<MiStepSideClose> result = new java.util.ArrayList<>();
         if (scene != ACTIVE || promotion != null || transferBusy || cellMotion != null || root == null) return result;
         try {
