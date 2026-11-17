@@ -49,6 +49,7 @@ final class HostCellLayoutController {
     HostCellLayoutController(MiStepHost host) { h = host; }
 
     void buildLayout() {
+        h.workspaceSettings.refresh();
         h.readDisplayGeometry();
         int w = h.screenW;
         int hb = h.screenH;
@@ -60,7 +61,9 @@ final class HostCellLayoutController {
         }
         MiStepHost.log("device: " + DeviceProfile.describe(h.ctx));
         float layoutDensity = h.ctx.getResources().getDisplayMetrics().density;
-        h.layout = MiStepLayout.of(w, hb, h.mainOnRight, layoutDensity);
+        h.layout = MiStepLayout.of(w, hb, h.mainOnRight, layoutDensity, DeviceProfile.isTablet(h.ctx));
+        h.CELL_SLOT_COUNT = 1 + h.layout.cellCount;
+        h.mainOnRight = h.layout.mainOnRight;
         MiStepHost.log("layout: " + h.layout.describe()
                 + " mainScale=" + h.mainScale() + " cellScale=" + h.cellScale());
 
@@ -125,8 +128,10 @@ final class HostCellLayoutController {
             h.topBar = new MiStepTopBar(h.ctx, h.layout, quickApps, new MiStepTopBar.Listener() {
                 @Override public void onOpenSettings() { h.openSettingsInMain(); }
                 @Override public void onOpenClipboard() {
-                    if (h.scene == MiStepHost.ACTIVE && h.promotion == null && !h.transferBusy)
+                    if (h.scene == MiStepHost.ACTIVE && h.promotion == null && !h.transferBusy) {
+                        if (h.layout.tabletLandscape) h.topCtrl.setTabletToolsOpen(true);
                         h.topBar.toggleClipboard(h.wallpaperBackdrop, h.screenW, h.screenH);
+                    }
                 }
                 @Override public void onToggleTorch() {
                     if (h.scene == MiStepHost.ACTIVE && h.promotion == null && !h.transferBusy)
@@ -147,26 +152,34 @@ final class HostCellLayoutController {
                 @Override public void onLaunch(QuickApp entry) { h.launchQuick(entry); }
                 @Override public boolean canCustomizeApps() {
                     return h.scene == MiStepHost.ACTIVE && h.screenOn && !h.keyguardLocked
-                            && h.promotion == null && !h.transferBusy && !h.topCtrl.topFace;
+                            && h.promotion == null && !h.transferBusy
+                            && (!h.topCtrl.topFace || h.layout.tabletLandscape && h.tabletToolsOpen);
                 }
                 @Override public void onDragStart(MotionEvent event) { h.beginWindowDrag(event); }
                 @Override public void onDragMove(MotionEvent event) { h.updateWindowDrag(event); }
                 @Override public void onDragEnd(MotionEvent event) { h.finishWindowDrag(event); }
                 @Override public void onOpenLandscape() { h.topCtrl.openTopFace(true); }
+                @Override public void onTaskCellsCovered(boolean covered) { h.topCtrl.setTaskCellsCovered(covered); }
             });
             h.refreshQuickApps();
             h.topStripBacking = new View(h.ctx);
             h.topStripBacking.setBackgroundColor(0xFF1E2420);
             h.root.addView(h.topStripBacking, new FrameLayout.LayoutParams(-1, h.layout.topStrip));
-            h.root.addView(h.topBar, new FrameLayout.LayoutParams(-1, h.layout.topStrip));
+            h.topLiveClip=new FrameLayout(h.ctx);
+            h.topLiveClip.setClipChildren(true);
+            h.topLiveClip.setClipToPadding(true);
+            h.topLiveClip.setClipBounds(new Rect(0,0,h.screenW,h.layout.tabletLandscape?h.screenH:h.layout.topStrip));
+            h.root.addView(h.topLiveClip,new FrameLayout.LayoutParams(-1,h.layout.tabletLandscape?-1:h.layout.topStrip));
+            h.topLiveClip.addView(h.topBar, new FrameLayout.LayoutParams(-1, h.layout.topStrip));
             h.topBar.setStatusBarInset(DeviceProfile.statusBarHeightPx(h.ctx));
             h.main.post(h::applyWallpaperBackdrops);
-            for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
+            for (int i = 1; i < h.CELL_SLOT_COUNT; i++) {
                 View backing = new View(h.ctx);
                 backing.setBackgroundColor(HyperOsStyle.page(h.ctx));
+                int[] cell=h.layout.cellBounds(i-1);
                 FrameLayout.LayoutParams rlp =
-                        new FrameLayout.LayoutParams(h.layout.sideWidth, h.sideSegmentHeight(i));
-                rlp.leftMargin = h.layout.mainOnRight ? 0 : h.layout.mainWidth;
+                        new FrameLayout.LayoutParams(h.layout.tabletLandscape?cell[2]-cell[0]:h.layout.sideWidth, h.sideSegmentHeight(i));
+                rlp.leftMargin = h.layout.tabletLandscape?cell[0]:h.layout.mainOnRight ? 0 : h.layout.mainWidth;
                 rlp.topMargin = h.sideSegmentTop(i);
                 backing.setLayoutParams(rlp);
                 h.root.addView(backing);
@@ -188,7 +201,7 @@ final class HostCellLayoutController {
                 if (h.root == null || MiStepHost.sInstance != h) {
                     return;
                 }
-                if (h.scene != MiStepHost.ACTIVE || !h.screenOn || h.root.getVisibility() != View.VISIBLE) {
+                if (h.scene != MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked || h.root.getVisibility() != View.VISIBLE) {
                     h.main.postDelayed(this, 4000L);
                     return;
                 }
@@ -222,15 +235,10 @@ final class HostCellLayoutController {
         h.startPromotionWatchdog();
     }
 
+    /** The same gate owns normal updates, workspace fades and covered task cells. */
     void updateCellSurfaceVisibility(Slot slot) {
-        // Shell owns the borrowed task parents until the whole handoff finishes.
-        // clearSlot/bindTask is only a logical replacement during a native swap;
-        // an independent hide here would blank the just-committed real task.
-        if (slot.promoting || slot.launching || h.cellMotion != null
-                || (h.promotion != null && h.promotion.nativeSwap && !h.promotion.cancelled)) return;
-        boolean visible = slot.occupied && !slot.parked && slot.taskToken != null
-                && h.controllerOwns(slot, slot.taskId, slot.taskToken)
-                && (slot.index!=MiStepHost.SLOT_TOP || h.topCtrl.topFace);
+        if (!h.lifecycle.ownsCellPresentation(slot)) return;
+        boolean visible = h.lifecycle.cellPresentationVisible(slot);
         // An empty native container can be re-shown by SurfaceView's next position frame.
         // Its RenderNode must also be transparent; keep its surface alive for the next launch.
         if (slot.view != null) slot.view.setAlpha(visible ? 1f : 0f);
@@ -313,7 +321,7 @@ final class HostCellLayoutController {
 
     MiStepLayout makeAdaptiveLayout(boolean right) {
         android.util.DisplayMetrics metrics = h.ctx.getResources().getDisplayMetrics();
-        return MiStepLayout.of(h.screenW, h.screenH, right, metrics.density);
+        return MiStepLayout.of(h.screenW, h.screenH, right, metrics.density, DeviceProfile.isTablet(h.ctx));
     }
 
     int dp(float value) {
@@ -367,12 +375,13 @@ final class HostCellLayoutController {
             }
         }
         if (slot.hint != null) {
-            slot.hint.setX(slot.rect[0]);
-            slot.hint.setY(slot.rect[1]);
+            boolean paneLocal=slot.index==MiStepHost.SLOT_TOP;
+            slot.hint.setX(paneLocal?0:slot.rect[0]);
+            slot.hint.setY(paneLocal?0:slot.rect[1]);
             if (slot.hint.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) slot.hint.getLayoutParams();
-                lp.width = slot.rect[2] - slot.rect[0];
-                lp.height = slot.rect[3] - slot.rect[1];
+                lp.width = paneLocal?-1:slot.rect[2] - slot.rect[0];
+                lp.height = paneLocal?-1:slot.rect[3] - slot.rect[1];
                 slot.hint.setLayoutParams(lp);
             }
         }
@@ -389,20 +398,22 @@ final class HostCellLayoutController {
         MiStepHost.log("main side layout: " + (h.mainOnRight ? "right" : "left") + " " + h.layout.describe());
         h.applyWallpaperBackdrops();
         if (h.root == null) return;
-        for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
+        if (h.layout.tabletLandscape) h.topCtrl.updateTopTaskGeometry();
+        for (int i = 1; i < h.CELL_SLOT_COUNT; i++) {
             Slot slot = h.slots[i];
             slot.rect = h.slotBounds(slot);
             applyRect(slot);
             h.updateTouchRegion(slot);
         }
-        for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
+        for (int i = 1; i < h.CELL_SLOT_COUNT; i++) {
             View backing = h.sideBackingViews[i];
             if (backing == null
                     || !(backing.getLayoutParams() instanceof FrameLayout.LayoutParams)) continue;
             FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) backing.getLayoutParams();
-            params.leftMargin = target.mainOnRight ? 0 : target.mainWidth;
+            int[] cell=target.cellBounds(i-1);
+            params.leftMargin = target.tabletLandscape?cell[0]:target.mainOnRight ? 0 : target.mainWidth;
             params.topMargin = h.sideSegmentTop(i);
-            params.width = target.sideWidth;
+            params.width = target.tabletLandscape?cell[2]-cell[0]:target.sideWidth;
             params.height = h.sideSegmentHeight(i);
             backing.setLayoutParams(params);
         }
@@ -410,6 +421,17 @@ final class HostCellLayoutController {
         h.root.invalidate();
     }
 
+    void compactCellsAfterCollection() {
+        // Collection has committed its real task binding. Fill earlier empty
+        // cells now instead of waiting for the next workspace resume.
+        compactCells();
+    }
+
+    /**
+     * v0.9.9：副格是"栈"——某个格子空了，后面的占用格子自动往上排（官方 SideAreaStackView 的紧凑排列）。
+     * 平板顶排同样保持连续；独立的竖屏副窗 SLOT_TOP 位于 CELL_SLOT_COUNT 之后，
+     * 不参与这条补位链。
+     */
     void compactCells() {
         if (h.root == null || h.layout == null) return;
         if (h.scene != MiStepHost.ACTIVE || h.promotion != null || h.transferBusy || h.cellMotion != null) {
@@ -430,12 +452,12 @@ final class HostCellLayoutController {
         int initialEmptySlots = 0;
         for (Slot slot : h.slots) if (slot.index > MiStepHost.SLOT_MAIN && !slot.occupied)
             initialEmptySlots |= 1 << slot.index;
-        for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT - 1; i++) {
+        for (int i = 1; i < h.CELL_SLOT_COUNT - 1; i++) {
             Slot cur = h.slots[i];
             if (cur.occupied) {
                 continue;
             }
-            for (int j = i + 1; j < MiStepHost.CELL_SLOT_COUNT; j++) {
+            for (int j = i + 1; j < h.CELL_SLOT_COUNT; j++) {
                 Slot next = h.slots[j];
                 if (!next.occupied) {
                     continue;
@@ -527,7 +549,7 @@ final class HostCellLayoutController {
                             revealEmptySlots), MiStepHost::log);
             // One wallpaper/plus owner covers the complete strip during compaction.
             // Static backings otherwise cover its pluses and reappear between layouts.
-            for (Slot slot : h.slots) if (slot.index > 0)
+            for (Slot slot : h.slots) if (slot.index > MiStepHost.SLOT_MAIN && slot.index < h.CELL_SLOT_COUNT)
                 hints.add(new LiveSwapVisualLease(h.sideBackingViews[slot.index], slot.hint));
             final MiStepLiveBackdrop backing = wallpaper;
             final MiStepCellMotion[] run = new MiStepCellMotion[1];

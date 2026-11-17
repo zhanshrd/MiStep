@@ -28,7 +28,9 @@ final class ZoomTransport {
         final long generation = ++h.zoomCommandGeneration;
         final String steady = on ? zoomOnCommand() : "1 0 0";
         h.zoomAnimUntil = SystemClock.uptimeMillis() + MiStepHost.ZOOM_ANIM_MS + 250L;
-        writeZoomLine("anim " + steady + " " + MiStepHost.ZOOM_ANIM_MS);
+        h.workspaceZoomStart = h.layout.tabletLandscape ? SystemClock.uptimeMillis() + 32L : 0L;
+        writeZoomLine("anim " + steady + " " + MiStepHost.ZOOM_ANIM_MS
+                + (h.workspaceZoomStart > 0 ? " at=" + h.workspaceZoomStart : ""));
         h.main.postDelayed(() -> {
             if (!ZoomLifecyclePolicy.shouldApplyDelayedWrite(generation,
                     h.zoomCommandGeneration, on, h.zoomed)) {
@@ -49,6 +51,7 @@ final class ZoomTransport {
     }
 
     void writeZoomLine(String command, long issuedAt) {
+        if (h.keyguardLocked || !h.screenOn) command = "1 0 0";
         // Independent transport: a failed private-file write must not suppress zoom/restore.
         broadcastZoom(command, issuedAt);
         try {

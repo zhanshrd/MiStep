@@ -82,10 +82,10 @@ final class HostAdoptionController {
                     XposedHelpers.callMethod(wct, "reorder", task.token, true);
                     // Existing listener is retired by the organizer, never globally replaced.
                     claimed = true;
-                    XposedHelpers.callMethod(organizer, "addListenerForTaskId", controller, task.id);
+                    ShellCompat.call(organizer, "addListenerForTaskId", controller, task.id);
                     observation = h.observeNativeCommit(task.token,
                             () -> h.checkAdoption(slot, task, epoch, 0, success, failure));
-                    XposedHelpers.callMethod(h.transitions, "startRootTask", controller, info, canonical, wct);
+                    ShellCompat.call(h.transitions, "startRootTask", controller, info, canonical, wct);
                     MiStepHost.log("adopt existing task=" + task.id + " into slot=" + slot.index + " logical=" + h.logicalBounds(slot));
                 }
             } catch (Throwable error) {
@@ -370,7 +370,7 @@ final class HostAdoptionController {
                 || !h.supportsTaskUser(userId) || h.promotion != null || h.transferBusy) return false;
         Slot match = null;
         for (Slot slot : h.slots) {
-            if (slot.index <= MiStepHost.SLOT_MAIN || slot.index >= MiStepHost.CELL_SLOT_COUNT || !slot.occupied || slot.parked || slot.frozen
+            if (slot.index <= MiStepHost.SLOT_MAIN || slot.index >= h.CELL_SLOT_COUNT || !slot.occupied || slot.parked || slot.frozen
                     || slot.carrier || slot.windowMode != 6 || !pkg.equals(slot.pkg)
                     || !h.mayWriteSideSurface(slot)
                     || !h.controllerOwns(slot, slot.taskId, slot.taskToken)) continue;

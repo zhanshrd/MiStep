@@ -49,6 +49,8 @@ final class HostWindowController {
     HostWindowController(MiStepHost host) { h = host; }
 
 TopTaskGeometry topGeometry() {
+        if (h.layout.tabletLandscape) return new TopTaskGeometry(h.layout.interactiveBounds(),
+                h.ctx.getResources().getDisplayMetrics().density);
         return new TopTaskGeometry(h.screenW,h.screenH,h.layout.topStrip,DeviceProfile.statusBarHeightPx(h.ctx),
                 h.ctx.getResources().getDisplayMetrics().density);
     }
@@ -66,7 +68,8 @@ TopTaskGeometry topGeometry() {
     }
 
     int[] slotBounds(Slot slot) {
-        return slot.index==MiStepHost.SLOT_TOP ? topGeometry().bounds() : h.layout.cellBounds(slot.index-1);
+        return slot.index==MiStepHost.SLOT_TOP ? topGeometry().bounds() : slot.index>=h.CELL_SLOT_COUNT
+                ? new int[]{0,0,1,1} : h.layout.cellBounds(slot.index-1);
     }
 
     boolean supportsTaskUser(int userId) {
@@ -163,6 +166,7 @@ TopTaskGeometry topGeometry() {
     }
 
     int sideSegmentTop(int slotIndex) {
+        if(h.layout!=null && h.layout.tabletLandscape)return h.layout.cellBounds(slotIndex-1)[1];
         if (slotIndex <= 1 || h.layout == null) return h.layout == null ? 0 : h.layout.topStrip;
         int[] previous = h.layout.cellBounds(slotIndex - 2);
         return previous[3];
@@ -170,15 +174,18 @@ TopTaskGeometry topGeometry() {
 
     int sideSegmentHeight(int slotIndex) {
         if (h.layout == null) return 1;
+        if(h.layout.tabletLandscape) {
+            int[] b=h.layout.cellBounds(slotIndex-1);return b[3]-b[1];
+        }
         int top = sideSegmentTop(slotIndex);
-        int bottom = slotIndex >= MiStepHost.CELL_SLOT_COUNT - 1 ? h.screenH : h.layout.cellBounds(slotIndex - 1)[3];
+        int bottom = slotIndex >= h.CELL_SLOT_COUNT - 1 ? h.screenH : h.layout.cellBounds(slotIndex - 1)[3];
         return Math.max(1, bottom - top);
     }
 
     Slot slotAtPoint(float x, float y) {
-        if (h.layout == null || y < h.layout.topStrip) return null;
+        if (h.layout == null) return null;
         for (Slot slot : h.slots) {
-            if (slot.index <= MiStepHost.SLOT_MAIN || slot.index >= MiStepHost.CELL_SLOT_COUNT || slot.rect == null) continue;
+            if (slot.index <= MiStepHost.SLOT_MAIN || slot.index >= h.CELL_SLOT_COUNT || slot.rect == null) continue;
             if (x >= slot.rect[0] && x < slot.rect[2]
                     && y >= slot.rect[1] && y < slot.rect[3]) return slot;
         }
@@ -211,15 +218,18 @@ TopTaskGeometry topGeometry() {
                     XposedHelpers.callMethod(info, "setTouchableInsets", 3); // TOUCHABLE_INSETS_REGION
                     Region touchable = (Region) XposedHelpers.getObjectField(info, "touchableRegion");
                     touchable.setEmpty();
+                    if (h.keyguardLocked || !h.screenOn) return null;
                     if (h.swapPreview != null || h.cellMovePreview != null) {
                         touchable.set(0, 0, h.screenW, h.screenH);
                     } else if (h.liveSwapInputBlocked) {
                         touchable.set(0, 0, h.screenW, h.screenH);
                     } else {
                         touchable.set(0, 0, h.screenW, h.layout.topStrip);
-                        touchable.op(new Rect(h.layout.cellX, h.layout.topStrip,
-                                        h.layout.cellX + h.layout.cellWidth, h.screenH),
-                                Region.Op.UNION);
+                        if(h.layout.tabletLandscape) {
+                            int[] b=h.layout.interactiveBounds();
+                            touchable.op(new Rect(b[0],b[1],b[2],b[3]),Region.Op.UNION);
+                        } else touchable.op(new Rect(h.layout.cellX, h.layout.topStrip,
+                                        h.layout.cellX + h.layout.cellWidth, h.screenH), Region.Op.UNION);
                         Slot upper=h.slots[MiStepHost.SLOT_TOP];
                         if(h.topCtrl.topFace && h.topCtrl.topTaskPane!=null && !h.topCtrl.topTaskPane.choosing()
                                 && h.topCtrl.topRoll!=null && !h.topCtrl.topRoll.rolling() && upper.occupied && !upper.parked
@@ -330,6 +340,10 @@ TopTaskGeometry topGeometry() {
     }
 
     boolean executeOnShell(Runnable task) {
+        if (h.executor != null) {
+            try { h.executor.execute(task); return true; }
+            catch (Throwable error) { MiStepHost.log("Host executor failed: " + error); }
+        }
         try {
             Object shell = XposedHelpers.getObjectField(h.transitions, "mShellExecutor");
             if (shell instanceof Executor) {
@@ -496,8 +510,9 @@ TopTaskGeometry topGeometry() {
         } catch (Throwable t) {
             return null;
         }
-        Object[] roots = {h.transitions, h.slots[0].controller, h.slots[1].controller,
-                h.slots[2].controller, h.slots[3].controller, h.slots[MiStepHost.SLOT_TOP].controller};
+        Object[] roots = new Object[MiStepHost.SLOT_COUNT+1];
+        roots[0]=h.transitions;
+        for(int i=0;i<MiStepHost.SLOT_COUNT;i++)roots[i+1]=h.slots[i].controller;
         for (Object r : roots) {
             if (r == null) {
                 continue;

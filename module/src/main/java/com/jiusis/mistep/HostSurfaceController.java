@@ -60,6 +60,7 @@ final class HostSurfaceController {
                             hb.finishTransactions.merge(p.thisObject, p.args[0]);
                             hb.workspaceFinishes.merge(p.thisObject, p.args[0]);
                             hb.nativeObservations.merge(p.thisObject, p.args[0]);
+                            hb.keyguardTransactions.merge(p.thisObject, p.args[0]);
                         }
                     }
                 }));
@@ -67,6 +68,7 @@ final class HostSurfaceController {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         MiStepHost hb = MiStepHost.sInstance;
                         if (hb == null) return;
+                        hb.appendHiddenKeyguardSurfaces(p.thisObject, hb.keyguardTransactions.take(p.thisObject));
                         java.util.List<RenderBinding> frames = hb.finishTransactions.take(p.thisObject);
                         if (!frames.isEmpty()) hb.appendRetainedSurfaces(p.thisObject, frames);
                         hb.appendWorkspaceSurfaces(p.thisObject, hb.workspaceFinishes.take(p.thisObject));
@@ -105,10 +107,16 @@ final class HostSurfaceController {
                             hb.finishTransactions.forget(p.thisObject);
                             hb.workspaceFinishes.forget(p.thisObject);
                             hb.nativeObservations.forget(p.thisObject);
+                            hb.keyguardTransactions.forget(p.thisObject);
                         }
                     }
                 }));
                 if (installed.size() < 3) throw new IllegalStateException("missing finish transaction hooks");
+                MiStepKeyguardTransition.installNativeStart(cl, (info, start) -> {
+                    MiStepHost hb = MiStepHost.sInstance;
+                    if (hb != null && hb.retainedForLock && hb.keyguardWindowHidden)
+                        hb.keyguardTransactions.mark(start, java.util.Collections.singletonList(hb.sceneEpoch));
+                });
                 MiStepHost.surfaceHooksReady = true;
             } catch (Throwable error) {
                 for (XC_MethodHook.Unhook hook : installed) hook.unhook();
@@ -125,6 +133,9 @@ final class HostSurfaceController {
                             try {
                                 String name = method.getName();
                                 if ("onTransitionReady".equals(name) && args != null && args.length == 4) {
+                                    if (h.retainedForLock && h.keyguardWindowHidden
+                                            && (((Integer) XposedHelpers.callMethod(args[1], "getFlags")) & 0x100) != 0)
+                                        h.keyguardTransactions.mark(args[3], java.util.Collections.singletonList(h.sceneEpoch));
                                     MiStepSwapTrace trace = h.swapTrace;
                                     if (trace != null) trace.transition(args[1], args[2], args[3]);
                                     trackRetainedSurfaces(args[1], args[3]);
@@ -198,7 +209,7 @@ final class HostSurfaceController {
     }
 
     void refreshOverlayAfterTransition() {
-        if (h.scene != MiStepHost.ACTIVE || h.root == null) return;
+        if (h.scene != MiStepHost.ACTIVE || h.root == null || h.keyguardLocked) return;
         for (Slot slot : h.slots) if (slot.closing) {
             h.main.postDelayed(this::refreshOverlayAfterTransition, 120L);
             return;
@@ -269,8 +280,36 @@ final class HostSurfaceController {
         if (count > 0) MiStepHost.log("final transaction retained own side surfaces=" + count);
     }
 
+    /** Native unlock may animate its wrappers, but our live tasks stay under the hidden Host. */
+    void appendHiddenKeyguardSurfaces(Object tx, java.util.List<Long> epochs) {
+        if (!h.retainedForLock || !h.keyguardWindowHidden || h.root == null
+                || !epochs.contains(h.sceneEpoch) || (h.scene != MiStepHost.ACTIVE && h.scene != MiStepHost.RESUMING)) return;
+        int count = 0;
+        for (Slot slot : h.slots) {
+            if (slot == null || slot.index <= MiStepHost.SLOT_MAIN || !h.isActive(slot) || !slot.occupied
+                    || slot.parked || slot.promoting || slot.launching || slot.frozen
+                    || !mayWriteSideSurface(slot) || !h.controllerOwns(slot, slot.taskId, slot.taskToken)) continue;
+            Object leash = getSurfaceField(slot.controller, "mTaskLeash");
+            Object parent = getSurfaceField(slot.controller, "mSurfaceControl");
+            if (leash == null || parent == null || leash == parent) continue;
+            try {
+                XposedHelpers.callMethod(tx, "reparent", leash, parent);
+                XposedHelpers.callMethod(tx, "setLayer", leash, 0);
+                XposedHelpers.callMethod(tx, "setPosition", leash, 0f, 0f);
+                XposedHelpers.callMethod(tx, "setWindowCrop", leash, h.logicalBounds(slot));
+                float scale = h.scaleFor(slot);
+                XposedHelpers.callMethod(tx, "setMatrix", leash, scale, 0f, 0f, scale);
+                XposedHelpers.callMethod(tx, "setAlpha", leash, 1f);
+                XposedHelpers.callMethod(tx, "show", leash);
+                count++;
+            } catch (Throwable error) { MiStepHost.log("hidden retained parent skipped task=" + slot.taskId + ": " + error); }
+        }
+        if (count > 0) MiStepHost.log("native keyguard transaction retained hidden parents=" + count);
+    }
+
     boolean mayWriteSideSurface(Slot slot) {
-        if(slot!=null && slot.index==MiStepHost.SLOT_TOP && !h.topCtrl.topFace)return false;
+        if(slot!=null && slot.index==MiStepHost.SLOT_TOP && !h.topCtrl.topFace
+                && (h.topCtrl.topRoll==null || !h.topCtrl.topRoll.rolling()))return false;
         if (slot == null || slot.windowMode != 6 || slot.controller == null) return false;
         PendingSidePromotion pending = slot.pendingSidePromotion;
         if (pending != null && pending.desktopLaunch) return false;

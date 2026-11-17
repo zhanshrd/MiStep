@@ -48,7 +48,10 @@ final class MiStepWallpaperScale {
         Object service = XposedHelpers.getObjectField(display, "mWmService");
         return Thread.holdsLock(XposedHelpers.getObjectField(service, "mGlobalLock"))
                 && !Boolean.TRUE.equals(XposedHelpers.callMethod(service, "isKeyguardLocked"))
-                && !Boolean.TRUE.equals(XposedHelpers.callMethod(display, "isAodShowing"));
+                // DisplayContent.isAodShowing is absent on the actual OS2 ROM.
+                // The native DisplayInfo state also excludes off/doze displays.
+                && XposedHelpers.getIntField(XposedHelpers.callMethod(
+                        display, "getDisplayInfo"), "state") == 2; // Display.STATE_ON
     }
 
     /** Recompute on entry/exit even if the launcher sends no new wallpaper command. */
@@ -60,8 +63,11 @@ final class MiStepWallpaperScale {
             Object controller = XposedHelpers.getObjectField(display, "mWallpaperController");
             Object tokens = XposedHelpers.getObjectField(controller, "mWallpaperTokens");
             if (!(tokens instanceof List<?>)) return;
-            for (Object token : (List<?>) tokens)
-                XposedHelpers.callMethod(token, "updateWallpaperOffset");
+            for (Object token : (List<?>) tokens) {
+                if (ShellCompat.hasMethod(token.getClass(), "updateWallpaperOffset", 0))
+                    XposedHelpers.callMethod(token, "updateWallpaperOffset");
+                else XposedHelpers.callMethod(token, "updateWallpaperOffset", false);
+            }
         } catch (Throwable unavailable) {
             XposedBridge.log("[MiStep] wallpaper scale refresh unavailable: " + unavailable);
         }

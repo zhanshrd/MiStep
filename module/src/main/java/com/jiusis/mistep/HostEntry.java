@@ -81,9 +81,21 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     static View sWindowRoot;
     static Object sTaskView;
+    static final MiStepKeyguardZoom sKeyguardZoom = new MiStepKeyguardZoom();
+    static final MiStepRetainedWindow sRetainedWindow = new MiStepRetainedWindow();
+    static final MiStepTopSystemBars sTopSystemBars = new MiStepTopSystemBars();
+    static final MiStepImeViewport sInteractiveImeViewport = new MiStepImeViewport();
+    static final MiStepImeTargetRefresh imeTargetRefresh = new MiStepImeTargetRefresh();
+    static final MiStepTopFocusNotification topFocusNotification = new MiStepTopFocusNotification();
+    static final MiStepPassBlurCoordinates sPassBlurCoordinates = new MiStepPassBlurCoordinates();
+    static volatile long sUnlockPhysicalShadeGeneration, sUnlockPhysicalShadeUntil;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+        if ("com.android.settings".equals(lpparam.packageName)) {
+            SystemSettingsEntry.install(lpparam.classLoader);
+            return;
+        }
         if ("android".equals(lpparam.packageName)) {
             NativeMultiWindowUnlock.install(lpparam.classLoader, true);
             hookSystemServer(lpparam.classLoader);
@@ -99,18 +111,21 @@ public class HostEntry implements IXposedHookLoadPackage {
             return;
         }
         final ClassLoader cl = lpparam.classLoader;
-        log("=== attached to " + SYSTEMUI + " build=1.3.0 release ===");
+        log("=== attached to " + SYSTEMUI + " build=1.4.0 release ===");
         try {
             NativeMultiWindowUnlock.install(cl, false);
             MiStepSystemActions.install(cl);
+            MiStepNativeRecents.install(cl);
             MiStepNativeMedia.install(cl);
             MiStepIslandMonitorInput.install(cl, () -> sContext);
             MiStepStatusBarSampling.install(cl);
             MiStepStatusBar.install(cl);
             MiStepTopNativeCaption.install(cl);
             MiStepPanelInput.install(cl);
+            MiStepBiometricWindow.install(cl);
             MiStepMainUiConfiguration.install(cl);
             MiStepNotificationLaunch.install(cl, () -> sContext);
+            installRetainedWorkspaceWakeHooks(cl);
             NativeFreeformCoordinates.install(cl);
             NativeFreeformPreview.install(cl);
             hookApplication(cl);
@@ -132,7 +147,7 @@ public class HostEntry implements IXposedHookLoadPackage {
      * by the keyboard itself.
      */
     private static void hookMiTypeAutoFloating(ClassLoader cl) {
-        log("=== attached to com.xiaomi.type build=1.3.0 release ===");
+        log("=== attached to com.xiaomi.type build=1.4.0 release ===");
         try {
             Class<?> service = XposedHelpers.findClass("com.mi.ime.MiInputMethodService", cl);
             XposedHelpers.findAndHookMethod(service, "handleSpacePressureAutoFloating",
@@ -203,6 +218,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             new java.util.WeakHashMap<>();
     static final ThreadLocal<Boolean> sFinalMagnificationSnapshot = new ThreadLocal<>();
     static final ThreadLocal<Object> sMagnificationFinishInfo = new ThreadLocal<>();
+    static final ThreadLocal<Object> sWindowFocusScanDisplay = new ThreadLocal<>();
     static final NativeFreeformStartGate sNativeFreeformStart = new NativeFreeformStartGate();
     static final NativeFreeformStartGate sLiveSwapZoomSurfaces = new NativeFreeformStartGate();
     /** Per-task state survives top-activity changes and main/side ownership swaps. */
@@ -369,6 +385,20 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     static void rememberMagnifiedSurface(Object container, Object spec) { HostEntryZoom.rememberMagnifiedSurface(container, spec); }
 
+    static void stagePassBlurCoordinates(Object display, Object transaction, Object spec) {
+        HostEntry.ZoomTarget target = sZoomTarget;
+        if (target == null || display != target.display || display != sDisplayContent
+                || !Thread.holdsLock(target.globalLock)) return;
+        try {
+            sPassBlurCoordinates.stage(display, transaction,
+                    spec == null ? 1f : XposedHelpers.getFloatField(spec, "scale"),
+                    spec == null ? 0f : XposedHelpers.getFloatField(spec, "offsetX"),
+                    spec == null ? 0f : XposedHelpers.getFloatField(spec, "offsetY"));
+        } catch (Throwable error) {
+            log("passblur coordinate publication unavailable: " + error.getClass().getSimpleName());
+        }
+    }
+
     static int restoreExitedMagnificationLocked(ZoomTarget target) { return HostEntryZoom.restoreExitedMagnificationLocked(target); }
 
     /** 宿主写 SystemUI 私有文件时立即处理，避免 250ms 轮询造成的桥/缩放不同帧。 */
@@ -499,6 +529,8 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     static void applyDisplayZoomLocked(ZoomTarget target, float scale,            float offsetY, float offsetX, ZoomCommit commit) throws Throwable { HostEntryZoom.INSTANCE.applyDisplayZoomLocked(target, scale, offsetY, offsetX, commit); }
 
+    static void applyDisplayZoomLocked(ZoomTarget target, float scale,            float offsetY, float offsetX, ZoomCommit commit, boolean nativeVisibility) throws Throwable { HostEntryZoom.INSTANCE.applyDisplayZoomLocked(target, scale, offsetY, offsetX, commit, nativeVisibility); }
+
     /**
      * 整屏缩放动画：从当前生效 spec 插值到目标 spec，每帧仍在 WMS.mH 上、
      * 持真实 mGlobalLock 应用（与静态缩放同一路径）。R2 的 ZoomAnimController
@@ -604,6 +636,37 @@ public class HostEntry implements IXposedHookLoadPackage {
     /** v0.7.0：角部热区 + 广播触发；首次触发再启动宿主，之后切换显示。 */
     private static void installTriggers() { HostEntrySupport.INSTANCE.installTriggers(); }
 
+    /** 锁屏保留工作区：原生亮屏/解锁事件先于 SCREEN_ON 广播到达时提前恢复工作区。 */
+    private static void installRetainedWorkspaceWakeHooks(ClassLoader cl) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "com.android.systemui.keyguard.KeyguardLifecyclesDispatcher$KeyguardLifecycleHandler",
+                    cl, "handleMessage", android.os.Message.class, new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            int event = ((android.os.Message) param.args[0]).what;
+                            // Native SCREEN_TURNING_ON and STARTED_WAKING_UP precede
+                            // SCREEN_ON broadcasts and the first visible desktop frame.
+                            if (event == 0 || event == 4) MiStepHost.onNativeWake();
+                        }
+                    });
+            log("retained workspace native wake hook armed");
+        } catch (Throwable unavailable) {
+            log("retained workspace native wake hook unavailable: " + unavailable);
+        }
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager",
+                    cl, "hide", long.class, long.class, new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            MiStepHost.onNativeWake();
+                        }
+                    });
+            log("retained workspace native unlock hook armed");
+        } catch (Throwable unavailable) {
+            log("retained workspace native unlock hook unavailable: " + unavailable);
+        }
+    }
+
     /**
      * 无人值守调试广播（v0.8.0）：
      *   am broadcast -a com.jiusis.mistep.DEBUG --ei slot 1 --es pkg com.android.settings
@@ -634,6 +697,7 @@ public class HostEntry implements IXposedHookLoadPackage {
     private Object makeListener(Executor executor, String ifaceName) { return HostEntrySupport.INSTANCE.makeListener(executor, ifaceName); }
 
     static void log(String msg) {
+        try { RuntimeDiagnosticEvents.fromHostLog(msg); } catch (Throwable ignored) {}
         Log.i(TAG, msg);
         try {
             XposedBridge.log(TAG + ": " + msg);

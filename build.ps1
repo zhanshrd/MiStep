@@ -68,12 +68,12 @@ New-Item -ItemType Directory -Force -Path $assetStage,$legalStage | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE'),(Join-Path $root 'THIRD_PARTY_NOTICES.md') -Destination $legalStage -Force
 Copy-Item -Path (Join-Path $root 'libs\licenses\*') -Destination $legalStage -Force
 "Mi Step $($version.name)`nPackage: com.jiusis.mistep`nSource: https://github.com/JIUSIS/MiStep`nLicense: LicenseRef-MiStep-NC-SA-1.0`nChinese LICENSE text controls. Third-party licenses remain unchanged.`n" | Set-Content -LiteralPath (Join-Path $legalStage 'SOURCE.txt') -Encoding utf8
-& (Join-Path $bt 'aapt2.exe') link -o 'build\base.apk' -I $android --manifest 'module\src\main\AndroidManifest.xml' -A 'module\src\main\assets' --min-sdk-version 24 --target-sdk-version 37 'build\resources.zip'
+& (Join-Path $bt 'aapt2.exe') link -o 'build\base.apk' -I $android --manifest 'module\src\main\AndroidManifest.xml' -A 'module\src\main\assets' --min-sdk-version 34 --target-sdk-version 37 'build\resources.zip'
 if ($LASTEXITCODE -ne 0) { throw 'Resource linking failed.' }
 $jar = Join-Path $out 'classes.jar'
 & (Join-Path $javaBin 'jar.exe') --create --file $jar -C $env:MISTEP_CLASSES .
 if ($LASTEXITCODE -ne 0) { throw 'Class archive failed.' }
-& (Join-Path $bt 'd8.bat') --min-api 37 --lib $android --lib $xposed --output (Join-Path $out 'dex') $jar
+& (Join-Path $bt 'd8.bat') --min-api 34 --lib $android --lib $xposed --output (Join-Path $out 'dex') $jar
 if ($LASTEXITCODE -ne 0) { throw 'DEX compilation failed.' }
 $stage = Join-Path $out 'stage'
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'lib\arm64-v8a') | Out-Null

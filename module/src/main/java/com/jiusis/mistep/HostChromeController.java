@@ -87,6 +87,13 @@ final class HostChromeController {
     }
 
     void updateHint(Slot slot) {
+        if (slot.index != MiStepHost.SLOT_TOP && slot.hint != null)
+            LiveSwapVisualLease.writeAlpha(slot.hint, h.taskCellsCovered ? 0f : h.workspaceAlpha);
+        if(slot.index!=MiStepHost.SLOT_TOP && slot.index>=h.CELL_SLOT_COUNT) {
+            if(slot.hint!=null)slot.hint.setVisibility(View.GONE);
+            if(slot.view!=null)slot.view.setAlpha(0);
+            return;
+        }
         if(slot.index==MiStepHost.SLOT_TOP) {
             h.ensureCellBackground(slot); h.updateCellSurfaceVisibility(slot);
             if(h.topCtrl.topTaskPane!=null)h.topCtrl.topTaskPane.occupied(slot.occupied && !slot.parked);
@@ -164,26 +171,92 @@ final class HostChromeController {
     }
 
     void applyWallpaperBackdrops() {
+        if (h.root != null && h.layout != null) {
+            if (h.layout.tabletLandscape) {
+                if (h.mainGapBacking == null) {
+                    h.mainGapBacking = new View(h.ctx);
+                    h.mainGapBacking.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                    h.mainGapBacking.setBackground(HyperOsStyle.topBackground(h.ctx));
+                    h.root.addView(h.mainGapBacking);
+                }
+                int[] bounds = h.layout.mainGapBounds();
+                FrameLayout.LayoutParams gap = new FrameLayout.LayoutParams(bounds[2]-bounds[0], bounds[3]-bounds[1]);
+                gap.leftMargin = bounds[0];
+                gap.topMargin = bounds[1];
+                h.mainGapBacking.setLayoutParams(gap);
+                h.mainGapBacking.setAlpha(1f);
+                View backing = h.sideBackingViews[MiStepHost.SLOT_TOP];
+                if (backing == null) {
+                    backing = new View(h.ctx);
+                    backing.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                    h.sideBackingViews[MiStepHost.SLOT_TOP] = backing;
+                    h.root.addView(backing, 0);
+                }
+                int[] side = h.layout.interactiveBounds();
+                FrameLayout.LayoutParams sideParams = new FrameLayout.LayoutParams(side[2]-side[0], side[3]-side[1]);
+                sideParams.leftMargin=side[0];sideParams.topMargin=side[1];
+                backing.setLayoutParams(sideParams);
+            } else if (h.mainGapBacking != null) {
+                h.root.removeView(h.mainGapBacking);
+                h.mainGapBacking = null;
+            }
+            if (!h.layout.tabletLandscape && h.sideBackingViews[MiStepHost.SLOT_TOP] != null) {
+                h.root.removeView(h.sideBackingViews[MiStepHost.SLOT_TOP]);
+                h.sideBackingViews[MiStepHost.SLOT_TOP] = null;
+            }
+        }
+        updateWorkspaceBackdropVisibility();
         if (h.wallpaperBackdrop == null || h.wallpaperBackdrop.isRecycled() || h.layout == null) return;
+        if (h.mainGapBacking != null) {
+            int[] bounds = h.layout.mainGapBounds();
+            h.mainGapBacking.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
+                    bounds[0], bounds[1], HyperOsStyle.topWallpaperTint(h.ctx)));
+        }
+        if (h.sideBackingViews[MiStepHost.SLOT_TOP] != null) {
+            int[] bounds = h.layout.interactiveBounds();
+            h.sideBackingViews[MiStepHost.SLOT_TOP].setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
+                    bounds[0], bounds[1], HyperOsStyle.topWallpaperTint(h.ctx)));
+        }
         if (h.topBar != null) h.topBar.setWallpaperBackdrop(h.wallpaperBackdrop, h.screenW, h.screenH);
         if (h.topStripBacking != null) {
             h.topStripBacking.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
                     0, 0, HyperOsStyle.topWallpaperTint(h.ctx)));
         }
         Slot upper=h.slots[MiStepHost.SLOT_TOP];
-        if(upper!=null && upper.hint!=null && !upper.occupied)
+        if(upper!=null && upper.hint!=null && !upper.occupied) {
+            TopTaskGeometry geometry=h.topGeometry();
             upper.hint.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop,h.screenW,h.screenH,
-                    0,0,HyperOsStyle.topWallpaperTint(h.ctx)));
+                    geometry.left,geometry.top,HyperOsStyle.topWallpaperTint(h.ctx)));
+        }
         int x = h.layout.mainOnRight ? 0 : h.layout.mainWidth;
-        for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
+        for (int i = 1; i < h.CELL_SLOT_COUNT; i++) {
             View backing = h.sideBackingViews[i];
-            if (backing == null) continue;
-            backing.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
-                    x, h.sideSegmentTop(i), HyperOsStyle.topWallpaperTint(h.ctx)));
+            if (backing != null) backing.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
+                    h.layout.tabletLandscape?h.layout.cellBounds(i-1)[0]:x,
+                    h.sideSegmentTop(i), HyperOsStyle.topWallpaperTint(h.ctx)));
+            // A retained Host can gain a fourth tablet cell without a backing View.
+            // Its empty hint must still sample the current display and slot origin.
             Slot slot = h.slots[i];
             if (slot == null || slot.hint == null || slot.occupied || slot.rect == null) continue;
             slot.hint.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
                     slot.rect[0], slot.rect[1], HyperOsStyle.topWallpaperTint(h.ctx)));
+        }
+        updateWorkspaceBackdropVisibility();
+    }
+
+    /** Apply the same cold-entry gate to newly created and replaced backgrounds. */
+    void updateWorkspaceBackdropVisibility() {
+        if (h.layout == null) return;
+        // Wallpaper can arrive during a task handoff; do not rewrite its Surface alpha.
+        android.graphics.RectF hole = h.layout.tabletLandscape ? h.lifecycle.workspaceMainHole() : null;
+        for (View backing : new View[]{h.topStripBacking,h.mainGapBacking})
+            h.lifecycle.updateWorkspaceBacking(backing, hole);
+        for (int i=1;i<MiStepHost.SLOT_COUNT;i++) {
+            View backing=h.sideBackingViews[i];
+            h.lifecycle.updateWorkspaceBacking(backing, hole);
+            Slot slot=h.slots[i];
+            if (slot!=null && slot.hint!=null && slot.hint.getBackground() instanceof WallpaperCropDrawable)
+                ((WallpaperCropDrawable) slot.hint.getBackground()).setMainHole(hole);
         }
     }
 

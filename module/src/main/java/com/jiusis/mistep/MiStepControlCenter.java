@@ -29,9 +29,8 @@ final class MiStepControlCenter extends FrameLayout {
     private final View[] cells = new View[4];
     private final FrameLayout firstPage;
     private final MiStepNativeMedia musicPage;
-    private final ControlCenterPages pages = new ControlCenterPages(3);
-    private final TextView landscapePage;
-    private Runnable landscapeRequest;
+    private final boolean combined;
+    private final ControlCenterPages pages = new ControlCenterPages();
     private ValueAnimator pageAnimator;
     private VelocityTracker pageVelocity;
     private int page;
@@ -42,6 +41,7 @@ final class MiStepControlCenter extends FrameLayout {
     private final TextView model;
     private final View scanner;
     private final View payment, transit;
+    private WorkspaceOptions options = WorkspaceOptions.DEFAULT;
     private MiStepOs4Controls.Slider volume, brightness;
     private ConnectivityManager networks;
     private boolean listening, updating, volumeTracking, brightnessTracking;
@@ -65,28 +65,22 @@ final class MiStepControlCenter extends FrameLayout {
     MiStepControlCenter(Context context) {
         super(context);
         this.context = context;
+        combined = DeviceProfile.isTablet(context);
         audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         setClipChildren(true);
         setClipToPadding(true);
         firstPage = new FrameLayout(context);
         addView(firstPage, new FrameLayout.LayoutParams(-1, -1));
-        landscapePage = new TextView(context);
-        landscapePage.setText("横屏窗口\n点按打开，再点空白窗口收纳主屏应用\n双指上下滑动翻转顶部");
-        landscapePage.setTextColor(HyperOsStyle.textPrimary(context));
-        landscapePage.setGravity(Gravity.CENTER);
-        landscapePage.setTextSize(15);
-        landscapePage.setOnClickListener(v->{if(landscapeRequest!=null)landscapeRequest.run();});
-        addView(landscapePage,new FrameLayout.LayoutParams(-1,-1));
         musicPage = new MiStepNativeMedia(context);
         addView(musicPage, new FrameLayout.LayoutParams(-1, -1));
         musicPage.setVisibility(View.INVISIBLE);
         musicPage.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        setContentDescription("控制中心第1页，左右滑动切换音乐和横屏窗口");
+        if (combined) musicPage.setContentDescription("原生音乐控件");
+        setContentDescription("控制中心第1页，左右滑动切换音乐控件");
         connectivityCard = new View(context);
         GradientDrawable panel = new GradientDrawable();
-        panel.setColor(0xb2353f49);
+        panel.setColor(HyperOsStyle.dark(context) ? 0xb2262930 : 0xb2ffffff);
         panel.setCornerRadius(MiStepOs4Controls.cornerRadius(context));
-        panel.setStroke(dp(.5f), 0x26ffffff);
         connectivityCard.setBackground(panel);
         connectivityCard.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         firstPage.addView(connectivityCard);
@@ -103,7 +97,7 @@ final class MiStepControlCenter extends FrameLayout {
         model = new TextView(context);
         model.setText(deviceName());
         model.setTextColor(HyperOsStyle.textPrimary(context));
-        model.setTextSize(10);
+        model.setTextSize(DeviceProfile.isTablet(context) ? 14 : 10);
         model.setTypeface(android.graphics.Typeface.create("sans-serif-medium", 0));
         model.setGravity(Gravity.CENTER);
         model.setIncludeFontPadding(false);
@@ -175,6 +169,26 @@ final class MiStepControlCenter extends FrameLayout {
     void setWallpaper(Bitmap bitmap, int width, int height) {
         // Native views own their material; the parent already draws wallpaper.
     }
+    void applyOptions(WorkspaceOptions options) {
+        this.options = options;
+        setVisibility(options.visible(WorkspaceOptions.CONTROL_CENTER) ? View.VISIBLE : View.GONE);
+        int[] network = {WorkspaceOptions.WIFI, WorkspaceOptions.MOBILE_DATA,
+                WorkspaceOptions.BLUETOOTH, WorkspaceOptions.VPN};
+        boolean anyNetwork = false;
+        for (int i = 0; i < cells.length; i++) {
+            boolean visible = options.visible(network[i]);
+            cells[i].setVisibility(visible ? View.VISIBLE : View.GONE);
+            anyNetwork |= visible;
+        }
+        connectivityCard.setVisibility(anyNetwork ? View.VISIBLE : View.GONE);
+        View[] controls = {model, payment, scanner, transit, volume == null ? null : volume.root,
+                brightness == null ? null : brightness.root};
+        int[] ids = {WorkspaceOptions.DEVICE_NAME, WorkspaceOptions.PAYMENT, WorkspaceOptions.SCANNER,
+                WorkspaceOptions.TRANSIT, WorkspaceOptions.VOLUME, WorkspaceOptions.BRIGHTNESS};
+        for (int i = 0; i < controls.length; i++) if (controls[i] != null)
+            controls[i].setVisibility(options.visible(ids[i]) ? View.VISIBLE : View.GONE);
+        requestLayout();
+    }
     private void openScanner() { MiStepSystemActions.openScanner(getContext(), scanner); }
     private View paymentAnchor() { return payment; }
     private View transitAnchor() { return transit; }
@@ -192,17 +206,27 @@ final class MiStepControlCenter extends FrameLayout {
         }
     }
     void setCutouts(List<Rect> bounds, int originX, int originY) {
+        ArrayList<Rect> next = new ArrayList<>();
+        for (Rect rect : bounds) { Rect local = new Rect(rect); local.offset(-originX, -originY); next.add(local); }
+        if (cutouts.equals(next)) return;
         cutouts.clear();
-        for (Rect rect : bounds) { Rect local = new Rect(rect); local.offset(-originX, -originY); cutouts.add(local); }
+        cutouts.addAll(next);
         requestLayout();
     }
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
         int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
-        ControlCenterGeometry g = new ControlCenterGeometry(width, height, dp(8));
+        int panelGap = combined ? Math.min(dp(12), Math.max(0, width - 2)) : 0;
+        int controlsWidth = combined ? Math.max(1, (width - panelGap) / 2) : width;
+        FrameLayout.LayoutParams controls = (FrameLayout.LayoutParams) firstPage.getLayoutParams();
+        controls.width = controlsWidth;
+        FrameLayout.LayoutParams music = (FrameLayout.LayoutParams) musicPage.getLayoutParams();
+        music.width = combined ? Math.max(1, width - controlsWidth - panelGap) : width;
+        music.leftMargin = combined ? controlsWidth + panelGap : 0;
+        ControlCenterGeometry g = new ControlCenterGeometry(controlsWidth, height, dp(8));
         FrameLayout.LayoutParams card = new FrameLayout.LayoutParams(g.networkWidth, g.networkWidth);
         card.topMargin = g.cardTop;
         connectivityCard.setLayoutParams(card);
-        int iconSize = g.connectivityIconSize(dp(44));
+        int iconSize = g.connectivityIconSize(dp(DeviceProfile.isTablet(context) ? 52 : 44));
         for (int i = 0; i < cells.length; i++)
             size(cells[i], g.connectivityLeft(i, iconSize), g.connectivityTop(i, iconSize), iconSize, iconSize);
         size(model, g.modelLeft, g.cardTop + g.panelPadding, g.modelWidth, g.tileHeight);
@@ -221,17 +245,9 @@ final class MiStepControlCenter extends FrameLayout {
         renderPages();
     }
 
-    void setOnLandscapeRequest(Runnable request) { landscapeRequest=request; }
-
-    void leaveLandscapePage() {
-        if(page!=2)return;
-        cancelPageAnimation(); page=1; pageOffset=pageSpan(); renderPages(); finishPage();
-    }
-
     private void renderPages() {
-        firstPage.setTranslationX(-pageOffset);
-        musicPage.setTranslationX(pageSpan() - pageOffset);
-        landscapePage.setTranslationX(2*pageSpan()-pageOffset);
+        firstPage.setTranslationX(combined ? 0f : -pageOffset);
+        musicPage.setTranslationX(combined ? 0f : pageSpan() - pageOffset);
     }
 
     private float pageSpan() {
@@ -245,22 +261,25 @@ final class MiStepControlCenter extends FrameLayout {
     }
 
     private void finishPage() {
-        firstPage.setVisibility(page == 0 ? View.VISIBLE : View.INVISIBLE);
-        musicPage.setVisibility(page == 1 ? View.VISIBLE : View.INVISIBLE);
-        firstPage.setImportantForAccessibility(page == 0 ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        musicPage.setImportantForAccessibility(page == 1 ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        musicPage.setActive(page == 1);
-        landscapePage.setVisibility(page==2?View.VISIBLE:View.INVISIBLE);
-        landscapePage.setImportantForAccessibility(page==2?View.IMPORTANT_FOR_ACCESSIBILITY_AUTO:View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        setContentDescription(page == 0 ? "控制中心第1页，左右滑动切换音乐控件" : "原生音乐第2页，左右滑动返回控制中心");
+        firstPage.setVisibility(combined || page == 0 ? View.VISIBLE : View.INVISIBLE);
+        musicPage.setVisibility(combined || page == 1 ? View.VISIBLE : View.INVISIBLE);
+        firstPage.setImportantForAccessibility(combined || page == 0 ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        musicPage.setImportantForAccessibility(combined || page == 1 ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        musicPage.setActive(isShown() && (combined || page == 1));
+        setContentDescription(combined ? "控制中心与音乐控件"
+                : page == 0 ? "控制中心第1页，左右滑动切换音乐控件" : "原生音乐第2页，左右滑动返回控制中心");
+    }
+
+    @Override protected void onVisibilityChanged(View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (musicPage != null) finishPage();
     }
 
     private void settlePage(int target) {
         cancelPageAnimation();
-        page = Math.max(0, Math.min(2, target));
+        page = Math.max(0, Math.min(1, target));
         firstPage.setVisibility(View.VISIBLE);
         musicPage.setVisibility(View.VISIBLE);
-        landscapePage.setVisibility(View.VISIBLE);
         if (page == 1) musicPage.setActive(true);
         ValueAnimator next = ValueAnimator.ofFloat(pageOffset, page * pageSpan());
         pageAnimator = next;
@@ -272,13 +291,13 @@ final class MiStepControlCenter extends FrameLayout {
                 if (pageAnimator != animation) return;
                 pageAnimator = null;
                 finishPage();
-                if(page==2 && landscapeRequest!=null)landscapeRequest.run();
             }
         });
         next.start();
     }
 
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        if (combined) return super.dispatchTouchEvent(event);
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
             cancelPageAnimation();
             pageOffset = page * pageSpan();
@@ -297,6 +316,7 @@ final class MiStepControlCenter extends FrameLayout {
     }
 
     @Override public boolean onInterceptTouchEvent(MotionEvent event) {
+        if (combined) return false;
         if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
             if (event.getPointerCount() > 1 && !pages.dragging) pages.blocked = true;
             pages.move(event.getX(), event.getY());
@@ -306,12 +326,14 @@ final class MiStepControlCenter extends FrameLayout {
     }
 
     @Override public void requestDisallowInterceptTouchEvent(boolean disallow) {
+        if (combined) { super.requestDisallowInterceptTouchEvent(disallow); return; }
         // Native vertical sliders claim DOWN before its direction is known. Only
         // the horizontal pager may cancel them; native horizontal seeking owns its region.
         if (!disallow || pages.blocked || pages.vertical) super.requestDisallowInterceptTouchEvent(disallow);
     }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
+        if (combined) return super.onTouchEvent(event);
         if (event.getPointerCount() > 1 && pages.dragging) {
             pages.dragging = false; pages.blocked = true;
             settlePage(page);
@@ -321,7 +343,7 @@ final class MiStepControlCenter extends FrameLayout {
             boolean wasVisible = musicPage.getVisibility() == View.VISIBLE;
             pageOffset = pages.move(event.getX(), event.getY());
             if (pages.dragging) {
-                firstPage.setVisibility(View.VISIBLE); musicPage.setVisibility(View.VISIBLE); landscapePage.setVisibility(View.VISIBLE);
+                firstPage.setVisibility(View.VISIBLE); musicPage.setVisibility(View.VISIBLE);
                 if (!wasVisible) musicPage.setActive(true);
                 renderPages();
             }
@@ -337,13 +359,15 @@ final class MiStepControlCenter extends FrameLayout {
 
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info);
-        info.setScrollable(true);
-        if(page<2)info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
+        info.setScrollable(!combined);
+        if (combined) return;
+        if(page<1)info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
         if(page>0)info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
     }
 
     @Override public boolean performAccessibilityAction(int action, Bundle args) {
-        if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD && page < 2) { settlePage(page+1); return true; }
+        if (combined) return super.performAccessibilityAction(action, args);
+        if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD && page < 1) { settlePage(page+1); return true; }
         if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD && page > 0) { settlePage(page-1); return true; }
         return super.performAccessibilityAction(action, args);
     }
@@ -356,6 +380,7 @@ final class MiStepControlCenter extends FrameLayout {
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(Math.max(1, width), Math.max(1, height - localTop));
         lp.leftMargin = x; lp.topMargin = y + localTop;
         view.setLayoutParams(lp);
+        MiStepOs4Controls.fitTile(view, lp.width, lp.height);
     }
     @Override protected void onAttachedToWindow() {
         super.onAttachedToWindow();
@@ -366,7 +391,10 @@ final class MiStepControlCenter extends FrameLayout {
         for (int i = 0; i < specs.length; i++) {
             View cell = cells[i];
             releases.add(MiStepSystemActions.observeQuickSetting(specs[i], state -> {
-                if (listening && !(cell instanceof TextView)) MiStepOs4Controls.state(cell, state.nativeState);
+                if (listening && !(cell instanceof TextView)) {
+                    MiStepOs4Controls.state(cell, state.nativeState);
+                    applyOptions(options);
+                }
             }));
         }
         try {
@@ -380,8 +408,13 @@ final class MiStepControlCenter extends FrameLayout {
         } catch (Throwable e) { MiStepOs4Controls.failed("brightness observer", e); }
         try {
             DisplayManager displays = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
-            // The native controller uses EVENT_FLAG_DISPLAY_BRIGHTNESS (32), including range changes.
-            XposedHelpers.callMethod(displays, "registerDisplayListener", brightnessDisplayListener, main, 32L);
+            // API36 separates public display events from private brightness events.
+            java.lang.reflect.Field privateBrightness = XposedHelpers.findFieldIfExists(
+                    DisplayManager.class, "PRIVATE_EVENT_TYPE_DISPLAY_BRIGHTNESS");
+            if (privateBrightness != null)
+                XposedHelpers.callMethod(displays, "registerDisplayListener", brightnessDisplayListener,
+                        main, 0L, privateBrightness.getLong(null));
+            else XposedHelpers.callMethod(displays, "registerDisplayListener", brightnessDisplayListener, main, 32L);
             releases.add(() -> displays.unregisterDisplayListener(brightnessDisplayListener));
         } catch (Throwable e) { MiStepOs4Controls.failed("brightness display observer", e); }
         try {
@@ -424,6 +457,7 @@ final class MiStepControlCenter extends FrameLayout {
             }
             MiStepOs4Controls.state(cells[3], MiStepOs4Controls.simpleState(context, "VPN", active,
                     "ic_qs_vpn", "stat_sys_vpn_ic", "stat_sys_vpn_ic_dark"));
+            applyOptions(options);
         } catch (Throwable e) { MiStepOs4Controls.failed("vpn state", e); }
     }
     private void refreshValues() {

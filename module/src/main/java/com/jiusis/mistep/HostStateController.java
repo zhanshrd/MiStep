@@ -235,9 +235,10 @@ final class HostStateController {
                     h.reapplyScale(slot);
                     h.publishDesktopSideTasks();
                     MiStepHost.log("adoption confirmed same task=" + task.id + " slot=" + slot.index);
+                    if(slot.index==MiStepHost.SLOT_TOP)MiStepTopNativeCaption.refresh();
                     success.run();
                     h.main.postDelayed(() -> {
-                        h.compactCells();
+                        h.compactCellsAfterCollection();
                         // TaskView insertion can briefly hide sibling surfaces while the
                         // native transition settles. Re-show every already-owned cell
                         // without moving tasks or changing ownership.
@@ -251,6 +252,7 @@ final class HostStateController {
     }
 
     void setZoomState(boolean on) {
+        on = on && !h.keyguardLocked && h.screenOn;
         h.zoomed = on;
         HostEntry.setHostZoomed(on);
         MiStepStatusBarSampling.geometryChanged();
@@ -350,7 +352,10 @@ final class HostStateController {
         if (h.layout != null && h.mainOnRight == right) return;
         try {
             h.applyMainLayout(h.makeAdaptiveLayout(right));
-            if (h.root != null) writeZoom(true);
+            // Reopening from the opposite corner prepares Host geometry first.
+            // The entry frame gate owns its animated zoom; an early steady write
+            // would shrink the real main task before the backdrop is drawable.
+            if (h.root != null && h.scene == MiStepHost.ACTIVE && !h.workspaceEntering) writeZoom(true);
         } catch (Throwable error) {
             MiStepHost.log("main side switch failed: " + error);
         }

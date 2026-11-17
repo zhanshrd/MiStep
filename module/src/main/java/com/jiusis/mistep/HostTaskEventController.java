@@ -16,6 +16,7 @@ import android.graphics.Point;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Region;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -54,7 +55,8 @@ final class HostTaskEventController {
 
     void createNext(final int index) {
         if (index >= MiStepHost.SLOT_COUNT) {
-            MiStepHost.log("three side and one upper TaskView ready; system main region has no TaskView");
+            h.topCtrl.configureTabletTools();
+            MiStepHost.log("TaskViews ready cells="+h.layout.cellCount+" interactive=1; system main has no TaskView");
             return;
         }
         Consumer<Object> onCreated = new Consumer<Object>() {
@@ -64,7 +66,7 @@ final class HostTaskEventController {
                 h.main.post(() -> onTaskViewCreated(index, taskViewObj));
             }
         };
-        XposedHelpers.callMethod(h.factory, "create", h.ctx, h.executor, onCreated);
+        ShellCompat.createTaskView(h.factory, h.ctx, h.executor, onCreated);
     }
 
     void onTaskViewCreated(int index, Object taskViewObj) {
@@ -72,7 +74,7 @@ final class HostTaskEventController {
             Slot slot = h.slots[index];
             View view = (View) taskViewObj;
             slot.view = view;
-            slot.controller = XposedHelpers.callMethod(view, "getController");
+            slot.controller = ShellCompat.taskViewController(view);
             slot.rect = h.slotBounds(slot);
 
             Object listener = makeListener(index);
@@ -81,7 +83,15 @@ final class HostTaskEventController {
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     slot.rect[2] - slot.rect[0], slot.rect[3] - slot.rect[1]);
             if (!MiStepHost.boundsHooksReady) throw new IllegalStateException("logical bounds hooks unavailable");
-            h.root.addView(view, lp);
+            if(index==MiStepHost.SLOT_TOP) {
+                // SurfaceView clipping must be enabled explicitly; ViewGroup clipping alone
+                // does not crop the separately composed, continuously drawing application.
+                XposedHelpers.callMethod(view,"setEnableSurfaceClipping",true);
+                // Compose the original TOP surface above the host instead of punching a hole
+                // through the other live face. Set before attach; keep the native task parent.
+                XposedHelpers.callMethod(view,"setZOrderOnTop",true);
+                (h.layout.tabletLandscape?h.root:h.topLiveClip).addView(view,lp);
+            } else h.root.addView(view, lp);
             h.applyRect(slot);
             h.ensureCellBackground(slot);
 
@@ -92,7 +102,7 @@ final class HostTaskEventController {
                 createNext(index+1); return;
             }
             slot.hint = h.makeEmptyHint();
-            slot.hint.setOnClickListener(v -> h.onSlotTapped(slot.index));
+            slot.hint.setOnClickListener(v -> { if (!h.taskCellsCovered) h.onSlotTapped(slot.index); });
             h.root.addView(slot.hint, h.hintParams(slot));
             // 修：hint 在 applyRect 之后才创建，之前一直停在 (0,0)（屏幕上左上角那个多余的加号）。
             h.applyRect(slot);
@@ -100,7 +110,7 @@ final class HostTaskEventController {
 
             if (h.workspaceAlpha < 1f) h.setWorkspaceAlpha(h.workspaceAlpha);
 
-            view.setOnClickListener(v -> h.onSlotTapped(h.slotIndexOfView(v)));
+            view.setOnClickListener(v -> { if (!h.taskCellsCovered) h.onSlotTapped(h.slotIndexOfView(v)); });
             view.setOnTouchListener((v, e) -> canRender(slot) && h.scene == MiStepHost.ACTIVE && h.onSlotTouch(slot.index, e));
             h.updateTouchRegion(slot);
             MiStepHost.log("slot " + index + " attached rect=" + java.util.Arrays.toString(slot.rect));
@@ -116,8 +126,7 @@ final class HostTaskEventController {
         try {
             Object organizer = h.shellOrganizer();
             if (organizer == null) return;
-            Object leash = XposedHelpers.callMethod(organizer, "getTaskLeash",
-                    new Class<?>[]{int.class}, taskId);
+            Object leash = ShellCompat.taskLeash(organizer, taskId);
             if (leash == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
                 return;
             }
@@ -151,7 +160,6 @@ final class HostTaskEventController {
         if(slot.index==MiStepHost.SLOT_TOP && h.topCtrl.topTaskState.owner()!=null) {
             h.topCtrl.topTaskState.release(h.topCtrl.topTaskState.owner(),false); h.topCtrl.topOriginalSlot=null;
         }
-        if(slot.index==MiStepHost.SLOT_TOP)h.topCtrl.releaseRetainedTopSnapshot();
         slot.taskEpoch++;
         slot.removalCheckTask = -1;
         slot.retiredTaskId = slot.taskId;
@@ -249,9 +257,14 @@ final class HostTaskEventController {
         // v0.9：任务一律按"整屏手机"起（1080×2460），完整 UI 不受窗口最小宽限制；
         // 显示时用矩阵缩放塞进格子（官方Mi Step的等比缩小语义）。
         Rect rect = new Rect(0, 0, h.screenW, h.screenH);
+        ActivityOptions creator = ActivityOptions.makeBasic()
+                .setPendingIntentCreatorBackgroundActivityStartMode(
+                        visibleHostBackgroundStartMode());
         PendingIntent pi = PendingIntent.getActivity(h.ctx, 1000 + index, launch,
-                PendingIntent.FLAG_IMMUTABLE);
-        ActivityOptions options = ActivityOptions.makeBasic();
+                PendingIntent.FLAG_IMMUTABLE, creator.toBundle());
+        ActivityOptions options = ActivityOptions.makeBasic()
+                .setPendingIntentBackgroundActivityStartMode(
+                        visibleHostBackgroundStartMode());
         MiStepHost.callHidden(options, "setLaunchWindowingMode", 6);          // WINDOWING_MODE_MULTI_WINDOW
         MiStepHost.callHidden(options, "setRemoveWithTaskOrganizer", Boolean.FALSE);
         try {
@@ -279,6 +292,13 @@ final class HostTaskEventController {
             MiStepHost.log("startSlot " + index + " FAILED: " + t);
             XposedBridge.log(t);
         }
+    }
+
+    private static int visibleHostBackgroundStartMode() {
+        // API 36 adds ALLOW_IF_VISIBLE = 4. API 35 uses the older explicit opt-in;
+        // startSlot requires the visible ACTIVE workspace before creating a PI.
+        return Build.VERSION.SDK_INT >= 36 ? 4
+                : ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED;
     }
 
     Object makeListener(final int slotIndex) {
@@ -338,10 +358,15 @@ final class HostTaskEventController {
             h.launchCurrentSlot = null;
         }
         MiStepHost.log("onTaskCreated slot=" + slotIndex + " taskId=" + taskId);
+        if (MiStepHost.legacyTaskInfoCallbacks) {
+            Object info = ShellCompat.currentTaskInfo(slot.controller, taskId);
+            if (info != null) onTaskInfo(slotIndex, info);
+        }
+        if(slotIndex==MiStepHost.SLOT_TOP)MiStepTopNativeCaption.refresh();
         h.updateHint(slot);
         h.updateTouchRegion(slot);
         h.finishPendingSuspend();
-        h.main.postDelayed(h::compactCells, 120L);
+        h.main.postDelayed(h::compactCellsAfterCollection, 120L);
         if (slotIndex > MiStepHost.SLOT_MAIN) h.scheduleSideModeResolution(slot, taskId);
     }
 
@@ -373,6 +398,7 @@ final class HostTaskEventController {
             slot.occupied = running;
             slot.taskVisible = visible;
             slot.windowMode = mode;
+            if(slotIndex==MiStepHost.SLOT_TOP && running && mode==6)MiStepTopNativeCaption.refresh();
             if (!running && changed) h.requestCompaction();
             if (slotIndex > MiStepHost.SLOT_MAIN && mode == 6) {
                 slot.modeAdmissionPending = false;

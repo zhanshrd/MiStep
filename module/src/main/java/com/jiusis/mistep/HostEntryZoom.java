@@ -94,18 +94,87 @@ final class HostEntryZoom {
         try {
             final Context context = (Context) XposedHelpers.getObjectField(service, "mContext");
             HostEntry.sWmsContext = context;
+            RuntimeDiagnosticEvents.initialize(context, true);
             startZoomSettingsWatcher();
             if (HostEntry.sZoomBridgeArmed) return;
             android.os.HandlerThread thread = new android.os.HandlerThread("mistep-zoom-bridge");
             thread.start();
             Handler handler = new Handler(thread.getLooper());
             HostEntry.sZoomBridgeHandler = handler;
+            HostEntry.sRetainedWindow.setHandler(handler);
             BroadcastReceiver receiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context c, Intent intent) {
                     if (intent == null) return;
+                    if (MiStepRetainedWindow.ACTION.equals(intent.getAction())) {
+                        HostEntry.ZoomTarget target = HostEntry.sZoomTarget;
+                        android.os.Bundle reply = null;
+                        if (target != null) synchronized (target.globalLock) {
+                            if (target == HostEntry.sZoomTarget && !MiStepEntryGuard.canOpen(context))
+                                reply = HostEntry.sRetainedWindow.retain(target.display, intent);
+                        }
+                        setResultExtras(reply); setResultCode(reply == null ? 0 : -1);
+                        return;
+                    }
+                    if (MiStepUnlockHandoff.RELEASE.equals(intent.getAction())) {
+                        HostEntry.ZoomTarget target = HostEntry.sZoomTarget;
+                        long generation = intent.getLongExtra(LiveSwapZoomProtocol.GENERATION, 0);
+                        if (target != null) target.handler.post(() -> {
+                            synchronized (target.globalLock) {
+                                if (target != HostEntry.sZoomTarget || generation == 0
+                                        || generation != HostEntry.sUnlockPhysicalShadeGeneration) return;
+                                HostEntry.sUnlockPhysicalShadeGeneration = 0;
+                                try {
+                                    Object tx = XposedHelpers.callMethod(target.display, "getPendingTransaction");
+                                    reapplyFinalMagnification(target.display, tx);
+                                    XposedHelpers.callMethod(tx, "apply");
+                                } catch (Throwable error) { HostEntry.log("unlock shade release unavailable: " + error); }
+                            }
+                        });
+                        return;
+                    }
+                    if (MiStepBottomReplayInput.ACTION.equals(intent.getAction())) {
+                        MiStepBottomReplayInput.setMode(intent.getIntExtra("mode", 0));
+                        return;
+                    }
                     if (MiStepCodes.ACTION.equals(intent.getAction())) {
                         setResultCode(MiStepCodes.receive(context, service.getClass().getClassLoader(), intent));
+                        return;
+                    }
+                    if (MiStepTopBack.ACTION.equals(intent.getAction())) {
+                        HostEntry.ZoomTarget target=HostEntry.sZoomTarget;
+                        if(!HostEntry.sZoomed || target==null)return;
+                        target.handler.post(()->{
+                            if(!HostEntry.sZoomed || target!=HostEntry.sZoomTarget)return;
+                            try {
+                                Runnable dispatch;
+                                synchronized(target.globalLock) {
+                                    dispatch=MiStepTopBack.prepare(context,target.display,intent);
+                                }
+                                if(dispatch!=null) {dispatch.run();HostEntry.log("tablet inner-edge back dispatched");}
+                            } catch(Throwable error) {HostEntry.log("tablet inner-edge back rejected: "+error);}
+                        });
+                        return;
+                    }
+                    if (MiStepWorkspaceBackdrop.ACTION.equals(intent.getAction())) {
+                        HostEntry.ZoomTarget target=HostEntry.sZoomTarget;
+                        if(target==null || target.display!=HostEntry.sDisplayContent)return;
+                        try {
+                            synchronized(target.globalLock) {
+                                android.os.Bundle reply=MiStepWorkspaceBackdrop.capture(target.display,intent);
+                                if(reply!=null) {setResultExtras(reply);setResultCode(-1);}
+                            }
+                        } catch(Throwable error) {HostEntry.log("workspace wallpaper parent rejected: "+error);}
+                        return;
+                    }
+                    if(MiStepSwapOverlayBridge.ACTION.equals(intent.getAction())) {
+                        try {
+                            if(!HostEntry.sZoomed || HostEntry.sZoomTarget==null || HostEntry.sDisplayContent==null)return;
+                            synchronized(HostEntry.sZoomTarget.globalLock) {
+                                setResultExtras(MiStepSwapOverlayBridge.capture(HostEntry.sDisplayContent,intent));
+                                setResultCode(-1);
+                            }
+                        } catch(Throwable unavailable) {HostEntry.log("live toolbox native capture refused: "+unavailable);}
                         return;
                     }
                     if (LiveSwapZoomProtocol.APPLY.equals(intent.getAction())) {
@@ -113,6 +182,10 @@ final class HostEntryZoom {
                         return;
                     }
                     if (MiStepInputTrace.ACTION.equals(intent.getAction())) {
+                        if(intent.hasExtra("diagnosticRequest")) {
+                            RuntimeDiagnosticEvents.request(intent.getStringExtra("diagnosticRequest"),intent.getBooleanExtra("diagnosticStart",false),intent.getStringExtra("diagnosticBootId"));
+                            return;
+                        }
                         if (intent.getBooleanExtra("stopInputTrace", false)) {
                             MiStepInputTrace.stop();
                             return;
@@ -127,9 +200,25 @@ final class HostEntryZoom {
                         });
                         return;
                     }
+                    if (MiStepDesktopLaunchBridge.PREPARE_TOP.equals(intent.getAction())) {
+                        boolean prepared=false;
+                        if(HostEntry.sZoomed && HostEntry.sFullscreenRotationActive && HostEntry.sDisplayContent!=null)
+                            synchronized(XposedHelpers.getObjectField(service,"mGlobalLock")) {
+                                prepared=MiStepDesktopLaunchBridge.prepareTop(service,intent);
+                            }
+                        setResultCode(prepared ? -1 : 0);
+                        return;
+                    }
                     if (MiStepDesktopLaunchBridge.ACTION.equals(intent.getAction())) {
-                        MiStepDesktopLaunchBridge.update(intent);
-                        MiStepDesktopLaunchBridge.refreshTopInput(service);
+                        if (MiStepDesktopLaunchBridge.update(intent)) {
+                            MiStepDesktopLaunchBridge.refreshTopInput(service);
+                            try {
+                                if (HostEntry.sZoomed) synchronized (XposedHelpers.getObjectField(service, "mGlobalLock")) {
+                                    MiStepTopInsets.refresh(HostEntry.sDisplayContent, MiStepDesktopLaunchBridge::ownsTopTask);
+                                    XposedHelpers.callMethod(service, "updateFocusedWindowLocked", 0, true);
+                                }
+                            } catch (Throwable unavailable) {HostEntry.log("workspace lease focus refresh skipped: "+unavailable);}
+                        }
                         return;
                     }
                     if ("com.jiusis.mistep.TRANSFER_TOUCH".equals(intent.getAction())) {
@@ -158,10 +247,17 @@ final class HostEntryZoom {
             };
             IntentFilter filter = new IntentFilter("com.jiusis.mistep.ZOOM");
             filter.addAction(LiveSwapZoomProtocol.APPLY);
+            filter.addAction(MiStepUnlockHandoff.RELEASE);
+            filter.addAction(MiStepRetainedWindow.ACTION);
+            filter.addAction(MiStepSwapOverlayBridge.ACTION);
             filter.addAction("com.jiusis.mistep.TRANSFER_TOUCH");
             filter.addAction(MiStepInputTrace.ACTION);
+            filter.addAction(MiStepBottomReplayInput.ACTION);
             filter.addAction(MiStepDesktopLaunchBridge.ACTION);
+            filter.addAction(MiStepDesktopLaunchBridge.PREPARE_TOP);
             filter.addAction(MiStepCodes.ACTION);
+            filter.addAction(MiStepTopBack.ACTION);
+            filter.addAction(MiStepWorkspaceBackdrop.ACTION);
             if (Build.VERSION.SDK_INT >= 33) {
                 // SystemUI / shell can send; ordinary apps cannot change display magnification.
                 context.registerReceiver(receiver, filter, android.Manifest.permission.WRITE_SECURE_SETTINGS,
@@ -170,6 +266,7 @@ final class HostEntryZoom {
                 context.registerReceiver(receiver, filter, android.Manifest.permission.WRITE_SECURE_SETTINGS, handler);
             }
             HostEntry.sZoomBridgeArmed = true;
+            MiStepBottomReplayInput.install(context, service.getClass().getClassLoader(), handler);
             HostEntry.log("zoom broadcast bridge armed");
         } catch (Throwable error) {
             HostEntry.log("zoom broadcast bridge failed: " + error);
@@ -198,7 +295,7 @@ final class HostEntryZoom {
         HostEntry.sFinalMagnificationSnapshot.set(Boolean.TRUE);
         if (info == null) HostEntry.sMagnificationFinishInfo.remove();
         else HostEntry.sMagnificationFinishInfo.set(info);
-        try { XposedHelpers.callMethod(display, "reapplyMagnificationSpec", transaction); }
+        try { ShellCompat.call(display, "reapplyMagnificationSpec", transaction); }
         finally {
             if (previous == null) HostEntry.sFinalMagnificationSnapshot.remove();
             else HostEntry.sFinalMagnificationSnapshot.set(previous);
@@ -237,6 +334,14 @@ final class HostEntryZoom {
                         }
                     }
                     if (HostEntry.sLiveZoomCommit != null) HostEntry.sLiveZoomCommit.finish(false, "superseded generation");
+                    if (intent.getBooleanExtra(MiStepUnlockHandoff.PHYSICAL_KEYGUARD, false)) {
+                        if (!MiStepEntryGuard.canOpen(context)) {
+                            commit.finish(false, "unlock admission changed"); return;
+                        }
+                        HostEntry.sUnlockPhysicalShadeGeneration = generation;
+                        HostEntry.sUnlockPhysicalShadeUntil = android.os.SystemClock.uptimeMillis()
+                                + LiveSwapZoomProtocol.REQUEST_TIMEOUT_MS;
+                    }
                     HostEntry.sLiveZoomIssued = issued;
                     HostEntry.sLiveZoomCommit = commit;
                     target.dispatch.takeOver(target, scale, y, x);
@@ -367,7 +472,7 @@ final class HostEntryZoom {
                     HostEntry.ZoomTarget target = HostEntry.sZoomTarget;
                     if (p.hasThrowable() || !HostEntry.sZoomed || target == null
                             || target.display != HostEntry.sDisplayContent || !Thread.holdsLock(target.globalLock)
-                            || p.args.length != 6 || !(p.args[2] instanceof java.util.List<?>)) return;
+                            || !TransitionMagnificationCompat.isStart(p.args)) return;
                     try {
                         if (NativeFreeformReturn.change(p.getResult()) != null) {
                             Object nativeTask = null;
@@ -449,16 +554,18 @@ final class HostEntryZoom {
             });
             XposedBridge.hookAllMethods(transition, "buildFinishTransaction", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam p) {
-                    if (p.hasThrowable() || p.args == null || p.args.length != 3
-                            || !(p.args[2] instanceof Object[])) return;
+                    if (p.hasThrowable()) return;
                     HostEntry.ZoomTarget target = HostEntry.sZoomTarget;
                         if (target == null) return;
                     try {
+                        Object[] participantDisplays = TransitionMagnificationCompat.finishDisplays(
+                                p.thisObject, p.args);
+                        if (participantDisplays == null) return;
                         if (HomeTransitionMagnification.hasInfo(p.args[1]))
                             HostEntry.sHomeTransitionInfos.put(p.thisObject, p.args[1]);
                         boolean replayed = TransitionMagnificationReplay.reapplyIfActive(
                                 HostEntry.sZoomed, target.display, Thread.holdsLock(target.globalLock),
-                                (Object[]) p.args[2], p.args[0],
+                                participantDisplays, p.args[0],
                                 (display, transaction) -> reapplyFinalMagnification(
                                         display, transaction, p.args[1]));
                         if (replayed) {
@@ -498,7 +605,7 @@ final class HostEntryZoom {
                                     // A new session may have started since this finish was built.
                                     Object transaction = XposedHelpers.callMethod(display,
                                             "getPendingTransaction");
-                                    XposedHelpers.callMethod(display, "reapplyMagnificationSpec",
+                                    ShellCompat.call(display, "reapplyMagnificationSpec",
                                             transaction);
                                     HostEntry.placeHostBelowNativeFreeforms(display, transaction);
                                     XposedHelpers.callMethod(transaction, "apply");
@@ -613,15 +720,23 @@ final class HostEntryZoom {
 
     void applyDisplayZoomLocked(HostEntry.ZoomTarget target, float scale,
             float offsetY, float offsetX) throws Throwable {
-        applyDisplayZoomLocked(target, scale, offsetY, offsetX, null);
+        applyDisplayZoomLocked(target, scale, offsetY, offsetX, null, false);
     }
 
     void applyDisplayZoomLocked(HostEntry.ZoomTarget target, float scale,
             float offsetY, float offsetX, HostEntry.ZoomCommit commit) throws Throwable {
-        if (Looper.myLooper() != target.handler.getLooper() || !Thread.holdsLock(target.globalLock)) {
+        applyDisplayZoomLocked(target, scale, offsetY, offsetX, commit, false);
+    }
+
+    void applyDisplayZoomLocked(HostEntry.ZoomTarget target, float scale,
+            float offsetY, float offsetX, HostEntry.ZoomCommit commit, boolean nativeVisibility) throws Throwable {
+        if ((!nativeVisibility && Looper.myLooper() != target.handler.getLooper()) || !Thread.holdsLock(target.globalLock)) {
             throw new IllegalStateException("zoom requires the WMS handler and its global lock");
         }
         if (HostEntry.sZoomTarget != target || HostEntry.sDisplayContent != target.display) return;
+        // Delayed client writes and animation frames cannot resize native keyguard/AOD.
+        // Native clear or a separately authenticated, drawn Host handoff releases it.
+        if (HostEntry.sKeyguardZoom.blocked()) { scale = 1f; offsetY = 0f; offsetX = 0f; }
         Object dc = target.display;
         Class<?> specCls = XposedHelpers.findClass("android.view.MagnificationSpec",
                 dc.getClass().getClassLoader());
@@ -799,7 +914,12 @@ final class HostEntryZoom {
             }
         });
         HostEntry.sZoomAnimator = animator;
+        if (plan.startUptimeMs > 0L) animator.setStartDelay(Math.max(0L,
+                Math.min(1000L, plan.startUptimeMs - android.os.SystemClock.uptimeMillis())));
         animator.start();
+        if (plan.startUptimeMs > 0L && android.os.SystemClock.uptimeMillis() > plan.startUptimeMs)
+            animator.setCurrentPlayTime(Math.min(plan.durationMs,
+                    android.os.SystemClock.uptimeMillis() - plan.startUptimeMs));
         HostEntry.log("zoom animation started from scale=" + fromScale + " y=" + fromY + " x=" + fromX
                 + " -> " + plan.describe());
     }

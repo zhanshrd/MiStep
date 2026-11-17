@@ -136,7 +136,7 @@ final class HostLaunchController {
         final long sequence = ++h.desktopRegistrationSequence;
         final long epoch = h.sceneEpoch;
         final java.util.List<Slot> owners = new java.util.ArrayList<>();
-        for (Slot slot : h.slots) if (slot != null && slot.index > 0 && slot.index < MiStepHost.CELL_SLOT_COUNT) owners.add(slot);
+        for (Slot slot : h.slots) if (slot != null && slot.index > 0 && slot.index < h.CELL_SLOT_COUNT) owners.add(slot);
         final boolean active = h.scene == MiStepHost.ACTIVE && h.screenOn && !h.keyguardLocked && h.root != null;
         final boolean keepRecents = h.root != null && h.scene != MiStepHost.SUSPENDED;
         Runnable send = () -> {
@@ -189,6 +189,8 @@ final class HostLaunchController {
                 topInput.putInt("width", geometry.logicalWidth);
                 topInput.putInt("height", geometry.logicalHeight);
                 topInput.putFloat("scale", geometry.scale);
+                topInput.putFloat("left", geometry.left);
+                topInput.putFloat("top", geometry.top);
                 state.putBundle("topInput", topInput);
             }
             state.putLong("sequence", sequence);

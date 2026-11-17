@@ -135,19 +135,48 @@ final class HostGeometryController {
             Class<?> view = XposedHelpers.findClass("com.android.wm.shell.taskview.TaskView", cl);
             Class<?> trans = XposedHelpers.findClass("com.android.wm.shell.taskview.TaskViewTransitions", cl);
             Class<?> control = XposedHelpers.findClass("com.android.wm.shell.taskview.TaskViewTaskController", cl);
+            Class<?> listener = XposedHelpers.findClass("com.android.wm.shell.taskview.TaskView$Listener", cl);
+            installed.addAll(MiStepKeyguardTransition.install(trans, owner -> {
+                MiStepHost hb = MiStepHost.sInstance;
+                return hb != null && hb.transitions == owner && hb.retainedForLock && hb.keyguardLocked
+                        && (hb.scene == MiStepHost.ACTIVE || hb.scene == MiStepHost.RESUMING);
+            }));
+            final boolean bridgeTaskInfo = !ShellCompat.hasMethod(listener, "onTaskInfoChanged", 1);
+            if (bridgeTaskInfo) {
+                java.util.Set<XC_MethodHook.Unhook> callbacks = XposedBridge.hookAllMethods(control,
+                        "onTaskInfoChanged", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam p) {
+                        MiStepHost hb = MiStepHost.sInstance;
+                        if (p.hasThrowable() || p.args.length != 1 || hb == null) return;
+                        Slot slot = hb.slotForObject(p.thisObject);
+                        if (slot == null) return;
+                        final Object info = p.args[0];
+                        hb.postForSlot(slot, owner -> hb.onTaskInfo(owner.index, info));
+                    }
+                });
+                if (callbacks.isEmpty()) throw new IllegalStateException("no legacy task-info callback");
+                installed.addAll(callbacks);
+            }
             installed.addAll(XposedBridge.hookAllMethods(trans, "startAnimation", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
                     MiStepHost hb = MiStepHost.sInstance;
-                    if (p.args.length != 6 || hb == null || hb.transitions != p.thisObject) return;
+                    if ((p.args.length != 5 && p.args.length != 6) || hb == null || hb.transitions != p.thisObject) return;
+                    if (!ShellCompat.hasMethod(trans, "isValidTaskView", 2)
+                            && XposedHelpers.callMethod(p.thisObject, "findPending", p.args[0]) == null) {
+                        MiStepHost.externalChanges.set((java.util.List<?>) XposedHelpers.callMethod(p.args[1], "getChanges"));
+                        p.setObjectExtra("mistep.external", true);
+                    }
+                    int callbackIndex = p.args.length - 1;
                     java.util.List<MiStepSideClose> closes = hb.closingTasks(p.args[1]);
                     if (closes.isEmpty()) return;
                     p.setObjectExtra("mistep.closes", closes);
                     MiStepHost.nativeCloses.set(closes);
-                    MiStepHost.closeFinishTransaction.set(p.args[4]);
-                    Object original = p.args[5];
+                    MiStepHost.closeStartTransaction.set(p.args[callbackIndex - 2]);
+                    MiStepHost.closeFinishTransaction.set(p.args[callbackIndex - 1]);
+                    Object original = p.args[callbackIndex];
                     Class<?> callback = Class.forName("com.android.wm.shell.transition.Transitions$TransitionFinishCallback", false, cl);
                     java.util.concurrent.atomic.AtomicBoolean finished = new java.util.concurrent.atomic.AtomicBoolean();
-                    p.args[5] = java.lang.reflect.Proxy.newProxyInstance(cl, new Class<?>[]{callback}, (proxy, method, args) -> {
+                    p.args[callbackIndex] = java.lang.reflect.Proxy.newProxyInstance(cl, new Class<?>[]{callback}, (proxy, method, args) -> {
                         if (!"onTransitionFinished".equals(method.getName())) return method.invoke(original, args);
                         if (!finished.compareAndSet(false, true)) return null;
                         java.util.concurrent.atomic.AtomicInteger remaining = new java.util.concurrent.atomic.AtomicInteger(closes.size());
@@ -162,8 +191,10 @@ final class HostGeometryController {
                 @Override protected void afterHookedMethod(MethodHookParam p) {
                     @SuppressWarnings("unchecked") java.util.List<MiStepSideClose> closes =
                             (java.util.List<MiStepSideClose>) p.getObjectExtra("mistep.closes");
+                    if (p.getObjectExtra("mistep.external") != null) MiStepHost.externalChanges.remove();
                     if (closes == null) return;
                     MiStepHost.nativeCloses.remove();
+                    MiStepHost.closeStartTransaction.remove();
                     MiStepHost.closeFinishTransaction.remove();
                     if (p.hasThrowable() || !Boolean.TRUE.equals(p.getResult()))
                         for (MiStepSideClose close : closes) close.abandon();
@@ -180,6 +211,18 @@ final class HostGeometryController {
                         }
                 }
             }));
+            if (!ShellCompat.hasMethod(control, "prepareCloseAnimation", 2)) {
+                installed.addAll(XposedBridge.hookAllMethods(control, "resetTaskInfo", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam p) {
+                        java.util.List<MiStepSideClose> closes = MiStepHost.nativeCloses.get();
+                        if (closes == null || p.hasThrowable()) return;
+                        for (MiStepSideClose close : closes) if (close.controller == p.thisObject) {
+                            try { close.prepare(MiStepHost.closeStartTransaction.get(), MiStepHost.closeFinishTransaction.get()); }
+                            catch (Throwable error) { MiStepHost.log("side close OS3 prepare: " + error); }
+                        }
+                    }
+                }));
+            }
             installed.add(XposedHelpers.findAndHookMethod(view, "onComputeInternalInsets",
                     XposedHelpers.findClass("android.view.ViewTreeObserver$InternalInsetsInfo", cl),
                     new XC_MethodHook() {
@@ -204,8 +247,36 @@ final class HostGeometryController {
                         p.args[1] = hb.logicalBounds(hb.slotForObject(p.args[0]));
                 }
             };
-            installed.add(XposedHelpers.findAndHookMethod(trans, "setTaskBounds", control, Rect.class, rectGuard));
-            installed.add(XposedHelpers.findAndHookMethod(trans, "lambda$setTaskBounds$6", control, Rect.class, rectGuard));
+            boolean directBounds = ShellCompat.hasMethod(trans, "setTaskBounds", control, Rect.class);
+            if (directBounds) {
+                installed.add(XposedHelpers.findAndHookMethod(trans, "setTaskBounds", control, Rect.class, rectGuard));
+            } else if (ShellCompat.hasMethod(control, "setWindowBounds", Rect.class)) {
+                // AOSP14/OS2 routes TaskView bounds through the controller itself.
+                installed.add(XposedHelpers.findAndHookMethod(control, "setWindowBounds", Rect.class,
+                        new XC_MethodHook() {
+                            @Override protected void beforeHookedMethod(MethodHookParam p) {
+                                MiStepHost hb = MiStepHost.sInstance;
+                                if (hb != null && p.args.length == 1 && p.args[0] instanceof Rect
+                                        && hb.ownsViewOrController(p.thisObject))
+                                    p.args[0] = hb.logicalBounds(hb.slotForObject(p.thisObject));
+                            }
+                        }));
+            } else throw new IllegalStateException("no native TaskView bounds owner");
+            if (directBounds && ShellCompat.hasMethod(trans, "lambda$setTaskBounds$6", 2)) {
+                installed.add(XposedHelpers.findAndHookMethod(trans, "lambda$setTaskBounds$6", control, Rect.class, rectGuard));
+            } else if (directBounds) {
+                Class<?> consumer = XposedHelpers.findClass("com.android.wm.shell.taskview.TaskViewTransitions$$ExternalSyntheticLambda0", cl);
+                installed.add(XposedHelpers.findAndHookMethod(consumer, "run", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        MiStepHost hb = MiStepHost.sInstance;
+                        if (hb == null || XposedHelpers.getIntField(p.thisObject, "$r8$classId") != 0
+                                || XposedHelpers.getObjectField(p.thisObject, "f$0") != hb.transitions) return;
+                        Object controller = XposedHelpers.getObjectField(p.thisObject, "f$1");
+                        if (hb.ownsViewOrController(controller))
+                            XposedHelpers.setObjectField(p.thisObject, "f$2", hb.logicalBounds(hb.slotForObject(controller)));
+                    }
+                }));
+            }
             java.util.Set<XC_MethodHook.Unhook> external = XposedBridge.hookAllMethods(trans,
                     "isValidTaskView", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
@@ -215,7 +286,20 @@ final class HostGeometryController {
                         p.setResult(false);
                 }
             });
-            if (external.isEmpty()) throw new IllegalStateException("no external task change guard");
+            if (external.isEmpty()) {
+                external = XposedBridge.hookAllMethods(trans, "findTaskView", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam p) {
+                        MiStepHost hb = MiStepHost.sInstance;
+                        java.util.List<?> changes = MiStepHost.externalChanges.get();
+                        if (changes == null || hb == null || hb.transitions != p.thisObject
+                                || p.args.length != 1 || !hb.ownsViewOrController(p.getResult())) return;
+                        for (Object change : changes)
+                            if (XposedHelpers.callMethod(change, "getTaskInfo") == p.args[0]
+                                    && hb.leaveExternalChangeToNative(change)) { p.setResult(null); return; }
+                    }
+                });
+                if (external.isEmpty()) throw new IllegalStateException("no native task lookup guard");
+            }
             installed.addAll(external);
             java.util.Set<XC_MethodHook.Unhook> unfold = XposedBridge.hookAllMethods(trans, "updateBoundsForUnfold", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
@@ -235,7 +319,6 @@ final class HostGeometryController {
                     }
                 }
             });
-            if (unfold.isEmpty()) throw new IllegalStateException("no unfold bounds guard");
             installed.addAll(unfold);
             java.util.Set<XC_MethodHook.Unhook> opening = XposedBridge.hookAllMethods(trans, "prepareOpenAnimation", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
@@ -254,8 +337,8 @@ final class HostGeometryController {
                     }
                 }
             });
-            if (opening.isEmpty()) throw new IllegalStateException("no native opening guard");
             installed.addAll(opening);
+            MiStepHost.legacyTaskInfoCallbacks = bridgeTaskInfo;
             MiStepHost.boundsHooksReady = true;
             MiStepHost.log("logical bounds guards installed: getter/queue/consumer/unfold");
         } catch (Throwable error) {
@@ -300,10 +383,9 @@ final class HostGeometryController {
             MiStepHost.log("display geometry read fell back to resources: " + error);
         }
         if (width > 0 && height > 0) {
-            // Mi Step always has one portrait workspace. A task's fixed rotation or
-            // a pending display transition must not rebuild it as a landscape scene.
-            h.screenW = FullscreenRotationPolicy.workspaceWidth(width, height);
-            h.screenH = FullscreenRotationPolicy.workspaceHeight(width, height);
+            boolean tablet = DeviceProfile.isTablet(h.ctx);
+            h.screenW = WorkspaceDisplayPolicy.width(tablet, width, height);
+            h.screenH = WorkspaceDisplayPolicy.height(tablet, width, height);
         }
     }
 
@@ -357,13 +439,20 @@ final class HostGeometryController {
         int oldHeight = h.screenH;
         int oldRotation = h.displayRotation;
         readDisplayGeometry();
+        if(h.layout!=null && h.scene==MiStepHost.ACTIVE && (oldWidth!=h.screenW || oldHeight!=h.screenH)) {
+            h.screenW=oldWidth;h.screenH=oldHeight;h.displayRotation=oldRotation;
+            MiStepHost.log("display capacity change: return all real tasks before changing layout");
+            h.suspendSession("display-layout-change");
+            return;
+        }
         if (NativeLandscapePolicy.shouldRestoreFromDisplay(
                 h.landscapeSuspended, h.scene == MiStepHost.SUSPENDED, h.displayRotation)) {
             MiStepHost.log("restore workspace after native landscape rotation=" + h.displayRotation);
             h.resumeSession();
             return;
         }
-        if (h.displayRotation != FullscreenRotationPolicy.portraitDisplayRotation()) {
+        if (!DeviceProfile.isTablet(h.ctx)
+                && h.displayRotation != FullscreenRotationPolicy.portraitDisplayRotation()) {
             if (oldRotation != h.displayRotation) {
                 MiStepHost.log("workspace retains portrait geometry during display rotation "
                         + h.displayRotation + "; waiting for WM portrait configuration");
@@ -374,8 +463,19 @@ final class HostGeometryController {
                 || h.screenW <= 0 || h.screenH <= 0) return;
 
         h.layout = h.makeAdaptiveLayout(h.mainOnRight);
+        h.CELL_SLOT_COUNT=1+h.layout.cellCount;
+        h.mainOnRight=h.layout.mainOnRight;
+        for(Slot saved:h.slots) if(saved.index>=h.CELL_SLOT_COUNT && saved.index!=MiStepHost.SLOT_TOP
+                && saved.parked) {
+            MiStepHost.log("layout capacity released system task="+saved.taskId);
+            h.clearSlot(saved);
+        }
         FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(-1, h.layout.topStrip);
         if (h.topStripBacking != null) h.topStripBacking.setLayoutParams(topParams);
+        if (h.topLiveClip != null) {
+            h.topLiveClip.setLayoutParams(new FrameLayout.LayoutParams(-1,h.layout.tabletLandscape?-1:h.layout.topStrip));
+            h.topLiveClip.setClipBounds(new Rect(0,0,h.screenW,h.layout.tabletLandscape?h.screenH:h.layout.topStrip));
+        }
         if (h.topBar != null) {
             h.topBar.setLayoutParams(new FrameLayout.LayoutParams(-1, h.layout.topStrip));
             h.topBar.setStatusBarInset(DeviceProfile.statusBarHeightPx(h.ctx));
@@ -387,12 +487,16 @@ final class HostGeometryController {
             h.updateTouchRegion(slot);
             h.updateHint(slot);
             View backing = h.sideBackingViews[i];
-            if (backing != null) {
+            if (backing != null && i<h.CELL_SLOT_COUNT) {
+                int[] cell=h.layout.cellBounds(i-1);
                 FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                        h.layout.sideWidth, h.sideSegmentHeight(i));
-                params.leftMargin = h.layout.mainOnRight ? 0 : h.layout.mainWidth;
+                        h.layout.tabletLandscape?cell[2]-cell[0]:h.layout.sideWidth, h.sideSegmentHeight(i));
+                params.leftMargin = h.layout.tabletLandscape?cell[0]:h.layout.mainOnRight ? 0 : h.layout.mainWidth;
                 params.topMargin = h.sideSegmentTop(i);
                 backing.setLayoutParams(params);
+                backing.setVisibility(View.VISIBLE);
+            } else if(backing!=null) {
+                backing.setVisibility(View.GONE);
             }
             if (slot.carrierTapView != null) {
                 FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
@@ -409,6 +513,8 @@ final class HostGeometryController {
             params.topMargin = h.layout.mainOffsetY;
             h.carrierBackdrop.setLayoutParams(params);
         }
+        h.topCtrl.configureTabletTools();
+        h.topCtrl.updateTopTaskGeometry();
         h.applyWallpaperBackdrops();
         if (h.carrierSlotIndex >= 0) h.reassertCarrier();
         if (h.wm != null && h.lp != null) {
@@ -418,7 +524,7 @@ final class HostGeometryController {
         h.root.requestLayout();
         h.root.invalidate();
         boolean activeRoot = ZoomLifecyclePolicy.shouldReassertGeometry(
-                h.scene == MiStepHost.ACTIVE, h.root.getVisibility() == View.VISIBLE, h.screenOn);
+                h.scene == MiStepHost.ACTIVE && !h.keyguardLocked, h.root.getVisibility() == View.VISIBLE, h.screenOn);
         if (activeRoot) h.writeZoom(true);
         else MiStepHost.log("display geometry changed while host inactive; skip zoom/task reassert");
         boolean queued = activeRoot && h.executeOnShell(() -> {
@@ -429,7 +535,7 @@ final class HostGeometryController {
             }
         });
         h.main.postDelayed(() -> {
-            if (!ZoomLifecyclePolicy.shouldReassertGeometry(h.scene == MiStepHost.ACTIVE,
+            if (!ZoomLifecyclePolicy.shouldReassertGeometry(h.scene == MiStepHost.ACTIVE && !h.keyguardLocked,
                     h.root != null && h.root.getVisibility() == View.VISIBLE, h.screenOn)) return;
             for (Slot slot : h.slots) {
                 if (slot.index > MiStepHost.SLOT_MAIN && slot.occupied && !slot.carrier) h.reapplyScale(slot);

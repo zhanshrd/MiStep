@@ -123,11 +123,17 @@ final class HostPromotionController {
         Object token = ticket.token;
         // 显式 FULLSCREEN：UNDEFINED(0) 会从父容器继承——而父容器正是 always-on-top
         // 多窗口 RootTask，等于把任务留在原地（真机 BUG-1：QQ 被钉死在置顶栈）。
+        // （上游 1.0.3 传 0；fork 保留 BUG-1 修复的显式 1。）
         XposedHelpers.callMethod(wct, "setWindowingMode", token, 1);
-        XposedHelpers.callMethod(wct, "setInterceptBackPressedOnTaskRoot", token, false);
-        XposedHelpers.callMethod(wct, "setTaskForceExcludedFromRecents", token, false);
-        XposedHelpers.callMethod(wct, "setDisablePip", token, false);
-        XposedHelpers.callMethod(wct, "setDisableLaunchAdjacent", token, false);
+        Object organizer = XposedHelpers.getObjectField(ticket.slot.controller, "mTaskOrganizer");
+        ShellCompat.transaction(organizer,
+                wct, "setInterceptBackPressedOnTaskRoot", token, false);
+        ShellCompat.transaction(organizer,
+                wct, "setTaskForceExcludedFromRecents", token, false);
+        ShellCompat.transaction(organizer,
+                wct, "setDisablePip", token, false);
+        ShellCompat.transaction(organizer,
+                wct, "setDisableLaunchAdjacent", token, false);
         XposedHelpers.callMethod(wct, "setAlwaysOnTop", token, false);
         XposedHelpers.callMethod(wct, "setFocusable", token, true);
         XposedHelpers.callMethod(wct, "setBounds", token, new Rect());
@@ -141,7 +147,8 @@ final class HostPromotionController {
         // Surface scaling alone does not prevent WM from occluding that underlying task.
         XposedHelpers.callMethod(wct, "setForceTranslucent", token, ticket.liveMainReveal);
         XposedHelpers.callMethod(wct, "setHidden", token, false);
-        XposedHelpers.callMethod(wct, "setTaskTrimmableFromRecents", token, true);
+        ShellCompat.transaction(organizer,
+                wct, "setTaskTrimmableFromRecents", token, true);
         XposedHelpers.callMethod(wct, "reorder", token, !ticket.background);
         // Side roots must remain above the opaque h.main task in WM's visibility traversal.
         // Their surfaces stay inside their own TaskViews and do not cover the h.main area.
@@ -205,9 +212,9 @@ final class HostPromotionController {
             if (owner == TaskHandoffPolicy.Owner.UNAVAILABLE) {
                 throw new IllegalStateException("native fullscreen route is unavailable");
             }
-            Object area = XposedHelpers.getObjectField(organizer, "mRootTaskDisplayAreaOrganizer");
-            Object areaInfo = XposedHelpers.callMethod(area, "getDisplayAreaInfo", 0);
-            Object parent = XposedHelpers.callMethod(area, "getDisplayAreaLeash", 0);
+            Object area = ShellCompat.rootArea(organizer);
+            Object areaInfo = ShellCompat.call(area, "getDisplayAreaInfo", 0);
+            Object parent = ShellCompat.call(area, "getDisplayAreaLeash", 0);
             Object canonical = XposedHelpers.callMethod(appeared, "getLeash");
             Object copy = h.getSurfaceField(controller, "mTaskLeash");
             if (areaInfo == null || XposedHelpers.getIntField(areaInfo, "featureId") != 1
@@ -242,23 +249,24 @@ final class HostPromotionController {
                 XposedHelpers.callMethod(tx, ticket.background ? "hide" : "show", canonical);
                 ticket.handoffAttempted = true;
                 if (owner == TaskHandoffPolicy.Owner.OUR_CONTROLLER) {
-                    XposedHelpers.callMethod(h.transitions, "unregisterTaskView", controller);
+                    ShellCompat.call(h.transitions, "unregisterTaskView", controller);
                     unregistered = true;
-                    XposedHelpers.callMethod(organizer, "removeListener", controller);
+                    ShellCompat.call(organizer, "removeListener", controller);
                     if (XposedHelpers.callMethod(organizer, "getTaskListener", info, false) != fallback) {
                         throw new IllegalStateException("native fullscreen listener did not take ownership");
                     }
+                }
+                // Copied handles still name the same native layer. OS2's vanished
+                // callback detaches it, so finish old-owner cleanup before the
+                // final canonical reparent transaction can become visible.
+                if (owner == TaskHandoffPolicy.Owner.OUR_CONTROLLER) {
+                    XposedHelpers.callMethod(controller, "onTaskVanished", info);
+                    ShellCompat.call(h.transitions, "registerTaskView", controller);
                 }
                 XposedHelpers.callMethod(tx, "apply");
                 if(liveCenterReveal) {
                     ticket.liveRevealSurface=canonical;
                     h.topCtrl.topTransition.setLiveSurface(canonical);
-                }
-                // Native removeListener hands off to fallback but does not notify the old owner.
-                // This native callback retires/release its own copied handle, never canonical.
-                if (owner == TaskHandoffPolicy.Owner.OUR_CONTROLLER) {
-                    XposedHelpers.callMethod(controller, "onTaskVanished", info);
-                    XposedHelpers.callMethod(h.transitions, "registerTaskView", controller);
                 }
                 unregistered = false;
                 ticket.handoffComplete = true;

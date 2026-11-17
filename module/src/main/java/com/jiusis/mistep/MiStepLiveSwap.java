@@ -26,13 +26,17 @@ final class MiStepLiveSwap {
     static boolean startFlip(ClassLoader loader, Object taskViews, Object controller, LiveTaskSwapDriver.Flip request,
             BooleanSupplier current, Consumer<LiveSwapGeometry.Frame[]> input,
             Consumer<Result> done, Consumer<String> log) {
-        synchronized (ACTIVE) { if (ACTIVE.containsKey(controller)) return false; }
+        synchronized (ACTIVE) {
+            if (ACTIVE.containsKey(controller)) { log.accept("live flip preflight refused: legacy controller active"); return false; }
+        }
         return MiStepLiveSwap64.start(loader, taskViews, controller, request, null, current, input, done, log);
     }
     static boolean startHome(ClassLoader loader, Object taskViews, Object controller, LiveTaskSwapDriver.Home request,
             BooleanSupplier current, Consumer<LiveSwapGeometry.Frame[]> input,
             Consumer<Result> done, Consumer<String> log) {
-        synchronized (ACTIVE) { if (ACTIVE.containsKey(controller)) return false; }
+        synchronized (ACTIVE) {
+            if (ACTIVE.containsKey(controller)) { log.accept("live Home preflight refused: legacy controller active"); return false; }
+        }
         return MiStepLiveSwap64.start(loader, taskViews, controller, null, request, current, input, done, log);
     }
     static final class Result {
@@ -60,7 +64,8 @@ final class MiStepLiveSwap {
             Consumer<Result> completed, Consumer<String> log) {
         Object shell = XposedHelpers.getObjectField(taskViews, "mTransitions");
         Object executor = XposedHelpers.getObjectField(shell, "mMainExecutor");
-        XposedHelpers.callMethod(executor, "assertCurrentThread");
+        if (ShellCompat.hasMethod(executor.getClass(), "assertCurrentThread", 0))
+            XposedHelpers.callMethod(executor, "assertCurrentThread");
         synchronized (ACTIVE) { if (ACTIVE.containsKey(controller)) return false; }
         if (mainScale <= 0 || mainScale >= 1 || sideScale <= 0 || sideScale >= mainScale
                 || !Float.isFinite(mainScale) || !Float.isFinite(mainX) || !Float.isFinite(mainY)
@@ -69,9 +74,9 @@ final class MiStepLiveSwap {
         Object cleanup = null;
         try {
             Object organizer = XposedHelpers.getObjectField(controller, "mTaskOrganizer");
-            Object area = XposedHelpers.getObjectField(organizer, "mRootTaskDisplayAreaOrganizer");
-            Object areaInfo = XposedHelpers.callMethod(area, "getDisplayAreaInfo", 0);
-            Object parent = XposedHelpers.callMethod(area, "getDisplayAreaLeash", 0);
+            Object area = ShellCompat.rootArea(organizer);
+            Object areaInfo = ShellCompat.call(area, "getDisplayAreaInfo", 0);
+            Object parent = ShellCompat.call(area, "getDisplayAreaLeash", 0);
             Object side = XposedHelpers.getObjectField(controller, "mSurfaceControl");
             if (areaInfo == null || XposedHelpers.getIntField(areaInfo, "featureId") != 1
                     || XposedHelpers.getIntField(areaInfo, "displayId") != 0) return false;

@@ -55,8 +55,11 @@ final class HostEntryRotation {
             if (app != null && !HostEntry.sTaskRotations.containsKey(app)) app = null;
             publishMainUiConfiguration(app);
             HostEntry.sMainSystemUiRotation.update(window, HostEntry.sDisplayContent, app, HostEntry::log);
+            Object imeApp = HostEntry.sInteractiveImeViewport.update(window, HostEntry.sDisplayContent,
+                    MiStepDesktopLaunchBridge::ownsTopTask, HostEntry::log);
             HostEntry.sMainStatusBarClip.update(window, HostEntry.sDisplayContent, HostEntry::log);
-            HostEntry.sMainImeProcessConfiguration.update(window, HostEntry.sDisplayContent, app, HostEntry::log);
+            HostEntry.sMainImeProcessConfiguration.update(window, HostEntry.sDisplayContent,
+                    imeApp == null ? app : imeApp, HostEntry::log);
         } catch (Throwable error) {
             if (!HostEntry.systemUiRotationFailureLogged) {
                 HostEntry.systemUiRotationFailureLogged = true;
@@ -84,8 +87,30 @@ final class HostEntryRotation {
     }
 
     void installMainSystemUiRotation(ClassLoader cl) {
+        installTopSystemBarReturn(cl);
         try {
             HostEntry.sMainImeProcessConfiguration.install(cl);
+            Class<?> display = XposedHelpers.findClass("com.android.server.wm.DisplayContent", cl);
+            XposedHelpers.findAndHookMethod(display, "shouldImeAttachedToApp", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (!HostEntry.sZoomed || p.thisObject != HostEntry.sDisplayContent || p.hasThrowable()) return;
+                    try {
+                        if (MiStepImeViewport.target(p.thisObject,
+                                MiStepDesktopLaunchBridge::ownsTopTask) != null
+                                && Boolean.TRUE.equals(XposedHelpers.callMethod(
+                                        p.thisObject, "isImeControlledByApp"))) p.setResult(Boolean.TRUE);
+                    } catch (Throwable error) { HostEntry.log("interactive native IME parent unavailable: " + error); }
+                }
+            });
+            XposedBridge.hookAllMethods(display, "updateImeInputAndControlTarget", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (!HostEntry.sZoomed || p.thisObject != HostEntry.sDisplayContent || p.hasThrowable()) return;
+                    try {
+                        HostEntry.imeTargetRefresh.update(p.thisObject,
+                                MiStepDesktopLaunchBridge::ownsTopTask, INSTANCE::updateMainSystemUiRotation);
+                    } catch (Throwable error) { HostEntry.log("interactive IME layering refresh unavailable: " + error); }
+                }
+            });
             Class<?> organizer = XposedHelpers.findClass("com.android.server.wm.WindowOrganizerController", cl);
             XposedBridge.hookAllMethods(organizer, "applyTaskChanges", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
@@ -146,7 +171,87 @@ final class HostEntryRotation {
         } catch (Throwable error) { HostEntry.log("main system UI rotation hooks unavailable: " + error); }
     }
 
+    private void installTopSystemBarReturn(ClassLoader cl) {
+        try {
+            Class<?> controller = XposedHelpers.findClass("com.android.server.wm.MiuiStatusBarController", cl);
+            if (!MiStepTopSystemBars.supported(controller)) {
+                HostEntry.log("upper native system bar return uses ROM transition lifecycle; no task-owner replay API");
+                return;
+            }
+            Class<?> follow = XposedHelpers.findClass("com.android.server.wm.BarFollowAnimationImpl", cl);
+            XposedBridge.hookAllMethods(follow, "onTaskInfoChanedForCaptionBar", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (p.hasThrowable() || p.args.length != 1) return;
+                    topSystemBarsChanged(XposedHelpers.getObjectField(p.thisObject, "mStatusBarController"), p.args[0]);
+                }
+            });
+            XposedBridge.hookAllMethods(controller, "resetStatusBarState", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (!p.hasThrowable()) topSystemBarsChanged(p.thisObject,
+                            XposedHelpers.getObjectField(p.thisObject, "mCurrentTopTask"));
+                }
+            });
+            Class<?> display = XposedHelpers.findClass("com.android.server.wm.DisplayContent", cl);
+            XposedBridge.hookAllMethods(display, "updateFocusedWindowLocked", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    HostEntry.ZoomTarget target = HostEntry.sZoomTarget;
+                    if (p.hasThrowable() || target == null || p.thisObject != target.display
+                            || !HostEntry.sZoomed || !HostEntry.sFullscreenRotationActive) return;
+                    synchronized (target.globalLock) {
+                        HostEntry.sTopSystemBars.focused(target.display, target.globalLock,
+                                () -> HostEntry.sZoomed && HostEntry.sFullscreenRotationActive && HostEntry.sZoomTarget == target,
+                                HostEntry::log);
+                    }
+                }
+            });
+            HostEntry.log("upper native system bar return follows task/focus/transition lifecycle");
+        } catch (Throwable unavailable) { HostEntry.log("upper native system bar return hooks unavailable: " + unavailable); }
+    }
+
+    private static void topSystemBarsChanged(Object controller, Object task) {
+        HostEntry.ZoomTarget target = HostEntry.sZoomTarget;
+        if (target == null || !HostEntry.sZoomed || !HostEntry.sFullscreenRotationActive) return;
+        synchronized (target.globalLock) {
+            if (HostEntry.sZoomTarget != target) return;
+            HostEntry.sTopSystemBars.changed(controller, task, target.display, target.globalLock,
+                    () -> HostEntry.sZoomed && HostEntry.sFullscreenRotationActive && HostEntry.sZoomTarget == target,
+                    HostEntry::log);
+        }
+    }
+
     void installFixedMainRotationHooks(ClassLoader cl) {
+        try {
+            Class<?> policy = XposedHelpers.findClass("com.android.server.wm.InsetsPolicy", cl);
+            XposedBridge.hookAllMethods(policy, "adjustInsetsForWindow", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (p.hasThrowable() || p.args.length != 3 || !HostEntry.sZoomed
+                            || !HostEntry.sFullscreenRotationActive || HostEntry.sDisplayContent == null) return;
+                    try {
+                        Object original = p.getResult();
+                        Object adjusted = MiStepTopInsets.adjust(p.args[0], HostEntry.sDisplayContent,
+                                original, MiStepDesktopLaunchBridge::ownsTopViewport);
+                        if (adjusted != original) HostEntry.sTopSystemBars.remember(p.args[0], HostEntry.sDisplayContent);
+                        p.setResult(adjusted);
+                    }
+                    catch (Throwable unavailable) { HostEntry.log("upper insets viewport unavailable: " + unavailable); }
+                }
+            });
+            XposedBridge.hookAllMethods(policy, "getInsetsForWindowMetrics", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if(p.hasThrowable() || p.args.length!=2 || !HostEntry.sZoomed || !HostEntry.sFullscreenRotationActive
+                            || HostEntry.sDisplayContent==null || p.args[0]==null)return;
+                    try {
+                        Object adjusted=MiStepTopInsets.adjust(p.args[0],HostEntry.sDisplayContent,p.args[1],
+                                MiStepDesktopLaunchBridge::ownsTopViewport);
+                        if(adjusted!=p.args[1]) {
+                            HostEntry.sTopSystemBars.remember(p.args[0],HostEntry.sDisplayContent);
+                            XposedHelpers.callMethod(p.args[1],"set",adjusted,true);
+                        }
+                    } catch(Throwable unavailable) {HostEntry.log("upper metrics insets unavailable: "+unavailable);}
+                }
+            });
+            HostEntry.log("upper leased viewport insets installed; native IME retained");
+        } catch (Throwable unavailable) { HostEntry.log("upper viewport insets hook unavailable: " + unavailable); }
         try {
             Class<?> activityRecord = XposedHelpers.findClass(
                     "com.android.server.wm.ActivityRecord", cl);
@@ -440,7 +545,8 @@ final class HostEntryRotation {
             int overrideOrientation = resolution.overrideOrientation;
             int resolvedRotation = resolution.resolvedRotation;
             int rotation = resolution.taskRotation;
-            if (resolution.lands() && NativeLandscapePolicy.shouldUseNativeFullscreen(
+            if (resolution.lands() && (HostEntry.sHeldDisplayRotation & 1) == 0
+                    && NativeLandscapePolicy.shouldUseNativeFullscreen(
                     HostEntry.sZoomed, sideTask, home)) {
                 recordTaskWindowState(activity, overrideOrientation, resolvedRotation,
                         rotation, 1, source + " native-fullscreen");
@@ -518,7 +624,7 @@ final class HostEntryRotation {
         }
         int rotation = FullscreenRotationPolicy.taskRotation(
                 overrideOrientation, resolvedRotation, rotationLocked,
-                windowingMode, rememberedRotation);
+                windowingMode, rememberedRotation, HostEntry.sHeldDisplayRotation);
         return new HostEntry.RotationResolution(
                 overrideOrientation, resolvedRotation, rotation, rotationLocked);
     }
@@ -633,12 +739,14 @@ final class HostEntryRotation {
         if(!HostEntry.sZoomed) {HostEntry.topTaskSignals.clear();return;}
         if(task==null || (mode!=1 && !isUpperLandscapeTask(task)))return;
         try {
-            Object info=XposedHelpers.callMethod(task,"getTaskInfo");
-            int user=XposedHelpers.getIntField(info,"userId");
-            Object token=XposedHelpers.getObjectField(info,"token");
+            // TaskInfo uses a shared TaskInfoHelper; never nest its aggregation in orientation hooks.
+            int user=XposedHelpers.getIntField(task,Boolean.TRUE.equals(
+                    XposedHelpers.callMethod(task,"isLeafTask"))?"mUserId":"mCurrentUser");
+            Object token=XposedHelpers.callMethod(
+                    XposedHelpers.getObjectField(task,"mRemoteToken"),"toWindowContainerToken");
             boolean landscape=FullscreenRotationPolicy.requestsLandscape(request)
                     || FullscreenRotationPolicy.usesSensorOrUserRotation(request) && (rotation==1 || rotation==3);
-            boolean focused=XposedHelpers.getBooleanField(info,"isFocused");
+            boolean focused=Boolean.TRUE.equals(XposedHelpers.callMethod(task,"isFocused"));
             String signature=HostEntry.topWorkspaceGeneration+":"+user+":"+mode+":"+landscape+":"+focused;
             if(signature.equals(HostEntry.topTaskSignals.get(task)))return;
             HostEntry.topTaskSignals.put(task,signature);
@@ -658,8 +766,7 @@ final class HostEntryRotation {
     static boolean isUpperLandscapeTask(Object task) {
         try {
             if(!MiStepSideRoleChange.isSide(task))return false;
-            android.graphics.Rect bounds=(android.graphics.Rect)XposedHelpers.callMethod(task,"getBounds");
-            return bounds!=null && bounds.width()>bounds.height();
+            return MiStepDesktopLaunchBridge.ownsTopViewport(task);
         } catch(Throwable unavailable) {return false;}
     }
 
@@ -761,15 +868,17 @@ final class HostEntryRotation {
         captureTaskWindowState(display, XposedHelpers.callMethod(display, "topRunningActivity"),
                 "before-workspace-portrait");
         releaseAllTaskRotationsLocked("new Mi Step session");
-        HostEntry.sHeldDisplayRotation = FullscreenRotationPolicy.portraitDisplayRotation();
+        HostEntry.sHeldDisplayRotation = workspaceDisplayRotation(display);
         HostEntry.sFullscreenRotationActive = true;
-        HostEntry.log("fixed rotation active; Mi Step display held at portrait rotation "
+        HostEntry.log("fixed rotation active; Mi Step display held at workspace rotation "
                 + HostEntry.sHeldDisplayRotation);
         recomputeDisplayOrientationLocked(display, "enter Mi Step");
     }
 
     static void endFixedMainRotationLocked(Object display) {
+        HostEntry.sTopSystemBars.clear();
         HostEntry.sMainImeProcessConfiguration.clear(HostEntry::log);
+        HostEntry.sInteractiveImeViewport.clear(HostEntry::log);
         HostEntry.sMainSystemUiRotation.clear(HostEntry::log);
         publishMainUiConfiguration(null);
         if (!HostEntry.sFullscreenRotationActive) {
@@ -781,6 +890,22 @@ final class HostEntryRotation {
         HostEntry.sFullscreenRotationActive = false;
         HostEntry.sMainStatusBarClip.clear(HostEntry::log);
         recomputeDisplayOrientationLocked(display, "exit Mi Step");
+    }
+
+    private static int workspaceDisplayRotation(Object display) {
+        try {
+            Object info = XposedHelpers.callMethod(display, "getDisplayInfo");
+            boolean tablet = WorkspaceDisplayPolicy.isTablet(
+                    XposedHelpers.getIntField(info, "logicalWidth"),
+                    XposedHelpers.getIntField(info, "logicalHeight"),
+                    XposedHelpers.getIntField(info, "logicalDensityDpi"));
+            Object rotation = XposedHelpers.getObjectField(display, "mDisplayRotation");
+            return WorkspaceDisplayPolicy.rotation(tablet,
+                    (Integer) XposedHelpers.callMethod(rotation, "getRotation"));
+        } catch (Throwable unavailable) {
+            HostEntry.log("workspace display classification unavailable; use portrait: " + unavailable);
+            return FullscreenRotationPolicy.portraitDisplayRotation();
+        }
     }
 
     static void recomputeDisplayOrientationLocked(Object display, String reason) {

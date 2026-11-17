@@ -54,7 +54,7 @@ final class HostEntryNativeFreeform {
             try {
                 if (HostEntry.sZoomed) {
                     Object transaction = XposedHelpers.callMethod(target.display, "getPendingTransaction");
-                    XposedHelpers.callMethod(target.display, "reapplyMagnificationSpec", transaction);
+                    ShellCompat.call(target.display, "reapplyMagnificationSpec", transaction);
                     XposedHelpers.callMethod(transaction, "apply");
                 } else HostEntry.restoreExitedMagnificationLocked(target);
                 HostEntry.log("native freeform start committed; normal magnification writes resumed");
@@ -212,7 +212,7 @@ final class HostEntryNativeFreeform {
         if (HostEntry.sNativeFreeformLayerAnchor != lowestFreeform[0]) {
             // A newly excluded leaf does not undo a spec already on its shared ancestor.
             // Re-split that ancestor in this same WM transaction before showing freeform.
-            if (HostEntry.sZoomed) XposedHelpers.callMethod(display, "reapplyMagnificationSpec", transaction);
+            if (HostEntry.sZoomed) ShellCompat.call(display, "reapplyMagnificationSpec", transaction);
             HostEntry.sNativeFreeformLayerAnchor = lowestFreeform[0];
             HostEntry.log("native freeform anchor changed present=" + (lowestFreeform[0] != null)
                     + " hostWindows=" + hosts.size());

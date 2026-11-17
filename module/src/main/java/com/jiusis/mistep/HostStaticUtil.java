@@ -24,6 +24,7 @@ final class HostStaticUtil {
     }
 
     static void log(String msg) {
+        try { RuntimeDiagnosticEvents.fromHostLog(msg); } catch(Throwable ignored) {}
         android.util.Log.i(TAG, msg);
         try {
             XposedBridge.log(TAG + ": " + msg);

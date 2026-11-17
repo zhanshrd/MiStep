@@ -43,7 +43,8 @@ final class HostSwapController {
      *   空槽 → 不消费，交给宿主点击处理。
      */
     boolean onSlotTouch(int slotIndex, MotionEvent e) {
-        if (slotIndex <= MiStepHost.SLOT_MAIN || slotIndex >= MiStepHost.CELL_SLOT_COUNT) return false;
+        if (slotIndex <= MiStepHost.SLOT_MAIN || slotIndex >= h.CELL_SLOT_COUNT) return false;
+        if (h.taskCellsCovered) return true;
         Slot slot = h.slots[slotIndex];
         // Our MOVE session owns this pointer even while the task-transfer gate is held.
         if (h.sideDismiss != null && h.sideDismissSlot == slot) return followSideDismiss(slot, e);
@@ -613,6 +614,7 @@ final class HostSwapController {
     }
 
     static Rect liveSideStrip(MiStepLayout geometry) {
+        if(geometry.tabletLandscape)return new Rect(0,geometry.toolHeight,geometry.width,geometry.topStrip);
         return new Rect(geometry.mainOnRight ? 0 : geometry.mainWidth, geometry.topStrip,
                 geometry.mainOnRight ? geometry.sideWidth : geometry.width, geometry.height);
     }
@@ -635,7 +637,10 @@ final class HostSwapController {
             return;
         }
         final MiStepLayout geometry = h.layout;
-        final MiStepLayout target = h.makeAdaptiveLayout(!geometry.mainOnRight);
+        final WorkspaceOptions options = h.workspaceOptions;
+        final MiStepLayout target = h.makeAdaptiveLayout(geometry.tabletLandscape
+                ? geometry.mainOnRight : options.mainOnRightAfterSwap(geometry.mainOnRight));
+        MiStepHost.log("live swap mode=" + options.swapMode + " mainRight=" + geometry.mainOnRight + " -> " + target.mainOnRight);
         final int width = h.screenW, height = h.screenH;
         final LiveTask first = ticket.previousMain;
         LiveSwapGeometry.Task a = new LiveSwapGeometry.Task(first.id, first.token, width, height,
@@ -644,10 +649,10 @@ final class HostSwapController {
                 liveCellRect(geometry, ticket.slot.index), liveMainRect(target));
         final Object hostSurface;
         final java.util.List<LiveTaskSwapDriver.Peer> peers = new java.util.ArrayList<>();
-        final Object[] cellBackgrounds = new Object[MiStepHost.CELL_SLOT_COUNT - 1];
+        final Object[] cellBackgrounds = new Object[h.CELL_SLOT_COUNT - 1];
         try {
             hostSurface = liveHostRootSurface();
-            for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
+            for (int i = 1; i < h.CELL_SLOT_COUNT; i++) {
                 Slot peer = h.slots[i];
                 cellBackgrounds[i - 1] = peer.cellBackground;
                 if (peer == ticket.slot || !peer.occupied) continue;
@@ -664,10 +669,7 @@ final class HostSwapController {
             }
             ticket.liveBackdrop = MiStepLiveBackdrop.create(hostSurface, h.wallpaperBackdrop, width, height,
                     // Include the h.main/side gap while its normal Host backing is hidden.
-                    new Rect(geometry.mainOnRight ? 0 : geometry.mainWidth, geometry.topStrip,
-                            geometry.mainOnRight ? geometry.sideWidth : width, height),
-                    new Rect(target.mainOnRight ? 0 : target.mainWidth, target.topStrip,
-                            target.mainOnRight ? target.sideWidth : width, height),
+                    liveSideStrip(geometry), liveSideStrip(target),
                     canvas -> drawLiveEmptyHints(canvas, geometry, target, 0), MiStepHost::log);
         } catch (Throwable error) { h.failPromotion(ticket, "live flip Host preparation: " + error); return; }
         ticket.nativeSwap = true;
@@ -690,7 +692,7 @@ final class HostSwapController {
             oldSide.recoveryCandidate = true;
         }
         ticket.liveVisual = new LiveSwapVisualLease(h.sideBackingViews[ticket.slot.index], ticket.slot.hint);
-        for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) if (i != ticket.slot.index)
+        for (int i = 1; i < h.CELL_SLOT_COUNT; i++) if (i != ticket.slot.index)
             ticket.peerVisuals.add(new LiveSwapVisualLease(h.sideBackingViews[i], h.slots[i].hint));
         if (!setLiveSwapInputBlocked(true)) {
             h.failPromotion(ticket, "transition input window unavailable"); return;
@@ -702,13 +704,17 @@ final class HostSwapController {
                 h.failPromotion(ticket, "live swap input frame scene changed");
                 return;
             }
+            MiStepSwapOverlayBridge.acquire(h.ctx,h.main,oldZoom,targetZoom,overlays->{
+            if(!h.externalPromotionCurrent(ticket) || h.layout!=geometry) {
+                overlays.close();h.failPromotion(ticket,"live toolbox preparation scene changed");return;
+            }
             if (!h.executeOnShell(() -> {
                 boolean accepted = false;
                 try {
                     if (h.externalPromotionCurrent(ticket) && h.layout == geometry && livePeerBindingsCurrent(ticket)) {
                         Object shellTransitions = XposedHelpers.getObjectField(h.transitions, "mTransitions");
                         if (SystemClock.uptimeMillis() < h.zoomAnimUntil || !Boolean.TRUE.equals(
-                                XposedHelpers.callMethod(shellTransitions, "isIdle")))
+                                ShellCompat.call(shellTransitions, "isIdle")))
                             throw new IllegalStateException("workspace or native transition still animating");
                         Object info = h.rootInfo(first);
                         Object sideInfo = h.rootInfo(new LiveTask(ticket.slot));
@@ -725,6 +731,7 @@ final class HostSwapController {
                                 (zoom, done) -> applyLiveZoom(ticket, zoom, done),
                                 (zoom, restoring, done) -> applyLiveMainLayout(ticket, zoom, restoring, done),
                                 peers.toArray(new LiveTaskSwapDriver.Peer[0]), cellBackgrounds, ticket.liveBackdrop);
+                        request.overlays=overlays;
                         accepted = LiveTaskSwapDriver.startFlip(h.ctx.getClassLoader(), h.transitions,
                                 ticket.slot.controller, request,
                                 () -> h.externalPromotionCurrent(ticket) && livePeerBindingsCurrent(ticket)
@@ -734,10 +741,12 @@ final class HostSwapController {
                         ticket.nativeSubmitted = accepted;
                     }
                 } catch (Throwable error) { MiStepHost.log("native live swap rejected: " + error); }
+                if(!accepted)overlays.close();
                 if (!accepted) h.main.post(() -> finishLiveSwap(ticket,
                         new MiStepLiveSwap.Result(false, false,
                                 new IllegalStateException("native preflight refused; no fallback transition"))));
-            })) h.failPromotion(ticket, "live swap Shell queue unavailable");
+            })) {overlays.close();h.failPromotion(ticket, "live swap Shell queue unavailable");}
+            },error->h.failPromotion(ticket,error));
         }));
     }
 
@@ -750,7 +759,7 @@ final class HostSwapController {
         try {
             canvas.scale((float) h.wallpaperBackdrop.getWidth() / original.width,
                     (float) h.wallpaperBackdrop.getHeight() / original.height);
-            for (int i = 1; i < MiStepHost.CELL_SLOT_COUNT; i++) {
+            for (int i = 1; i < h.CELL_SLOT_COUNT; i++) {
                 Slot slot = h.slots[i];
                 boolean revealed = (revealEmptySlots & (1 << i)) != 0;
                 if (slot.hint == null || (!revealed
