@@ -100,7 +100,7 @@ final class HostLiveSwapFinishController {
             java.util.function.Consumer<LiveSwapZoom.Ack> completed) {
         sc.h.main.post(() -> {
             LiveZoomRequest request = new LiveZoomRequest(h, sc, ticket, target, completed);
-            if (!livePromotionBound(ticket) || !ticket.nativeFlip
+            if (h.keyguardLocked || !h.screenOn || !livePromotionBound(ticket) || !ticket.nativeFlip
                     || !registerLiveZoomReceiver()) {
                 request.failed("live zoom ticket/receiver unavailable");
                 return;

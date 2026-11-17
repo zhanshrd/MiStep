@@ -29,7 +29,7 @@ final class HostPromotionController {
                 // Keep the side matrix until the native mode change has settled. The actual
                 // parent/matrix handoff is one atomic surface transaction in checkPromotion.
                 observation = h.observeNativeCommit(ticket.token, () -> checkPromotion(ticket, 0));
-                XposedHelpers.callMethod(h.transitions, "lambda$moveTaskViewToFullscreen$5",
+                ShellCompat.call(h.transitions, "lambda$moveTaskViewToFullscreen$5",
                         wct, ticket.slot.controller);
             } catch (Throwable t) {
                 h.cancelNativeObservation(observation);
