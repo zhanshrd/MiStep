@@ -234,6 +234,19 @@ final class HostGeometryController {
                     if (hb != null && hb.ownsViewOrController(p.thisObject)) p.setResult(null);
                 }
             }));
+            // The new container must already clip a returning task when Shell receives it.
+            installed.addAll(XposedBridge.hookAllMethods(control, "surfaceCreated", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    MiStepHost hb = MiStepHost.sInstance;
+                    if (hb == null || p.args.length != 1) return;
+                    if (hb.sideScroll.sideViewport == null && (hb.scene != MiStepHost.RESUMING || !hb.retainedOnExit)) return;
+                    Slot slot = hb.slotForObject(p.thisObject);
+                    if (slot == null) return;
+                    if (hb.retainedResumeStaging() && slot.occupied)
+                        hb.hideReturningTaskSurface(p.args[0]);
+                    if (slot.sideRow >= 0) hb.attachSideViewport(slot, p.args[0]);
+                }
+            }));
             installed.add(XposedHelpers.findAndHookMethod(view, "getCurrentBoundsOnScreen", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
                     MiStepHost hb = MiStepHost.sInstance;
@@ -399,7 +412,9 @@ final class HostGeometryController {
     }
 
     void refreshDisplayGeometry() {
-        if (h.root == null || h.displayManager == null) return;
+        // The exit handback walks the physical slot array. Park it before remapping.
+        if (h.root == null || h.displayManager == null
+                || (h.scene == MiStepHost.SUSPENDING && DeviceProfile.isTablet(h.ctx))) return;
         if (h.cellMotion != null || h.promotion != null && h.promotion.nativeSwap) {
             int oldWidth = h.screenW;
             int oldHeight = h.screenH;
@@ -435,6 +450,7 @@ final class HostGeometryController {
             }
         }
         h.geometryRefreshDeferrals = 0;
+        boolean wasTabletLandscape = h.layout != null && h.layout.tabletLandscape;
         int oldWidth = h.screenW;
         int oldHeight = h.screenH;
         int oldRotation = h.displayRotation;
@@ -465,7 +481,8 @@ final class HostGeometryController {
         h.layout = h.makeAdaptiveLayout(h.mainOnRight);
         h.CELL_SLOT_COUNT=1+h.layout.cellCount;
         h.mainOnRight=h.layout.mainOnRight;
-        for(Slot saved:h.slots) if(saved.index>=h.CELL_SLOT_COUNT && saved.index!=MiStepHost.SLOT_TOP
+        h.updateSideInputViewportBounds();
+        for(Slot saved:h.slots) if(saved.sideRow < 0 && saved.index>=h.CELL_SLOT_COUNT && saved.index!=MiStepHost.SLOT_TOP
                 && saved.parked) {
             MiStepHost.log("layout capacity released system task="+saved.taskId);
             h.clearSlot(saved);
@@ -480,13 +497,21 @@ final class HostGeometryController {
             h.topBar.setLayoutParams(new FrameLayout.LayoutParams(-1, h.layout.topStrip));
             h.topBar.setStatusBarInset(DeviceProfile.statusBarHeightPx(h.ctx));
         }
-        for (int i = 1; i < MiStepHost.SLOT_COUNT; i++) {
+        if (!h.sideScroll.sideOrder.isEmpty()) {
+            if (h.layout.tabletLandscape && h.sideScroll.sideOrder.size() == h.slots.length - 3)
+                h.sideScroll.sideOrder.add(h.slots[MiStepLayout.MAX_CELL_COUNT]);
+            h.sideScroll.sideOffset = h.sideScroll.sideScrolling
+                    ? Math.min(h.sideScroll.maxSideOffset(), Math.round(h.sideScroll.sideOffset)) : 0f;
+            h.mapSideSlots((int) h.sideScroll.sideOffset);
+            h.ensureSideViewport();
+        }
+        for (int i = 1; i < h.slots.length; i++) {
             Slot slot = h.slots[i];
             slot.rect = h.slotBounds(slot);
             h.applyRect(slot);
             h.updateTouchRegion(slot);
             h.updateHint(slot);
-            View backing = h.sideBackingViews[i];
+            View backing = i < MiStepHost.SLOT_COUNT ? h.sideBackingViews[i] : null;
             if (backing != null && i<h.CELL_SLOT_COUNT) {
                 int[] cell=h.layout.cellBounds(i-1);
                 FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
@@ -512,6 +537,13 @@ final class HostGeometryController {
             params.leftMargin = h.layout.mainOffsetX;
             params.topMargin = h.layout.mainOffsetY;
             h.carrierBackdrop.setLayoutParams(params);
+        }
+        if (wasTabletLandscape && !h.layout.tabletLandscape) {
+            Slot upper = h.slots[MiStepHost.SLOT_TOP];
+            h.topCtrl.topFace = upper.occupied && !upper.parked;
+            if (h.topCtrl.topRoll != null) h.topCtrl.topRoll.reset(h.topCtrl.topFace);
+            if (h.topCtrl.topTaskPane != null) h.topCtrl.topTaskPane.setVisibility(h.topCtrl.topFace ? View.VISIBLE : View.INVISIBLE);
+            if (!h.topCtrl.topFace && h.topBar != null) h.topBar.bringToFront();
         }
         h.topCtrl.configureTabletTools();
         h.topCtrl.updateTopTaskGeometry();

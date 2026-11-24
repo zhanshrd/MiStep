@@ -2,6 +2,8 @@ package com.jiusis.mistep;
 
 import android.graphics.Rect;
 
+import java.util.concurrent.Executor;
+
 import de.robv.android.xposed.XposedHelpers;
 
 /**
@@ -125,6 +127,24 @@ final class HostPromotionController {
         // 多窗口 RootTask，等于把任务留在原地（真机 BUG-1：QQ 被钉死在置顶栈）。
         // （上游 1.0.3 传 0；fork 保留 BUG-1 修复的显式 1。）
         XposedHelpers.callMethod(wct, "setWindowingMode", token, 1);
+        XposedHelpers.callMethod(wct, "setBounds", token, new Rect());
+        XposedHelpers.callMethod(wct, "setHidden", token, false);
+        appendTaskViewExitOverrides(wct, ticket);
+        XposedHelpers.callMethod(wct, "reorder", token, !ticket.background);
+        // Side roots must remain above the opaque h.main task in WM's visibility traversal.
+        // Their surfaces stay inside their own TaskViews and do not cover the h.main area.
+        for (Object sideToken : ticket.otherSideTokens) {
+            XposedHelpers.callMethod(wct, "setForceTranslucent", sideToken, true);
+            XposedHelpers.callMethod(wct, "setAlwaysOnTop", sideToken, true);
+            XposedHelpers.callMethod(wct, "setFocusable", sideToken, true);
+            XposedHelpers.callMethod(wct, "reorder", sideToken, true);
+        }
+        return wct;
+    }
+
+    /** 只清 TaskView 留下的窗口覆盖项；「桌面已全屏打开该任务」的归还路径也要单独用它收尾。 */
+    void appendTaskViewExitOverrides(Object wct, Promotion ticket) throws Exception {
+        Object token = ticket.token;
         Object organizer = XposedHelpers.getObjectField(ticket.slot.controller, "mTaskOrganizer");
         ShellCompat.transaction(organizer,
                 wct, "setInterceptBackPressedOnTaskRoot", token, false);
@@ -136,7 +156,6 @@ final class HostPromotionController {
                 wct, "setDisableLaunchAdjacent", token, false);
         XposedHelpers.callMethod(wct, "setAlwaysOnTop", token, false);
         XposedHelpers.callMethod(wct, "setFocusable", token, true);
-        XposedHelpers.callMethod(wct, "setBounds", token, new Rect());
         if (ticket.slot.index == MiStepHost.SLOT_TOP) {
             XposedHelpers.callMethod(wct, "setAppBounds", token, (Object) null);
             XposedHelpers.callMethod(wct, "setScreenSizeDp", token, 0, 0);
@@ -145,25 +164,16 @@ final class HostPromotionController {
         }
         // Keep the actual desktop/app below visible while the returning live surface is small.
         // Surface scaling alone does not prevent WM from occluding that underlying task.
-        XposedHelpers.callMethod(wct, "setForceTranslucent", token, ticket.liveMainReveal);
-        XposedHelpers.callMethod(wct, "setHidden", token, false);
+        // 保留副窗被桌面点开时，交接完成前同样保持半透明，避免旧画面闪现。
+        XposedHelpers.callMethod(wct, "setForceTranslucent", token,
+                ticket.liveMainReveal || ticket.restoreMainOpacityAfterHandoff);
         ShellCompat.transaction(organizer,
                 wct, "setTaskTrimmableFromRecents", token, true);
-        XposedHelpers.callMethod(wct, "reorder", token, !ticket.background);
-        // Side roots must remain above the opaque h.main task in WM's visibility traversal.
-        // Their surfaces stay inside their own TaskViews and do not cover the h.main area.
-        for (Object sideToken : ticket.otherSideTokens) {
-            XposedHelpers.callMethod(wct, "setForceTranslucent", sideToken, true);
-            XposedHelpers.callMethod(wct, "setAlwaysOnTop", sideToken, true);
-            XposedHelpers.callMethod(wct, "setFocusable", sideToken, true);
-            XposedHelpers.callMethod(wct, "reorder", sideToken, true);
-        }
         Object owner = XposedHelpers.getObjectField(ticket.slot.controller, "mCaptionInsetsOwner");
         if (owner != null) {
             XposedHelpers.callMethod(wct, "removeInsetsSource", token, owner, 0,
                     android.view.WindowInsets.Type.captionBar());
         }
-        return wct;
     }
 
     private void resetTaskMatrix(Object leash) throws Exception {
@@ -232,17 +242,15 @@ final class HostPromotionController {
             try {
                 // Prepare every surface operation before changing listener ownership.
                 XposedHelpers.callMethod(area, "reparentToDisplayArea", 0, canonical, tx);
-                boolean liveCenterReveal=ticket.liveMainReveal && h.topCtrl.topTransition!=null;
-                ticket.liveMainReveal=liveCenterReveal;
-                float initialScale=liveCenterReveal
-                        ?TopTaskReturnPolicy.CENTER_START_SCALE:1f;
-                float initialX=liveCenterReveal
-                        ?TopTaskReturnPolicy.centeredOffset(h.screenW,initialScale):0f;
-                float initialY=liveCenterReveal
-                        ?TopTaskReturnPolicy.centeredOffset(h.screenH,initialScale):0f;
+                MiStepTopTaskTransition reveal=ticket.revealTransition;
+                TopTaskReturnPolicy.RevealFrame staged=ticket.liveMainReveal && reveal!=null
+                        ? reveal.initialRevealFrame() : null;
+                if(staged==null)ticket.liveMainReveal=false;
+                TopTaskReturnPolicy.RevealFrame initial=staged!=null
+                        ? staged : TopTaskReturnPolicy.RevealFrame.FULL;
                 XposedHelpers.callMethod(tx, "setMatrix", canonical,
-                        initialScale, 0f, 0f, initialScale);
-                XposedHelpers.callMethod(tx, "setPosition", canonical, initialX, initialY);
+                        initial.scaleX, 0f, 0f, initial.scaleY);
+                XposedHelpers.callMethod(tx, "setPosition", canonical, initial.x, initial.y);
                 XposedHelpers.callMethod(tx, "setWindowCrop", canonical,
                         new Rect(0, 0, h.screenW, h.screenH));
                 XposedHelpers.callMethod(tx, "setAlpha", canonical, 1f);
@@ -263,13 +271,21 @@ final class HostPromotionController {
                     XposedHelpers.callMethod(controller, "onTaskVanished", info);
                     ShellCompat.call(h.transitions, "registerTaskView", controller);
                 }
-                XposedHelpers.callMethod(tx, "apply");
-                if(liveCenterReveal) {
-                    ticket.liveRevealSurface=canonical;
-                    h.topCtrl.topTransition.setLiveSurface(canonical);
+                boolean waitForCommit = ticket.restoreMainOpacityAfterHandoff;
+                if (waitForCommit) {
+                    try {
+                        XposedHelpers.callMethod(tx, "addTransactionCommittedListener", (Executor) h.main::post,
+                                (Runnable) () -> h.restoreRetainedMainOpacityAfterHandoff(ticket));
+                    } catch (Throwable unavailable) {
+                        waitForCommit = false;
+                    }
                 }
+                XposedHelpers.callMethod(tx, "apply");
+                if(staged!=null)reveal.setLiveSurface(canonical);
                 unregistered = false;
                 ticket.handoffComplete = true;
+                if (ticket.restoreMainOpacityAfterHandoff && !waitForCommit)
+                    h.main.post(() -> h.restoreRetainedMainOpacityAfterHandoff(ticket));
                 h.traceSwapEvent("after-native-handoff");
                 MiStepHost.log("promote native handoff task=" + ticket.taskId + " owner="
                         + fallback.getClass().getName() + " parent=default-task-display-area");
@@ -583,18 +599,23 @@ final class HostPromotionController {
 
     /** A wedged live reveal must never leave the desktop translucent behind the returned app. */
     void restoreTopMainOpacity(Promotion ticket) {
+        restoreMainOpacity(ticket, "upper-live-main-opacity-restore", false);
+    }
+
+    void restoreMainOpacity(Promotion ticket, String operation, boolean retainedReturn) {
         if(!h.executeOnShell(()->{
             try {
+                if (retainedReturn && (!ticket.restoreMainOpacityAfterHandoff || !ticket.handoffComplete)) return;
                 Object info=h.rootInfo(new LiveTask(ticket.taskId,ticket.token,ticket.slot.pkg));
-                // A late completion must not change a newly adopted freeform task.
-                if(!h.ordinaryRoot(info,1))return;
+                if (!h.ordinaryRoot(info, 1)
+                        || (retainedReturn && h.isSideToken(ticket.token) && !h.returnTicketCurrent(ticket))) return;
                 Object wct=Class.forName("android.window.WindowContainerTransaction")
                         .getDeclaredConstructor().newInstance();
                 XposedHelpers.callMethod(wct,"setForceTranslucent",ticket.token,false);
-                if(!h.applyWct("upper-live-main-opacity-restore",wct))
-                    MiStepHost.log("upper live main opacity restore not committed task="+ticket.taskId);
-            } catch(Throwable error) {MiStepHost.log("upper live main opacity restore: "+error);}
-        }))MiStepHost.log("upper live main opacity restore unavailable: no Shell queue");
+                if (h.applyWct(operation, wct)) ticket.restoreMainOpacityAfterHandoff = false;
+                else MiStepHost.log(operation + " not committed task=" + ticket.taskId);
+            } catch(Throwable error) {MiStepHost.log(operation + ": " + error);}
+        }))MiStepHost.log(operation + " unavailable: no Shell queue");
     }
 
     void bindTask(Slot slot, int taskId, Object token) {

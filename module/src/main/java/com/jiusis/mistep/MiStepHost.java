@@ -74,7 +74,8 @@ public final class MiStepHost {
     final Object transitions;
     final Handler main = new Handler(Looper.getMainLooper());
 
-    final Slot[] slots = new Slot[SLOT_COUNT];
+    /** 滚动行停稳后会被重新映射（HostSideScrollController.mapSideSlots），故非 final；读 volatile 快照。 */
+    volatile Slot[] slots = new Slot[SLOT_COUNT];
 
     volatile MiStepLayout layout;
     FrameLayout root;
@@ -138,6 +139,7 @@ public final class MiStepHost {
     final HostSurfaceController surfaceCtl;
     final HostGeometryController geometry;
     final HostDebugController debugCtrl;
+    final HostSideScrollController sideScroll;
     private View sideBacking;
     /** 侧栏按格分段的不透明底板；承载格需要把它藏起来让下面的真实任务画面透出来。 */
     final View[] sideBackingViews = new View[SLOT_COUNT];
@@ -155,6 +157,10 @@ public final class MiStepHost {
     boolean keyguardWindowNotTouchable;
     float keyguardWindowAlpha;
     int keyguardResumeIndex = -1;
+    /** v1.0.4：普通退出（exit / homekey）后保留已绑定的副窗，不清槽不归还；再次进入淡入恢复。 */
+    volatile boolean retainedOnExit;
+    long retainedExitSourceEpoch = -1;
+    String pendingSuspendReason;
     MiStepUnlockHandoff unlockHandoff;
     final FinishTransactions<Long> keyguardTransactions = new FinishTransactions<>(16);
     static final int ACTIVE = 0, SUSPENDING = 1, SUSPENDED = 2, RESUMING = 3;
@@ -245,6 +251,7 @@ public final class MiStepHost {
         surfaceCtl = new HostSurfaceController(this);
         geometry = new HostGeometryController(this);
         debugCtrl = new HostDebugController(this);
+        sideScroll = new HostSideScrollController(this);
         installLogicalBoundsHooks(ctx.getClassLoader());
         installRetainedSurfaces(ctx.getClassLoader());
         for (int i = 0; i < SLOT_COUNT; i++) {
@@ -253,12 +260,13 @@ public final class MiStepHost {
         workspaceSettings = new WorkspaceSettingsClient(this.ctx, main, options -> {
             workspaceOptions = options;
             if (topBar != null) topBar.applyOptions(options);
+            requestCompaction();
             if (!options.keepOnLock && retainedForLock) {
                 retainedForLock = false;
                 suspendSession("lock-retention-disabled");
             }
             log("workspace settings applied hidden=" + options.hiddenButtons + " swap=" + options.swapMode
-                    + " keepOnLock=" + options.keepOnLock);
+                    + " keepOnLock=" + options.keepOnLock + " scrollSideTasks=" + options.scrollSideTasks);
         });
     }
 
@@ -443,11 +451,15 @@ public final class MiStepHost {
         h.main.post(() -> {
             if (h.retainedForLock) return;
             if (fullscreen) {
+                if (h.scene == SUSPENDED && h.retainedOnExit) {
+                    h.landscapeSuspended = false;
+                    return;
+                }
                 h.landscapeSuspended = true;
                 if (h.scene == ACTIVE) h.suspendSession("native-landscape");
             } else {
                 h.landscapeSuspended = false;
-                h.resumeSession();
+                if (!(h.scene == SUSPENDED && h.retainedOnExit)) h.resumeSession();
             }
         });
     }
@@ -617,7 +629,7 @@ public final class MiStepHost {
 
     private void installRetainedSurfaces(ClassLoader cl) { surfaceCtl.installRetainedSurfaces(cl); }
 
-    private void trackRetainedSurfaces(Object info, Object finish) { surfaceCtl.trackRetainedSurfaces(info, finish); }
+    void trackRetainedSurfaces(Object info, Object start, Object finish) { surfaceCtl.trackRetainedSurfaces(info, start, finish); }
 
     /**
      * WindowManager reports this overlay visible throughout fixed-rotation launches,
@@ -644,7 +656,7 @@ public final class MiStepHost {
     static final long ZOOM_ANIM_MS = 300L;
     android.animation.ValueAnimator workspaceAnimator;
         long workspaceGeneration;
-    float workspaceAlpha = 1f;
+    volatile float workspaceAlpha = 1f;
     boolean workspaceEntering;
 
 
@@ -712,7 +724,7 @@ public final class MiStepHost {
     void compactCellsAfterCollection() { cellLayout.compactCellsAfterCollection(); }
     void appendHiddenKeyguardSurfaces(Object tx, java.util.List<Long> epochs) { surfaceCtl.appendHiddenKeyguardSurfaces(tx, epochs); }
     private void openTopFace(boolean manual) { topCtrl.openTopFace(manual); }
-    private void releaseTopTask(boolean front, boolean dismissed, Runnable after) { topCtrl.releaseTopTask(front, dismissed, after); }
+    void releaseTopTask(boolean front, boolean dismissed, Runnable after) { topCtrl.releaseTopTask(front, dismissed, after); }
 
     /** BUG-2 韧性：promotion/transfer 卡死时 suspend 会无限排队、cancel 路径存在静默 no-op。
      *  本看门狗独立于 scene 门禁（覆盖 ACTIVE/SUSPENDING/RESUMING 各种卡态）：
@@ -727,7 +739,7 @@ public final class MiStepHost {
 
     private void createNext(final int index) { taskEvents.createNext(index); }
 
-    private void onTaskViewCreated(int index, Object taskViewObj) { taskEvents.onTaskViewCreated(index, taskViewObj); }
+    boolean onTaskViewCreated(Slot slot, Object taskViewObj, boolean next) { return taskEvents.onTaskViewCreated(slot, taskViewObj, next); }
 
     TextView makeEmptyHint() { return chrome.makeEmptyHint(); }
 
@@ -782,7 +794,7 @@ public final class MiStepHost {
     /** Publish only confirmed bindings; system_server rechecks each native task before use. */
     void publishDesktopSideTasks() { launcher.publishDesktopSideTasks(); }
 
-    void promoteSideTaskForDesktopLaunch(String pkg, int launchUser) { launcher.promoteSideTaskForDesktopLaunch(pkg, launchUser); }
+    void promoteSideTaskForDesktopLaunch(String pkg, int launchUser, ComponentName entry) { launcher.promoteSideTaskForDesktopLaunch(pkg, launchUser, entry); }
 
 
 
@@ -923,6 +935,7 @@ public final class MiStepHost {
     void setWorkspaceAlpha(float value) { lifecycle.setWorkspaceAlpha(value); }
     void playWorkspaceFade(boolean entering, long generation, Runnable complete) { lifecycle.playWorkspaceFade(entering, generation, complete); }
     boolean retainWorkspaceForLock() { return lifecycle.retainWorkspaceForLock(); }
+    boolean hasBoundTasks() { return lifecycle.hasBoundTasks(); }
     boolean setKeyguardWindowHidden(boolean hidden) { return lifecycle.setKeyguardWindowHidden(hidden); }
     void leaveKeyguardPrivacy() { lifecycle.leaveKeyguardPrivacy(); }
 
@@ -970,7 +983,7 @@ public final class MiStepHost {
 
     void closeCellMovePreview() { promotionController.closeCellMovePreview(); }
 
-    private Object fullscreenExitTransaction(Promotion ticket) throws Exception { return promotionController.fullscreenExitTransaction(ticket); }
+    Object fullscreenExitTransaction(Promotion ticket) throws Exception { return promotionController.fullscreenExitTransaction(ticket); }
 
     /** Retire only our binding, then return its canonical task surface to the existing DA. */
     private void handoffPromotedTask(Promotion ticket) throws Throwable { promotionController.handoffPromotedTask(ticket); }
@@ -1087,7 +1100,7 @@ public final class MiStepHost {
     /** Idempotently show every live side TaskView after a task-set change. */
     void reassertSideTaskViews(String reason) { taskEvents.reassertSideTaskViews(reason); }
 
-    private boolean visibilityRepairCurrent(Slot slot, long epoch, long binding, int id, Object token) { return taskEvents.visibilityRepairCurrent(slot, epoch, binding, id, token); }
+    boolean visibilityRepairCurrent(Slot slot, long epoch, long binding, int id, Object token) { return taskEvents.visibilityRepairCurrent(slot, epoch, binding, id, token, false); }
 
     String describeTasks() { return winCtl.describeTasks(); }
 
@@ -1125,6 +1138,41 @@ public final class MiStepHost {
     boolean applyWct(String what, Object wct) { return winCtl.applyWct(what, wct); }
 
     private Object findWctApplier(Object wct) { return winCtl.findWctApplier(wct); }
+
+    // ---------------------------------------------------------------- v1.0.4：无限小窗 / 退出保留副窗（跨 controller 入口）
+    // 侧栏滚动整簇在 HostSideScrollController；退出保留在 HostLifecycleController；
+    // 归还路径在 HostAdoptionController。下面只是按需放宽的委托 shim。
+
+    boolean presentsSlot(Slot slot) { return sideScroll.presentsSlot(slot); }
+    boolean isInSideViewport(float x, float y) { return sideScroll.isInSideViewport(x, y); }
+    boolean trackSideScroll(MotionEvent event) { return sideScroll.trackSideScroll(event); }
+    boolean isSideMotionRunning() { return sideScroll.isSideMotionRunning(); }
+    void finishSideScroll() { sideScroll.finishSideScroll(); }
+    boolean sideRowInPlace(Slot slot) { return sideScroll.sideRowInPlace(slot); }
+    void revealSideTaskForDesktop(Slot slot, android.os.Bundle binding) { sideScroll.revealSideTaskForDesktop(slot, binding); }
+    void mapSideSlots(int firstRow) { sideScroll.mapSideSlots(firstRow); }
+    void layoutSideViewport(boolean all) { sideScroll.layoutSideViewport(all); }
+    void observeSideViewportRoot(View view) { sideScroll.observeSideViewportRoot(view); }
+    boolean ensureSideViewport() { return sideScroll.ensureSideViewport(); }
+    void attachSideViewport(Slot slot, Object surface) { sideScroll.attachSideViewport(slot, surface); }
+    boolean clipToSideViewport(Rect rect) { return sideScroll.clipToSideViewport(rect); }
+    void applySideRow(Slot slot, float offset, boolean scrolling) { sideScroll.applySideRow(slot, offset, scrolling); }
+    boolean compactScrollingSideRows() { return sideScroll.compactScrollingSideRows(); }
+    boolean prepareSideRowTap(Slot slot) { return sideScroll.prepareSideRowTap(slot); }
+    void updateSideInputViewportBounds() { sideScroll.updateSideInputViewportBounds(); }
+    boolean retainedResumeStaging() { return lifecycle.retainedResumeStaging(); }
+    void hideReturningTaskSurface(Object surface) { lifecycle.hideReturningTaskSurface(surface); }
+    Object currentOrganizedTaskInfo(Slot slot, int taskId, Object token) { return taskEvents.currentOrganizedTaskInfo(slot, taskId, token); }
+    void appendSlotViewport(Object tx, Slot slot) { winCtl.appendSlotViewport(tx, slot); }
+    void appendTaskViewExitOverrides(Object wct, Promotion ticket) throws Exception { promotionController.appendTaskViewExitOverrides(wct, ticket); }
+    void restoreMainOpacity(Promotion ticket, String operation, boolean retainedReturn) { promotionController.restoreMainOpacity(ticket, operation, retainedReturn); }
+    void restoreRetainedMainOpacityAfterHandoff(Promotion ticket) { adoption.restoreRetainedMainOpacityAfterHandoff(ticket); }
+    void releaseRetainedTaskToMain(Slot slot, boolean nativeAlreadyFullscreen) { adoption.releaseRetainedTaskToMain(slot, nativeAlreadyFullscreen); }
+    void finishExternalTopLaunch(Slot upper) { adoption.finishExternalTopLaunch(upper); }
+    boolean sideTaskMatchesEntry(Slot slot, int user, ComponentName entry) { return adoption.sideTaskMatchesEntry(slot, user, entry); }
+    void scheduleSideVisibilityRepair(Slot slot, boolean warming) { taskEvents.scheduleSideVisibilityRepair(slot, warming); }
+    void refreshEmptyHintBackdrop(Slot slot) { chrome.refreshEmptyHintBackdrop(slot); }
+    LiveTask findPackageTask(String pkg, ComponentName entry) throws Exception { return launcher.findPackageTask(pkg, entry); }
 
     static void log(String msg) { HostStaticUtil.log(msg); }
 }

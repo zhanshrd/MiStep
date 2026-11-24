@@ -86,6 +86,13 @@ final class HostLaunchController {
     }
 
     LiveTask findPackageTask(String pkg) throws Exception {
+        Intent launch = h.ctx.getPackageManager().getLaunchIntentForPackage(pkg);
+        return findPackageTask(pkg, launch == null ? null : launch.getComponent());
+    }
+
+    /** entry 必须逐字段匹配（微信分身/小程序与主界面同包名不同入口）。 */
+    LiveTask findPackageTask(String pkg, ComponentName entry) throws Exception {
+        if (entry == null) throw new IllegalStateException("task launcher entry unavailable");
         LiveTask candidate = null;
         for (Object info : h.rootInfos()) {
             if (!TaskUserPolicy.isCurrentUser(
@@ -136,9 +143,11 @@ final class HostLaunchController {
         final long sequence = ++h.desktopRegistrationSequence;
         final long epoch = h.sceneEpoch;
         final java.util.List<Slot> owners = new java.util.ArrayList<>();
-        for (Slot slot : h.slots) if (slot != null && slot.index > 0 && slot.index < h.CELL_SLOT_COUNT) owners.add(slot);
+        for (Slot slot : h.slots) if (slot != null && slot.index > 0
+                && (slot.index < h.CELL_SLOT_COUNT || slot.sideRow >= 0 || h.retainedOnExit
+                        && (h.scene == MiStepHost.SUSPENDING || h.scene == MiStepHost.SUSPENDED))) owners.add(slot);
         final boolean active = h.scene == MiStepHost.ACTIVE && h.screenOn && !h.keyguardLocked && h.root != null;
-        final boolean keepRecents = h.root != null && h.scene != MiStepHost.SUSPENDED;
+        final boolean keepRecents = h.root != null && (h.scene != MiStepHost.SUSPENDED || h.retainedOnExit);
         Runnable send = () -> {
             if (sequence != h.desktopRegistrationSequence || epoch != h.sceneEpoch) return;
             android.os.Bundle state = new android.os.Bundle();
@@ -163,7 +172,9 @@ final class HostLaunchController {
                         row.putString("package", slot.pkg);
                         row.putLong("scene", epoch);
                         row.putLong("binding", slot.taskEpoch);
-                        if (keepRecents && h.scene != MiStepHost.SUSPENDED && MiStepHost.windowModeOf(info) == 6) recents.add(row);
+                        row.putBoolean("sideClipped", slot.sideRow >= 0 && !slot.sideShown);
+                        if (keepRecents && (h.scene != MiStepHost.SUSPENDED || h.retainedOnExit)
+                                && MiStepHost.windowModeOf(info) == 6) recents.add(row);
                         if (active && h.scene == MiStepHost.ACTIVE && h.screenOn && !h.keyguardLocked
                                 && !slot.frozen && !slot.promoting && !slot.launching
                                 && h.mayWriteSideSurface(slot)) rows.add(row);
@@ -172,6 +183,7 @@ final class HostLaunchController {
             }
             if (sequence != h.desktopRegistrationSequence || epoch != h.sceneEpoch) return;
             state.putBinder("owner", h.desktopSceneOwner);
+            state.putBoolean("retained", h.retainedOnExit && (h.scene == MiStepHost.SUSPENDING || h.scene == MiStepHost.SUSPENDED));
             Slot upper = h.slots[MiStepHost.SLOT_TOP];
             TopTaskState.Key upperOwner = h.topCtrl.topTaskState.owner();
             if (active && h.scene == MiStepHost.ACTIVE && h.screenOn && !h.keyguardLocked && h.topCtrl.topFace
@@ -202,15 +214,15 @@ final class HostLaunchController {
         if (active || keepRecents) h.executeOnShell(send); else send.run();
     }
 
-    void promoteSideTaskForDesktopLaunch(String pkg, int launchUser) {
-        if (pkg == null || h.scene != MiStepHost.ACTIVE) return;
+    void promoteSideTaskForDesktopLaunch(String pkg, int launchUser, ComponentName entry) {
+        if (pkg == null || entry == null || !pkg.equals(entry.getPackageName()) || h.scene != MiStepHost.ACTIVE) return;
         if (!h.supportsTaskUser(launchUser)) return;
-        String[] packages = new String[MiStepHost.SLOT_COUNT - 1];
-        int[] users = new int[MiStepHost.SLOT_COUNT - 1];
-        boolean[] occupied = new boolean[MiStepHost.SLOT_COUNT - 1];
-        for (int i = 1; i < MiStepHost.SLOT_COUNT; i++) {
+        String[] packages = new String[h.slots.length - 1];
+        int[] users = new int[h.slots.length - 1];
+        boolean[] occupied = new boolean[h.slots.length - 1];
+        for (int i = 1; i < h.slots.length; i++) {
             packages[i - 1] = h.slots[i].pkg;
-            occupied[i - 1] = h.sideTaskMatchesUser(h.slots[i], launchUser);
+            occupied[i - 1] = h.sideTaskMatchesEntry(h.slots[i], launchUser, entry);
             users[i - 1] = launchUser;
         }
         int sideIndex = DesktopIconLaunchPolicy.uniqueSideSlot(pkg, launchUser, packages, users, occupied);
@@ -219,7 +231,7 @@ final class HostLaunchController {
             return;
         }
         Slot match = h.slots[sideIndex + 1];
-        if(match.index==MiStepHost.SLOT_TOP) {h.topCtrl.releaseTopTask(true,true,null);return;}
+        if (match.index == MiStepHost.SLOT_TOP) return; // The original launch has already started.
         MiStepHost.log("desktop icon selected side task package=" + pkg + " slot=" + match.index
                 + " task=" + match.taskId + "; promote existing task");
         h.queueSidePromotion(match, true);
@@ -341,8 +353,9 @@ final class HostLaunchController {
                 ? launch.getComponent().getPackageName() : launch.getPackage();
         if (pkg == null || "com.miui.home".equals(pkg)) return;
         for (Slot other : h.slots) {
-            if (other != slot && (other.occupied || other.launching) && pkg.equals(other.pkg)) {
-                MiStepHost.log("launch rejected: package already in side slot=" + other.index);
+            if (other != slot && pkg.equals(other.pkg)
+                    && (other.launching || h.sideTaskMatchesEntry(other, h.currentUserId(), launch.getComponent()))) {
+                MiStepHost.log("launch rejected: application entry already in side slot=" + other.index);
                 return;
             }
         }

@@ -70,9 +70,23 @@ final class HostCellLayoutController {
         h.root = new FrameLayout(h.ctx) {
             @Override public boolean dispatchTouchEvent(MotionEvent event) {
                 if (h.transitionInput != null && h.transitionInput.consume(event.getActionMasked())) return true;
-                return super.dispatchTouchEvent(event);
+                boolean wasCaptured = h.sideScroll.sideCaptured;
+                if (h.trackSideScroll(event)) {
+                    if (!wasCaptured && event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                        MotionEvent cancel = MotionEvent.obtain(event);
+                        cancel.setAction(MotionEvent.ACTION_CANCEL);
+                        try { super.dispatchTouchEvent(cancel); } finally { cancel.recycle(); }
+                    }
+                    return true;
+                }
+                return super.dispatchTouchEvent(event) || h.sideScroll.sideArmed;
             }
         };
+        // 视口容器层挂在宿主根表面下；ViewRootImpl 重建表面时在绘制事务里重新挂载。
+        h.root.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View view) { h.observeSideViewportRoot(view); }
+            @Override public void onViewDetachedFromWindow(View view) {}
+        });
         h.transitionInput = new MiStepTransitionInput(h.root, h::acquireTransitionInputWindow, h::releaseTransitionInputWindow, blocked -> {
             h.liveSwapInputBlocked = blocked;
             for (Slot slot : h.slots) if (slot != null && slot.index > 0) h.updateTouchRegion(slot);
@@ -361,6 +375,11 @@ final class HostCellLayoutController {
     }
 
     void applyRect(Slot slot) {
+        if (slot.sideRow >= 0) {
+            h.applySideRow(slot, h.sideScroll.sideScrolling ? h.sideScroll.sideOffset : 0f,
+                    h.sideScroll.sideScrolling);
+            return;
+        }
         if (slot.rect == null) {
             return;
         }
@@ -373,6 +392,9 @@ final class HostCellLayoutController {
                 lp.height = slot.rect[3] - slot.rect[1];
                 slot.view.setLayoutParams(lp);
             }
+            if (slot.index != MiStepHost.SLOT_TOP)
+                slot.view.setClipBounds(new Rect(0, 0,
+                        slot.rect[2] - slot.rect[0], slot.rect[3] - slot.rect[1]));
         }
         if (slot.hint != null) {
             boolean paneLocal=slot.index==MiStepHost.SLOT_TOP;
@@ -398,7 +420,9 @@ final class HostCellLayoutController {
         MiStepHost.log("main side layout: " + (h.mainOnRight ? "right" : "left") + " " + h.layout.describe());
         h.applyWallpaperBackdrops();
         if (h.root == null) return;
+        h.updateSideInputViewportBounds();
         if (h.layout.tabletLandscape) h.topCtrl.updateTopTaskGeometry();
+        h.layoutSideViewport(true);
         for (int i = 1; i < h.CELL_SLOT_COUNT; i++) {
             Slot slot = h.slots[i];
             slot.rect = h.slotBounds(slot);
@@ -434,7 +458,8 @@ final class HostCellLayoutController {
      */
     void compactCells() {
         if (h.root == null || h.layout == null) return;
-        if (h.scene != MiStepHost.ACTIVE || h.promotion != null || h.transferBusy || h.cellMotion != null) {
+        if (h.scene != MiStepHost.ACTIVE || h.promotion != null || h.transferBusy || h.cellMotion != null
+                || h.sideScroll.sideArmed || h.sideScroll.sideCaptured || h.isSideMotionRunning()) {
             h.compactPending = true;
             return;
         }
@@ -447,6 +472,12 @@ final class HostCellLayoutController {
             }
         }
         h.compactPending = false;
+        // 无限小窗开启后，副窗序列的补位/增行由 HostSideScrollController 接管，
+        // 物理格位的交换动画不再参与。
+        if (h.compactScrollingSideRows()) {
+            h.publishDesktopSideTasks();
+            return;
+        }
         h.publishDesktopSideTasks();
         java.util.List<CellMovePlan> moves = new java.util.ArrayList<>();
         int initialEmptySlots = 0;

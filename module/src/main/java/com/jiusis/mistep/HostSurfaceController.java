@@ -138,7 +138,7 @@ final class HostSurfaceController {
                                         h.keyguardTransactions.mark(args[3], java.util.Collections.singletonList(h.sceneEpoch));
                                     MiStepSwapTrace trace = h.swapTrace;
                                     if (trace != null) trace.transition(args[1], args[2], args[3]);
-                                    trackRetainedSurfaces(args[1], args[3]);
+                                    trackRetainedSurfaces(args[1], args[2], args[3]);
                                     scheduleOverlayRefresh();
                                 }
                                 else if ("onTransitionMerged".equals(name)
@@ -157,7 +157,7 @@ final class HostSurfaceController {
         });
     }
 
-    void trackRetainedSurfaces(Object info, Object finish) {
+    void trackRetainedSurfaces(Object info, Object start, Object finish) {
         MiStepHost.NativeObservation observation = h.pendingNativeObservation;
         if (observation != null && !observation.consumed.get()) {
             java.util.List<?> observedChanges = (java.util.List<?>) XposedHelpers.callMethod(info, "getChanges");
@@ -174,6 +174,11 @@ final class HostSurfaceController {
         // task even when that side token is absent from TransitionInfo. Resolve its
         // current canonical binding at the final apply, after native merges.
         h.workspaceFinishes.mark(finish, java.util.Collections.singletonList(h.sceneEpoch));
+        // A CHANGE transition can lift an already-adopted task out of its TaskView
+        // before rotating it. Keep its live hierarchy inside the same viewport
+        // from the start transaction as well; final-only repair allows a fly-out.
+        if (Integer.valueOf(6).equals(XposedHelpers.callMethod(info, "getType")))
+            h.workspaceFinishes.mark(start, java.util.Collections.singletonList(h.sceneEpoch));
         boolean relevant = h.promotion != null || h.transferBusy;
         for (Slot slot : h.slots) if (slot.launching) relevant = true;
         java.util.List<?> changes = (java.util.List<?>) XposedHelpers.callMethod(info, "getChanges");
@@ -257,6 +262,7 @@ final class HostSurfaceController {
         for (RenderBinding frame : frames) {
             Slot slot = frame.slot;
             if (restored.contains(slot) || !h.canRender(slot) || slot.promoting || slot.launching || slot.frozen
+                    || MiStepLiveSwap64.isBorrowingPeer(slot.controller, frame.id, frame.token)
                     || !mayWriteSideSurface(slot)
                     || frame.scene != h.sceneEpoch || frame.binding != slot.taskEpoch
                     || frame.id != slot.taskId || !frame.token.equals(slot.taskToken)
@@ -269,10 +275,13 @@ final class HostSurfaceController {
                 XposedHelpers.callMethod(tx, "setLayer", frame.leash, 0);
                 XposedHelpers.callMethod(tx, "setPosition", frame.leash, 0f, 0f);
                 XposedHelpers.callMethod(tx, "setWindowCrop", frame.leash, h.logicalBounds(slot));
+                h.appendSlotViewport(tx, slot);
                 float scale = h.scaleFor(slot);
                 XposedHelpers.callMethod(tx, "setMatrix", frame.leash, scale, 0f, 0f, scale);
                 XposedHelpers.callMethod(tx, "setAlpha", frame.leash, 1f);
                 XposedHelpers.callMethod(tx, "show", frame.leash);
+                if (h.retainedResumeStaging())
+                    XposedHelpers.callMethod(tx, "setAlpha", frame.parent, 0f);
                 restored.add(slot);
                 count++;
             } catch (Throwable error) { MiStepHost.log("retained surface skipped task=" + frame.id + ": " + error); }

@@ -89,9 +89,9 @@ final class HostChromeController {
     void updateHint(Slot slot) {
         if (slot.index != MiStepHost.SLOT_TOP && slot.hint != null)
             LiveSwapVisualLease.writeAlpha(slot.hint, h.taskCellsCovered ? 0f : h.workspaceAlpha);
-        if(slot.index!=MiStepHost.SLOT_TOP && slot.index>=h.CELL_SLOT_COUNT) {
+        if (!h.presentsSlot(slot)) {
             if(slot.hint!=null)slot.hint.setVisibility(View.GONE);
-            if(slot.view!=null)slot.view.setAlpha(0);
+            h.updateCellSurfaceVisibility(slot);
             return;
         }
         if(slot.index==MiStepHost.SLOT_TOP) {
@@ -104,6 +104,7 @@ final class HostChromeController {
         if (slot.hint == null) {
             return;
         }
+        h.refreshEmptyHintBackdrop(slot);
         if (slot.hint instanceof TextView) {
             TextView label = (TextView) slot.hint;
             label.setText(slot.parked ? "恢复" : "");
@@ -114,7 +115,27 @@ final class HostChromeController {
             label.setContentDescription(slot.parked
                     ? "已保留的窗口，点按恢复" : "空白窗口，点按添加应用");
         }
-        slot.hint.setVisibility(slot.occupied && !slot.parked ? View.GONE : View.VISIBLE);
+        slot.hint.setVisibility((slot.occupied && !slot.parked)
+                || (h.sideScroll.sideCompacting && slot.sideRow >= 0) ? View.GONE : View.VISIBLE);
+    }
+
+    /** 空行（含刚腾出的任务行）在补位动画中也要与壁纸对齐。 */
+    void refreshEmptyHintBackdrop(Slot slot) {
+        if (slot.hint == null || slot.rect == null || (slot.occupied && !slot.parked)
+                || h.wallpaperBackdrop == null || h.wallpaperBackdrop.isRecycled()) return;
+        int x = slot.rect[0], y = slot.rect[1];
+        int tint = HyperOsStyle.topWallpaperTint(h.ctx);
+        if (slot.hint.getBackground() instanceof WallpaperCropDrawable) {
+            WallpaperCropDrawable current = (WallpaperCropDrawable) slot.hint.getBackground();
+            if (current.matchesWallpaper(h.wallpaperBackdrop, h.screenW, h.screenH, tint)) {
+                current.setScreenOrigin(x, y);
+                return;
+            }
+        }
+        WallpaperCropDrawable backdrop = new WallpaperCropDrawable(
+                h.wallpaperBackdrop, h.screenW, h.screenH, x, y, tint);
+        if (h.layout != null && h.layout.tabletLandscape) backdrop.setMainHole(h.lifecycle.workspaceMainHole());
+        slot.hint.setBackground(backdrop);
     }
 
     void refreshQuickApps() {
@@ -234,12 +255,11 @@ final class HostChromeController {
             if (backing != null) backing.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
                     h.layout.tabletLandscape?h.layout.cellBounds(i-1)[0]:x,
                     h.sideSegmentTop(i), HyperOsStyle.topWallpaperTint(h.ctx)));
-            // A retained Host can gain a fourth tablet cell without a backing View.
-            // Its empty hint must still sample the current display and slot origin.
+        }
+        for (int i = 1; i < h.slots.length; i++) {
+            if (i == MiStepHost.SLOT_TOP) continue;
             Slot slot = h.slots[i];
-            if (slot == null || slot.hint == null || slot.occupied || slot.rect == null) continue;
-            slot.hint.setBackground(new WallpaperCropDrawable(h.wallpaperBackdrop, h.screenW, h.screenH,
-                    slot.rect[0], slot.rect[1], HyperOsStyle.topWallpaperTint(h.ctx)));
+            if (slot != null && h.presentsSlot(slot)) h.refreshEmptyHintBackdrop(slot);
         }
         updateWorkspaceBackdropVisibility();
     }

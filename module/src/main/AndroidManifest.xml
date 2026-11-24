@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.jiusis.mistep"
-    android:versionCode="1004000"
-    android:versionName="1.4.0">
+    android:versionCode="1004001"
+    android:versionName="1.4.1">
 
     <uses-sdk android:minSdkVersion="34" android:targetSdkVersion="37" />
+
+    <!-- Only the About page's donor list reads it (jiusis.github.io); empty donor_feed_url disables. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:hasCode="true"
@@ -19,6 +22,7 @@
             android:exported="true" />
         <activity
             android:name=".SettingsActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"
             android:exported="true"
             android:theme="@style/Theme.MiStep.Settings" />
         <!-- LSPosed module: SystemUI host + system_server magnification. -->

@@ -77,9 +77,12 @@ final class HostSwapController {
                     float dy = e.getRawY() - slot.bufferedDown.getRawY();
                     int slop = ViewConfiguration.get(h.ctx).getScaledTouchSlop();
                     if (Math.abs(dx) > slop || Math.abs(dy) > slop) slot.injecting = true;
-                    if (MiStepSideDismissGesture.starts(h.mainOnRight, dx, dy, slop)) {
+                    boolean dismissUp = h.sideScroll.sideScrolling && h.layout.tabletLandscape;
+                    float along = dismissUp ? dy : dx;
+                    float across = dismissUp ? dx : dy;
+                    if (MiStepSideDismissGesture.starts(dismissUp || h.mainOnRight, along, across, slop)) {
                         dismissSideToBackground(slot);
-                        if (h.sideDismiss != null && h.sideDismissSlot == slot) h.sideDismiss.follow(dx);
+                        if (h.sideDismiss != null && h.sideDismissSlot == slot) h.sideDismiss.follow(along);
                     }
                 }
                 return true;
@@ -99,9 +102,8 @@ final class HostSwapController {
                 float dx = current ? e.getRawX() - down.getRawX() : 0;
                 float dy = current ? e.getRawY() - down.getRawY() : 0;
                 int slop = ViewConfiguration.get(h.ctx).getScaledTouchSlop();
-                boolean dismiss = current && slot.rect != null && MiStepSideDismissGesture.accepts(
-                        h.mainOnRight, dx, dy, slot.rect[2] - slot.rect[0],
-                        h.ctx.getResources().getDisplayMetrics().density, slop,
+                boolean dismissUp = h.sideScroll.sideScrolling && h.layout.tabletLandscape;
+                boolean dismiss = current && acceptsSideDismiss(slot, dismissUp, dx, dy,
                         e.getEventTime() - down.getEventTime());
                 boolean tap = current && !slot.injecting && Math.abs(dx) <= slop && Math.abs(dy) <= slop;
                 recycleBuffered(slot);
@@ -109,7 +111,7 @@ final class HostSwapController {
                 if (dismiss) {
                     dismissSideToBackground(slot);
                     if (h.sideDismiss != null && h.sideDismissSlot == slot) {
-                        h.sideDismiss.follow(dx);
+                        h.sideDismiss.follow(dismissUp ? dy : dx);
                         h.sideDismiss.settle(true);
                     }
                 } else if (tap) {
@@ -141,18 +143,27 @@ final class HostSwapController {
                 && slot.touchTaskEpoch == slot.taskEpoch && slot.touchSceneEpoch == h.sceneEpoch;
         float dx = current ? e.getRawX() - down.getRawX() : 0f;
         float dy = current ? e.getRawY() - down.getRawY() : 0f;
-        if (action == MotionEvent.ACTION_MOVE && current) { run.follow(dx); return true; }
+        boolean dismissUp = h.sideScroll.sideScrolling && h.layout.tabletLandscape;
+        float along = dismissUp ? dy : dx;
+        if (action == MotionEvent.ACTION_MOVE && current) { run.follow(along); return true; }
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL || !current
                 || action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP) {
-            boolean commit = current && action == MotionEvent.ACTION_UP && slot.rect != null
-                    && MiStepSideDismissGesture.accepts(h.mainOnRight, dx, dy,
-                            slot.rect[2] - slot.rect[0], h.ctx.getResources().getDisplayMetrics().density,
-                            ViewConfiguration.get(h.ctx).getScaledTouchSlop(), e.getEventTime() - down.getEventTime());
-            if (current) run.follow(dx);
+            boolean commit = current && action == MotionEvent.ACTION_UP
+                    && acceptsSideDismiss(slot, dismissUp, dx, dy, e.getEventTime() - down.getEventTime());
+            if (current) run.follow(along);
             recycleBuffered(slot); slot.injecting = false;
             run.settle(commit);
         }
         return true;
+    }
+
+    private boolean acceptsSideDismiss(Slot slot, boolean dismissUp, float dx, float dy, long elapsed) {
+        if (slot.rect == null) return false;
+        int span = dismissUp ? slot.rect[3] - slot.rect[1] : slot.rect[2] - slot.rect[0];
+        return MiStepSideDismissGesture.accepts(dismissUp || h.mainOnRight,
+                dismissUp ? dy : dx, dismissUp ? dx : dy, span,
+                h.ctx.getResources().getDisplayMetrics().density,
+                ViewConfiguration.get(h.ctx).getScaledTouchSlop(), elapsed);
     }
 
     void dismissSideToBackground(Slot slot) {
@@ -258,6 +269,8 @@ final class HostSwapController {
             if (h.scene != MiStepHost.ACTIVE || h.transferBusy || h.promotion != null) return;
             Slot slot = h.slots[slotIndex];
             if (slot.closing) return;
+            if (!h.prepareSideRowTap(slot)) return;
+            slotIndex = slot.index;
             if (slot.carrier) {
                 h.restoreCarrierToMain();
                 return;
@@ -843,17 +856,39 @@ final class HostSwapController {
                         if (SystemClock.uptimeMillis() < h.zoomAnimUntil || !Boolean.TRUE.equals(
                                 XposedHelpers.callMethod(shell, "isIdle")))
                             throw new IllegalStateException("workspace or native transition still animating");
-                        Object info = h.rootInfo(new LiveTask(ticket.slot));
-                        Object homeInfo = h.rootInfo(ticket.homeBeforeCover);
+                        java.util.List<?> roots = h.rootInfos();
+                        Object info = null, homeInfo = null;
+                        LiveTask appIdentity = new LiveTask(ticket.slot);
+                        for (Object task : roots) {
+                            if (appIdentity.matches(task)) info = task;
+                            else if (ticket.homeBeforeCover.matches(task)) homeInfo = task;
+                        }
                         if (!h.ordinaryRoot(info, 6) || !h.isHomeRoot(homeInfo) || h.windowModeOf(homeInfo) != 1)
                             throw new IllegalStateException("live Home/app identity changed");
                         int user = XposedHelpers.getIntField(info, "userId");
                         int homeUser = XposedHelpers.getIntField(homeInfo, "userId");
                         ticket.liveMainUserId = user;
                         if (owned != null) owned.userId = user;
+                        java.util.List<LiveTaskSwapDriver.SideRoot> sideRoots = new java.util.ArrayList<>();
+                        for (Slot peer : h.slots) {
+                            if (peer == ticket.slot || !h.canRender(peer) || !h.presentsSlot(peer)
+                                    || !peer.occupied || peer.carrier || peer.frozen || peer.promoting
+                                    || peer.launching || peer.closing || peer.taskToken == null || peer.controller == null
+                                    || (peer.index == MiStepHost.SLOT_TOP && !h.topCtrl.topFace)) continue;
+                            LiveTask identity = new LiveTask(peer);
+                            for (Object task : roots) {
+                                if (identity.matches(task) && h.ordinaryRoot(task, 6)) {
+                                    sideRoots.add(new LiveTaskSwapDriver.SideRoot(identity.id,
+                                            XposedHelpers.getIntField(task, "userId"),
+                                            identity.token, peer.controller));
+                                    break;
+                                }
+                            }
+                        }
                         LiveTaskSwapDriver.Home request = new LiveTaskSwapDriver.Home(app,
                                 ticket.homeBeforeCover.id, ticket.homeBeforeCover.token, user, homeUser,
                                 new Rect(0, 0, width, height), hostSurface, zoom,
+                                sideRoots.toArray(new LiveTaskSwapDriver.SideRoot[0]),
                                 new Object[]{ticket.slot.cellBackground}, ticket.liveBackdrop);
                         accepted = LiveTaskSwapDriver.startHome(h.ctx.getClassLoader(), h.transitions,
                                 ticket.slot.controller, request,

@@ -49,7 +49,7 @@ final class HostEntrySupport {
     }
 
     void hookSystemServer(ClassLoader cl) {
-        HostEntry.log("=== attached to system_server (android) build=1.4.0 release ===");
+        HostEntry.log("=== attached to system_server (android) build=1.4.1 release ===");
         MiStepRecents.install(cl);
         NativeRawInputBridge.install();
         try {

@@ -111,7 +111,7 @@ public class HostEntry implements IXposedHookLoadPackage {
             return;
         }
         final ClassLoader cl = lpparam.classLoader;
-        log("=== attached to " + SYSTEMUI + " build=1.4.0 release ===");
+        log("=== attached to " + SYSTEMUI + " build=1.4.1 release ===");
         try {
             NativeMultiWindowUnlock.install(cl, false);
             MiStepSystemActions.install(cl);
@@ -139,15 +139,12 @@ public class HostEntry implements IXposedHookLoadPackage {
     }
 
     /**
-     * MiType independently enters a compact PopupWindow when a landscape
-     * keyboard cannot fit the current task width.  That is the wrong policy
-     * inside Mi Step: the main task owns the native landscape transform, so
-     * the IME should keep its normal full landscape layout.  Skip only the
-     * keyboard's auto-floating decision; manual floating mode remains owned
-     * by the keyboard itself.
+     * Keep the established tablet attached-keyboard policy. Phones retain MiType's
+     * native transient auto-floating admission and restoration when space is tight.
+     * Manual floating preferences remain owned by the keyboard.
      */
     private static void hookMiTypeAutoFloating(ClassLoader cl) {
-        log("=== attached to com.xiaomi.type build=1.4.0 release ===");
+        log("=== attached to com.xiaomi.type build=1.4.1 release ===");
         try {
             Class<?> service = XposedHelpers.findClass("com.mi.ime.MiInputMethodService", cl);
             XposedHelpers.findAndHookMethod(service, "handleSpacePressureAutoFloating",
@@ -156,6 +153,7 @@ public class HostEntry implements IXposedHookLoadPackage {
                     if (!(param.thisObject instanceof Context)) return;
                     Context context = (Context) param.thisObject;
                     try {
+                        if (!DeviceProfile.isTablet(context)) return;
                         long now = System.currentTimeMillis();
                         String encoded = android.provider.Settings.Global.getString(
                                 context.getContentResolver(), "mistep_zoom");
@@ -208,6 +206,9 @@ public class HostEntry implements IXposedHookLoadPackage {
     static volatile int sNativeLandscapeState = NativeLandscapePolicy.INACTIVE;
     /** Accessed only under the WMS global lock; these are per-token, not display launches. */
     static final java.util.Map<Object, Integer> sTaskRotations =
+            new java.util.WeakHashMap<>();
+    /** 我们自己安装的固定旋转租约（状态对象弱引用）；生命周期在 HostEntryTopRotation。 */
+    static final java.util.Map<Object, java.lang.ref.WeakReference<Object>> sTaskRotationTransforms =
             new java.util.WeakHashMap<>();
     /** Only surfaces actually written by our WM magnification, under its global lock. */
     static final java.util.Map<Object, Object> sMagnifiedSurfaces =
@@ -635,6 +636,11 @@ public class HostEntry implements IXposedHookLoadPackage {
 
     /** v0.7.0：角部热区 + 广播触发；首次触发再启动宿主，之后切换显示。 */
     private static void installTriggers() { HostEntrySupport.INSTANCE.installTriggers(); }
+
+    /** v1.0.4：原生 finishFixedRotationTransform 是否应被抑制（租约/共享状态判定）。 */
+    static boolean retainTaskRotationOnNativeFinishLocked(Object activity) {
+        return HostEntryTopRotation.retainTaskRotationOnNativeFinishLocked(activity);
+    }
 
     /** 锁屏保留工作区：原生亮屏/解锁事件先于 SCREEN_ON 广播到达时提前恢复工作区。 */
     private static void installRetainedWorkspaceWakeHooks(ClassLoader cl) {

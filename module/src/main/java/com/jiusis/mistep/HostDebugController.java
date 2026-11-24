@@ -148,8 +148,7 @@ final class HostDebugController {
                 final LiveTask resolved = task;
                 Object organizer = h.shellOrganizer();
                 Object leash = organizer == null ? null
-                        : XposedHelpers.callMethod(organizer, "getTaskLeash",
-                                new Class<?>[]{int.class}, resolved.id);
+                        : ShellCompat.taskLeash(organizer, resolved.id);
                 if (leash == null
                         || !Boolean.TRUE.equals(XposedHelpers.callMethod(leash, "isValid"))) {
                     MiStepHost.log("leash anim POC: no leash task=" + resolved.id);

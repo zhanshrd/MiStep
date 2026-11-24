@@ -88,6 +88,7 @@ TopTaskGeometry topGeometry() {
     }
 
     void beginWindowDrag(MotionEvent event) {
+        if (h.isSideMotionRunning()) h.finishSideScroll();
         h.dragMoved = false;
         h.dragStartRawX = event.getRawX();
         h.dragStartRawY = event.getRawY();
@@ -183,9 +184,10 @@ TopTaskGeometry topGeometry() {
     }
 
     Slot slotAtPoint(float x, float y) {
-        if (h.layout == null) return null;
+        if (!h.isInSideViewport(x, y)) return null;
         for (Slot slot : h.slots) {
             if (slot.index <= MiStepHost.SLOT_MAIN || slot.index >= h.CELL_SLOT_COUNT || slot.rect == null) continue;
+            if (slot.sideRow >= 0 && !slot.sideShown) continue;
             if (x >= slot.rect[0] && x < slot.rect[2]
                     && y >= slot.rect[1] && y < slot.rect[3]) return slot;
         }
@@ -250,8 +252,15 @@ TopTaskGeometry topGeometry() {
             }
             Method m = slot.view.getClass().getMethod("setObscuredTouchRegion", Region.class);
             // Only side cells exist. Their own scaled contents still use targeted injection.
-            Object arg = h.liveSwapInputBlocked ? new Region(0, 0, h.screenW, h.screenH) : slot.index==MiStepHost.SLOT_TOP ? null : slot.rect == null ? null
-                    : new Region(slot.rect[0], slot.rect[1], slot.rect[2], slot.rect[3]);
+            Region arg = null;
+            if (h.liveSwapInputBlocked || (slot.sideRow >= 0 && !slot.sideShown)) {
+                arg = new Region(0, 0, h.screenW, h.screenH);
+            } else if (slot.index != MiStepHost.SLOT_TOP && slot.rect != null) {
+                int[] rect = slot.rect;
+                Rect visible = new Rect(rect[0], rect[1], rect[2], rect[3]);
+                arg = slot.sideRow >= 0 && !h.clipToSideViewport(visible)
+                        ? new Region(0, 0, h.screenW, h.screenH) : new Region(visible);
+            }
             m.invoke(slot.view, arg);
         } catch (Throwable t) {
             MiStepHost.log("updateTouchRegion slot=" + slot.index + " failed: " + t);
@@ -365,7 +374,10 @@ TopTaskGeometry topGeometry() {
     }
 
     float scaleFor(Slot slot) {
-        return slot.index == MiStepHost.SLOT_TOP ? topGeometry().scale : h.layout.cellScale(slot.index - 1);
+        if (slot.sideRow >= 0 && slot.rect != null)
+            return Math.min((slot.rect[2] - slot.rect[0]) / (float) h.screenW,
+                    (slot.rect[3] - slot.rect[1]) / (float) h.screenH);
+        return slot.index == MiStepHost.SLOT_TOP ? h.topGeometry().scale : h.layout.cellScale(slot.index - 1);
     }
 
     void applySlotScale(Slot slot) {
@@ -467,6 +479,7 @@ TopTaskGeometry topGeometry() {
                 }
             }
             XposedHelpers.callMethod(tx, "setMatrix", sc, k, 0f, 0f, k);
+            h.appendSlotViewport(tx, slot);
             XposedHelpers.callMethod(tx, "apply");
             return true;
         } catch (Throwable t) {
@@ -475,6 +488,21 @@ TopTaskGeometry topGeometry() {
         } finally {
             h.closeSurfaceObject(tx, "close");
         }
+    }
+
+    void appendSlotViewport(Object tx, Slot slot) {
+        if (h.holdsLiveFlipZoom() || slot == null || slot.index <= MiStepHost.SLOT_MAIN
+                || slot.view == null || !h.canRender(slot) || slot.promoting || slot.launching
+                || slot.frozen || !h.mayWriteSideSurface(slot)
+                || !h.controllerOwns(slot, slot.taskId, slot.taskToken)) return;
+        Object parent = MiStepHost.getSurfaceField(slot.controller, "mSurfaceControl");
+        if (parent == null || !Boolean.TRUE.equals(XposedHelpers.callMethod(parent, "isValid"))) return;
+        Rect crop = new Rect(0, 0, slot.view.getWidth(), slot.view.getHeight());
+        Rect viewClip = slot.view.getClipBounds();
+        if (crop.isEmpty() || viewClip != null && !crop.intersect(viewClip)) return;
+        // Never rotate, move or scale this parent. TaskView's own render thread
+        // continues to place it, including TOP's live roll/collection clipping.
+        XposedHelpers.callMethod(tx, "setWindowCrop", parent, crop);
     }
 
     boolean applyWct(String what, Object wct) {

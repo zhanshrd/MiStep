@@ -61,8 +61,9 @@ import de.robv.android.xposed.XposedHelpers;
         MiStepLayout previousLayout;
         MiStepLayout targetLayout;
         boolean candidateRecovery;
-        boolean liveMainReveal;
-        Object liveRevealSurface;
+        volatile boolean liveMainReveal;
+        boolean restoreMainOpacityAfterHandoff;
+        MiStepTopTaskTransition revealTransition;
         volatile boolean nativeSubmitted;
         volatile boolean cancelRequested;
         volatile boolean nativeCompleting;
@@ -95,7 +96,8 @@ import de.robv.android.xposed.XposedHelpers;
                 // A parked/frozen or already hidden cell is not a live peer that can
                 // block promotion. Requiring it visible caused spurious rollbacks
                 // after the user returned from Home with a stale side binding.
-                if (other != slot && other.occupied && !other.parked && !other.frozen
+                if (other != slot && (other.sideRow < 0 || other.sideShown)
+                        && other.occupied && !other.parked && !other.frozen
                         && other.taskVisible && other.taskToken != null) {
                     otherSideTokens.add(other.taskToken);
                 }

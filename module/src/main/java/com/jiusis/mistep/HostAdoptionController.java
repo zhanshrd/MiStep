@@ -1,11 +1,13 @@
 package com.jiusis.mistep;
 
+import android.content.ComponentName;
 import android.content.Intent;
 import android.os.Binder;
 import android.os.Looper;
 import android.os.UserHandle;
 import android.graphics.Rect;
 import android.view.View;
+import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import android.os.SystemClock;
 import de.robv.android.xposed.XposedHelpers;
@@ -129,11 +131,18 @@ final class HostAdoptionController {
 
     void returnToSystem(Slot slot, boolean front, boolean liveMainReveal,
             Runnable success, Consumer<String> failure) {
+        returnToSystem(slot, front, liveMainReveal, false, success, failure);
+    }
+
+    /** nativeAlreadyFullscreen：桌面/外部启动已把任务自己带回全屏，只需等 Shell 空闲后清 TaskView 残留覆盖。 */
+    void returnToSystem(Slot slot, boolean front, boolean liveMainReveal,
+            boolean nativeAlreadyFullscreen, Runnable success, Consumer<String> failure) {
         Promotion ticket = new Promotion(slot, new Slot[0]);
         ticket.background = !front;
-        ticket.liveMainReveal = liveMainReveal;
-        if(liveMainReveal && h.topCtrl.topTransition!=null) {
-            h.topCtrl.topTransition.setNativeRestore(()->{
+        ticket.revealTransition = liveMainReveal ? h.topCtrl.topTransition : null;
+        ticket.liveMainReveal = ticket.revealTransition!=null;
+        if(ticket.liveMainReveal) {
+            ticket.revealTransition.setNativeRestore(()->{
                 ticket.liveMainReveal=false;
                 h.promotionController.restoreTopMainOpacity(ticket);
             });
@@ -159,12 +168,25 @@ final class HostAdoptionController {
                     return;
                 }
                 Object current = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
+                if (nativeAlreadyFullscreen) {
+                    if (!h.ordinaryRoot(core, 1) || (current != null && !ticket.token.equals(current)))
+                        throw new IllegalStateException("native fullscreen handback changed identity or mode");
+                    observation = h.observeNativeCommit(ticket.token,
+                            () -> finishNativeReturnWhenIdle(ticket, success, failure));
+                    return;
+                }
                 if (current == null && h.ordinaryRoot(core, 1)) {
                     h.main.post(() -> checkReturned(slot, ticket, 0, success, failure));
                     return;
                 }
                 if (!ticket.token.equals(current))
                     throw new IllegalStateException("return controller identity changed");
+                // 桌面点开了一个「退出后保留」的副窗：等窗口真正绘制提交后再确认归还，
+                // 避免半透明残留闪一帧。
+                if (!ticket.background && h.retainedOnExit && h.scene == MiStepHost.SUSPENDED && h.ordinaryRoot(core, 6)) {
+                    applyRetainedDesktopReturn(ticket, success, failure);
+                    return;
+                }
                 observation = h.observeNativeCommit(ticket.token, () -> checkReturned(slot, ticket, 0, success, failure));
                 if (!h.applyWct("return-live-task", h.promotionController.fullscreenExitTransaction(ticket)))
                     throw new IllegalStateException("return transaction failed");
@@ -177,6 +199,69 @@ final class HostAdoptionController {
                 });
             }
          })) { h.transferBusy = false; slot.promoting = slot.frozen; failure.accept("no Shell queue"); }
+    }
+
+    private void finishNativeReturnWhenIdle(Promotion ticket, Runnable success, Consumer<String> failure) {
+        Slot slot = ticket.slot;
+        Consumer<String> failed = error -> {
+            h.transferBusy = false;
+            if (returnTicketCurrent(ticket)) slot.promoting = slot.frozen;
+            failure.accept(error);
+        };
+        if (!h.executeOnShell(() -> {
+            try {
+                Object shell = XposedHelpers.getObjectField(h.transitions, "mTransitions");
+                ShellCompat.call(shell, "runOnIdle", (Runnable) () -> {
+                    try {
+                        if (!returnTicketCurrent(ticket))
+                            throw new IllegalStateException("stale native return ticket");
+                        Object core = h.rootInfo(new LiveTask(ticket.taskId, ticket.token, slot.pkg));
+                        if (core != null) {
+                            Object current = XposedHelpers.getObjectField(slot.controller, "mTaskToken");
+                            if (!h.ordinaryRoot(core, 1) || (current != null && !ticket.token.equals(current)))
+                                throw new IllegalStateException("native return no longer owns __HOST__ binding");
+                            Object cleanup = Class.forName("android.window.WindowContainerTransaction")
+                                    .getDeclaredConstructor().newInstance();
+                            h.appendTaskViewExitOverrides(cleanup, ticket);
+                            if (h.scene == MiStepHost.SUSPENDED && h.retainedOnExit && ticket.token.equals(current)
+                                    && !XposedHelpers.getBooleanField(core, "isVisible")) {
+                                // The old, hidden TaskView can carry its hidden flag into mode 1.
+                                XposedHelpers.callMethod(cleanup, "setHidden", ticket.token, false);
+                            }
+                            if (!h.applyWct("clear-native-launch-overrides", cleanup))
+                                throw new IllegalStateException("native return override cleanup failed");
+                        }
+                        h.main.post(() -> checkReturned(slot, ticket, 0, success, failure));
+                    } catch (Throwable error) {
+                        h.main.post(() -> failed.accept(error.toString()));
+                    }
+                });
+            } catch (Throwable error) {
+                h.main.post(() -> failed.accept(error.toString()));
+            }
+        })) failed.accept("no Shell queue for native fullscreen handback");
+    }
+
+    private void applyRetainedDesktopReturn(Promotion ticket, Runnable success,
+            Consumer<String> failure) throws Exception {
+        ticket.restoreMainOpacityAfterHandoff = true;
+        ShellCompat.applySynchronized(h.transitions, ticket.slot.controller,
+                h.fullscreenExitTransaction(ticket), sync -> {
+                    Runnable confirm = () -> checkReturned(ticket.slot, ticket, 0, success, failure);
+                    try {
+                        XposedHelpers.callMethod(sync, "addTransactionCommittedListener",
+                                (Executor) h.main::post, confirm);
+                    } catch (Throwable unavailable) {
+                        MiStepHost.log("retained desktop draw commit signal unavailable task=" + ticket.taskId);
+                        h.main.post(confirm);
+                    }
+                });
+        MiStepHost.log("retained desktop return waiting for window draw task=" + ticket.taskId);
+    }
+
+    /** 桌面点开保留副窗：等交接事务提交后统一恢复主区不透明度。 */
+    void restoreRetainedMainOpacityAfterHandoff(Promotion ticket) {
+        h.promotionController.restoreMainOpacity(ticket, "restore-retained-main-opacity", true);
     }
 
     boolean returnTicketCurrent(Promotion ticket) {
@@ -258,10 +343,47 @@ final class HostAdoptionController {
     }
 
     void promoteExternalLaunch(Slot slot) {
+        if (slot != null && h.retainedOnExit && h.scene == MiStepHost.SUSPENDED) {
+            releaseRetainedTaskToMain(slot, true);
+            return;
+        }
         if (slot == null || slot.index <= MiStepHost.SLOT_MAIN || !h.isActive(slot)) return;
         MiStepHost.log("external launcher launch detected slot=" + slot.index
                 + " task=" + slot.taskId + " mode=" + slot.windowMode + "; promote");
         queueSidePromotion(slot, false);
+    }
+
+    void releaseRetainedTaskToMain(Slot slot) {
+        releaseRetainedTaskToMain(slot, false);
+    }
+
+    void releaseRetainedTaskToMain(Slot slot, boolean nativeAlreadyFullscreen) {
+        if (!h.retainedOnExit || h.scene != MiStepHost.SUSPENDED || slot == null || !slot.occupied
+                || slot.parked || slot.promoting || h.transferBusy || slot.taskId < 0 || slot.taskToken == null) return;
+        int taskId = slot.taskId;
+        Object token = slot.taskToken;
+        MiStepHost.log("desktop opened retained task=" + taskId + "; keep it in the main area");
+        returnToSystem(slot, true, false, nativeAlreadyFullscreen, () -> {
+            if (slot.taskId == taskId && token.equals(slot.taskToken)) h.clearSlot(slot);
+            h.retainedOnExit = h.hasBoundTasks();
+            MiStepHost.log("desktop task released from hidden workspace id=" + taskId);
+            h.publishDesktopSideTasks();
+        }, error -> MiStepHost.log("desktop task remains bound after handoff failure id=" + taskId + ": " + error));
+    }
+
+    void finishExternalTopLaunch(Slot upper) {
+        if (h.scene != MiStepHost.ACTIVE || h.promotion != null || h.transferBusy || upper.promoting) return;
+        returnToSystem(upper, true, false, true, () -> {
+            h.clearSlot(upper);
+            if (h.topCtrl.topFace && h.topCtrl.topRoll != null) {
+                h.topCtrl.topRoll.reset(false);
+                h.topCtrl.topRollSettled(false);
+            }
+            h.finishPendingSuspend();
+        }, error -> {
+            MiStepHost.log("native TOP launch handback failed: " + error);
+            h.finishPendingSuspend();
+        });
     }
 
     /**
@@ -528,26 +650,37 @@ final class HostAdoptionController {
     }
 
     void preannounceDesktopLaunch(android.os.Bundle binding) {
-        if (binding == null || h.scene != MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked
-                || binding.getLong("scene", -1L) != h.sceneEpoch) return;
+        if (binding == null || !h.screenOn || h.keyguardLocked) return;
+        final boolean hostRoute = binding.getBoolean("hostRoute", false);
+        final boolean registeredAsRetained = binding.getBoolean("retainedRoute", false);
+        final long registeredScene = binding.getLong("scene", -1L);
+        final boolean retainedRoute = hostRoute && h.retainedOnExit && (h.scene == MiStepHost.SUSPENDING || h.scene == MiStepHost.SUSPENDED)
+                && registeredScene >= 0 && registeredScene == (registeredAsRetained ? h.sceneEpoch : h.retainedExitSourceEpoch);
+        if (!retainedRoute && (h.scene != MiStepHost.ACTIVE || registeredAsRetained || registeredScene != h.sceneEpoch)) return;
         int taskId = binding.getInt("taskId", -1);
         android.os.IBinder token = binding.getBinder("task");
         for (Slot slot : h.slots) {
-            if (slot.index <= 0 || !slot.occupied || slot.parked || slot.frozen
+            if (!h.isActive(slot) || !slot.occupied || slot.parked || slot.frozen || slot.closing || slot.nativeReleasePending
                     || slot.taskId != taskId || slot.taskToken == null
                     || slot.taskEpoch != binding.getLong("binding", -1L)
                     || !java.util.Objects.equals(slot.pkg, binding.getString("package"))) continue;
             try {
                 if (!java.util.Objects.equals(token, XposedHelpers.callMethod(slot.taskToken, "asBinder"))) return;
-                MiStepHost.log("desktop launch preannounced exact task=" + taskId + " slot=" + slot.index);
-                if (binding.getBoolean("hostRoute", false)) {
+                if (hostRoute) {
                     if (SystemClock.uptimeMillis() > binding.getLong("deadline", 0L)) {
                         MiStepHost.log("desktop host route expired without changing task=" + taskId); return;
                     }
-                    if (slot.windowMode != 6 || !h.mayWriteSideSurface(slot)) return;
-                    if (h.transferBusy || h.promotion != null || slot.promoting || slot.launching) {
+                    if (h.scene == MiStepHost.SUSPENDING || h.transferBusy || h.promotion != null || slot.promoting || slot.launching
+                            || h.sideScroll.sideCompacting || h.sideScroll.sideDesktopRevealing || h.sideDismiss != null) {
                         h.main.postDelayed(() -> preannounceDesktopLaunch(binding), 32L);
-                    } else {
+                    } else if (retainedRoute) {
+                        MiStepHost.log("desktop launch preannounced retained task=" + taskId + " slot=" + slot.index);
+                        releaseRetainedTaskToMain(slot);
+                    } else if (slot.windowMode == 6 && h.mayWriteSideSurface(slot)) {
+                        if (h.sideScroll.sideScrolling && slot.sideRow >= 0 && !h.sideRowInPlace(slot)) {
+                            h.revealSideTaskForDesktop(slot, binding);
+                            return;
+                        }
                         MiStepHost.log("desktop host route uses real promotion task=" + taskId);
                         h.onSlotTapped(slot.index);
                     }
@@ -555,6 +688,14 @@ final class HostAdoptionController {
             } catch (Throwable unavailable) { MiStepHost.log("desktop preannouncement rejected: " + unavailable); }
             return;
         }
+    }
+
+    boolean sideTaskMatchesEntry(Slot slot, int user, ComponentName entry) {
+        if (!sideTaskMatchesUser(slot, user)) return false;
+        try {
+            Object info = XposedHelpers.getObjectField(slot.controller, "mTaskInfo");
+            return TaskLaunchIdentity.matches(h.ctx.getPackageManager(), entry, info);
+        } catch (Throwable unavailable) { return false; }
     }
 
     boolean sideTaskMatchesUser(Slot slot, int user) {

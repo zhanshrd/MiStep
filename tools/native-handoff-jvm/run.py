@@ -20,24 +20,29 @@ files={
 'android/view/SurfaceControl.java': '''package android.view;
 public class SurfaceControl {
  public static java.util.List<String> events=new java.util.ArrayList<>();
- public static class Layer {public Object parent;public float scale=1;public boolean shown;}
+ public static java.util.List<Runnable> commits=new java.util.ArrayList<>();
+ public static class Layer {public Object parent;public float sx=1,sy=1,x,y;public boolean shown;}
  public Layer layer;public boolean valid=true;public int releases;
  public SurfaceControl(){layer=new Layer();}public SurfaceControl(SurfaceControl other){layer=other.layer;}
  public boolean isValid(){return valid;}public void release(){valid=false;releases++;}
  public static class Transaction {
   java.util.List<Runnable> ops=new java.util.ArrayList<>();public boolean closed;
+  java.util.List<Runnable> callbacks=new java.util.ArrayList<>();
   public Transaction reparent(SurfaceControl s,Object p){ops.add(()->{s.layer.parent=p;events.add(p==null?"detach":"attach");});return this;}
-  public Transaction setMatrix(SurfaceControl s,float a,float b,float c,float d){ops.add(()->s.layer.scale=a);return this;}
-  public Transaction setPosition(SurfaceControl s,float x,float y){return this;}
+  public Transaction setMatrix(SurfaceControl s,float a,float b,float c,float d){ops.add(()->{s.layer.sx=a;s.layer.sy=d;});return this;}
+  public Transaction setPosition(SurfaceControl s,float x,float y){ops.add(()->{s.layer.x=x;s.layer.y=y;});return this;}
   public Transaction setWindowCrop(SurfaceControl s,android.graphics.Rect r){return this;}
   public Transaction setAlpha(SurfaceControl s,float a){return this;}
   public Transaction show(SurfaceControl s){ops.add(()->s.layer.shown=true);return this;}
   public Transaction hide(SurfaceControl s){ops.add(()->s.layer.shown=false);return this;}
-  public void apply(){for(var op:ops)op.run();ops.clear();}public void close(){closed=true;}
+  public void addTransactionCommittedListener(java.util.concurrent.Executor executor,Runnable callback){
+   callbacks.add(()->executor.execute(callback));
+  }
+  public void apply(){for(var op:ops)op.run();ops.clear();commits.addAll(callbacks);callbacks.clear();}public void close(){closed=true;}
  }
 }''',
 'com/jiusis/mistep/NativeHandoffRegression.java': r'''package com.jiusis.mistep;
-import android.graphics.Rect;import android.view.SurfaceControl;import java.util.*;
+import android.graphics.Rect;import android.view.SurfaceControl;import java.util.*;import java.util.concurrent.Executor;
 public class NativeHandoffRegression {
  static int checks;static void check(boolean ok,String why){checks++;if(!ok)throw new AssertionError(why);}
  public static class Info {public int taskId=88,displayId,userId;public Object token=new Object();public boolean isVisible=true;
@@ -59,9 +64,13 @@ public class NativeHandoffRegression {
    mTaskLeash.release();mTaskLeash=null;mTaskToken=null;
   }}
  static class Slot {Object controller;String pkg="com.android.settings";}
- static class Promotion {boolean handoffAttempted,cancelled,candidateRecovery,background,handoffComplete,liveMainReveal;
-  Slot slot=new Slot();int taskId=88;Object token,liveRevealSurface;}
- static class TopTransition {Object surface;void setLiveSurface(Object s){surface=s;}}
+ static class Promotion {boolean handoffAttempted,cancelled,candidateRecovery,background,handoffComplete,liveMainReveal,restoreMainOpacityAfterHandoff;
+  Slot slot=new Slot();int taskId=88;Object token;MiStepTopTaskTransition revealTransition;}
+ static class MiStepTopTaskTransition {
+  TopTaskReturnPolicy.RevealFrame initial;
+  Object surface;void setLiveSurface(Object s){surface=s;}
+  TopTaskReturnPolicy.RevealFrame initialRevealFrame(){return initial;}
+ }
  static class XposedHelpers {
   static Object getObjectField(Object o,String n){try{var f=o.getClass().getDeclaredField(n);f.setAccessible(true);return f.get(o);}catch(Exception e){throw new RuntimeException(e);}}
   static int getIntField(Object o,String n){return (Integer)getObjectField(o,n);}static boolean getBooleanField(Object o,String n){return (Boolean)getObjectField(o,n);}
@@ -77,13 +86,18 @@ public class NativeHandoffRegression {
    if(n.equals("removeListener")){var org=(Organizer)o;org.assigned=org.mTaskListeners.get(-2);SurfaceControl.events.add("fallback");return null;}
    return XposedHelpers.callMethod(o,n,args);
   }}
- static class TopTaskReturnPolicy {static final float CENTER_START_SCALE=.14f;static float centeredOffset(int size,float scale){return size*(1-scale)/2;}}
- int screenW=1080,screenH=2460;Object transitions=new Object();TopTransition topTransition;
+ int screenW=1080,screenH=2460;Object transitions=new Object();
+ static class Handler {void post(Runnable callback){callback.run();}}
+ Handler main=new Handler();
+ void restoreRetainedMainOpacityAfterHandoff(Promotion p){
+  check(p.handoffComplete,"opacity waits for completion of canonical parent transfer");
+  SurfaceControl.events.add("restore opacity");
+ }
  boolean supportsTaskUser(int id){return id==0;}Object getSurfaceField(Object o,String n){return XposedHelpers.getObjectField(o,n);}
  void closeSurfaceObject(Object o,String n){if(o!=null)XposedHelpers.callMethod(o,n);}void log(String s){}void traceSwapEvent(String s){}
  __METHOD__
  static class Fixture {NativeHandoffRegression h=new NativeHandoffRegression();Controller c=new Controller();Appeared a=new Appeared();Promotion p=new Promotion();SurfaceControl copy;
-  Fixture(){SurfaceControl.events.clear();p.slot.controller=c;p.token=a.info.token;c.mTaskToken=p.token;copy=new SurfaceControl(a.canonical);c.mTaskLeash=copy;
+  Fixture(){SurfaceControl.events.clear();SurfaceControl.commits.clear();p.slot.controller=c;p.token=a.info.token;c.mTaskToken=p.token;copy=new SurfaceControl(a.canonical);c.mTaskLeash=copy;
    a.canonical.layer.parent=new Object();c.mTaskOrganizer.mTasks.put(88,a);c.mTaskOrganizer.mTaskListeners.put(-2,new Object());c.mTaskOrganizer.assigned=c;}
   void run()throws Throwable{h.handoffPromotedTask(p);}}
  public static void main(String[]args)throws Throwable{
@@ -94,8 +108,20 @@ public class NativeHandoffRegression {
   check(f.p.handoffComplete&&f.c.mTaskToken==null&&f.c.mTaskOrganizer.assigned==f.c.mTaskOrganizer.mTaskListeners.get(-2),"native fullscreen owns same task after cleanup");
   check(SurfaceControl.events.lastIndexOf("attach")>SurfaceControl.events.lastIndexOf("detach"),"final display attachment follows native detach");
   int events=SurfaceControl.events.size();f.run();check(SurfaceControl.events.size()==events&&f.c.vanished==1,"completed handoff cannot detach twice");
-  f=new Fixture();f.p.liveMainReveal=true;f.h.topTransition=new TopTransition();f.run();
-  check(f.a.canonical.layer.parent==f.c.mTaskOrganizer.area.parent&&f.a.canonical.layer.scale==.14f&&f.h.topTransition.surface==f.a.canonical,"live reveal gets attached canonical at center scale");
+  for(var frame:new TopTaskReturnPolicy.RevealFrame[]{
+    TopTaskReturnPolicy.centeredFrame(1080,2460),new TopTaskReturnPolicy.RevealFrame(440f,0f,.42f,1f),null}) {
+   f=new Fixture();f.p.liveMainReveal=true;var reveal=new MiStepTopTaskTransition();reveal.initial=frame;f.p.revealTransition=reveal;f.run();
+   var actual=f.a.canonical.layer;var expected=frame==null?TopTaskReturnPolicy.RevealFrame.FULL:frame;
+   check(actual.parent==f.c.mTaskOrganizer.area.parent&&actual.sx==expected.scaleX&&actual.sy==expected.scaleY
+      &&actual.x==expected.x&&actual.y==expected.y,"canonical reparent uses the same initial frame as the live reveal");
+   check(f.p.liveMainReveal==(frame!=null)&&reveal.surface==(frame!=null?f.a.canonical:null),"closed reveal attaches full-size without receiving the native leash");
+  }
+  f=new Fixture();f.p.restoreMainOpacityAfterHandoff=true;f.run();
+  check(SurfaceControl.commits.size()==1&&!SurfaceControl.events.contains("restore opacity"),
+        "real desktop stays behind the app until the canonical surface transaction commits");
+  SurfaceControl.commits.get(0).run();
+  check(SurfaceControl.events.lastIndexOf("restore opacity")>SurfaceControl.events.lastIndexOf("attach"),
+        "canonical reparent commit restores the original opacity policy");
   f=new Fixture();f.p.background=true;f.run();check(!f.a.canonical.layer.shown&&f.a.canonical.layer.parent==f.c.mTaskOrganizer.area.parent,"background return attaches without stealing visibility");
   f=new Fixture();f.c.mTaskToken=null;f.c.mTaskOrganizer.assigned=f.c.mTaskOrganizer.mTaskListeners.get(-2);f.run();
   check(f.c.vanished==0&&f.p.handoffComplete&&f.a.canonical.layer.parent==f.c.mTaskOrganizer.area.parent,"already-native owner never receives old callback");
@@ -112,5 +138,6 @@ paths=[]
 for name,text in files.items():
     p=out/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text,encoding='utf-8');paths.append(str(p))
 jdk=Path(os.environ['MISTEP_JAVA_BIN'])
-subprocess.run([str(jdk/'javac.exe'),'-encoding','UTF-8','--release','17','-d',str(out),str(src/'TaskHandoffPolicy.java'),*paths],check=True)
+subprocess.run([str(jdk/'javac.exe'),'-encoding','UTF-8','--release','17','-d',str(out),str(src/'TaskHandoffPolicy.java'),
+    str(src/'TopTaskReturnPolicy.java'),*paths],check=True)
 subprocess.run([str(jdk/'java.exe'),'-cp',str(out),'com.jiusis.mistep.NativeHandoffRegression'],check=True)

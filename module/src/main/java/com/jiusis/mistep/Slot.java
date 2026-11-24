@@ -50,6 +50,10 @@ import de.robv.android.xposed.XposedHelpers;
         int taskId = -1;
         Object taskToken;
         int[] rect;
+        /** v1.0.4 无限小窗：本槽在滚动行序列中的行号（<0 = 固定格，不参与侧栏滚动）。 */
+        int sideRow = -1;
+        volatile boolean sideShown, sidePrepared;
+        Object sideViewportParent, sideViewportSurface;
         int windowMode = -1;
         TaskWindowState windowState;
         boolean occupied;

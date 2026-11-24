@@ -100,7 +100,7 @@ final class HostTopTaskController {
     void setTaskCellsCovered(boolean covered) {
         if (h.taskCellsCovered == covered) return;
         h.taskCellsCovered = covered;
-        for (int i = 1; i < h.CELL_SLOT_COUNT; i++) h.updateHint(h.slots[i]);
+        for (Slot slot : h.slots) if (slot.index > MiStepHost.SLOT_MAIN && slot.index != MiStepHost.SLOT_TOP) h.updateHint(slot);
         if (h.root != null) { h.root.requestLayout(); h.root.invalidate(); }
     }
 
@@ -128,7 +128,7 @@ final class HostTopTaskController {
                 if(!topCollectionSourceCurrent(organizer,selected,source))return false;
             }
             boolean started=startTopTaskTransition(true,false,transfer,source,
-                    ()->topCollectionSourceCurrent(organizer,selected,source),upper.view);
+                    ()->topCollectionSourceCurrent(organizer,selected,source),upper.view,null);
             if(started) {
                 MiStepTopTaskTransition prepared=topTransition;
                 prepared.setNativeRestore(()->setTopCollectionTranslucent(selected,false));
@@ -194,15 +194,20 @@ final class HostTopTaskController {
     }
 
     private boolean startLiveMainRevealTransition(Runnable transfer) {
-        return startTopTaskTransition(false,true,transfer);
+        return startLiveMainRevealTransition(transfer, null);
+    }
+
+    private boolean startLiveMainRevealTransition(Runnable transfer, TopTaskReturnPolicy.RevealFrame initial) {
+        return startTopTaskTransition(false,true,transfer,null,null,null,initial);
     }
 
     private boolean startTopTaskTransition(boolean intoTop, boolean liveMainReveal, Runnable transfer) {
-        return startTopTaskTransition(intoTop,liveMainReveal,transfer,null,null,null);
+        return startTopTaskTransition(intoTop,liveMainReveal,transfer,null,null,null,null);
     }
 
     private boolean startTopTaskTransition(boolean intoTop, boolean liveMainReveal, Runnable transfer,
-            Object source,java.util.function.BooleanSupplier sourceCurrent,View destination) {
+            Object source,java.util.function.BooleanSupplier sourceCurrent,View destination,
+            TopTaskReturnPolicy.RevealFrame initial) {
         if(h.root==null || topTransition!=null)return false;
         if(intoTop ? source==null || sourceCurrent==null || destination==null : !liveMainReveal)return false;
         final long epoch=h.sceneEpoch;
@@ -214,7 +219,7 @@ final class HostTopTaskController {
                     transfer,closed->{
                         if(topTransition==closed)topTransition=null;
                         h.finishPendingSuspend();
-                    },MiStepHost::log);
+                    },MiStepHost::log,initial);
             if(intoTop)topTransition.collect(source,sourceCurrent,destination);
             topTransition.start();
             return true;
@@ -447,9 +452,12 @@ final class HostTopTaskController {
                             h.topCtrl.cancelTopTaskTransition();
                             MiStepHost.log("upper horizontal handback stopped; binding retained: "+error);release.run();
                         });
-                        // Keep the real task small during native ownership transfer,
-                        // then expand that same canonical Surface in the main area.
-                        if(!intoMain || !h.topCtrl.startLiveMainRevealTransition(handback))handback.run();
+                        if(!intoMain) {handback.run();return;}
+                        int[] bounds=upper.rect;
+                        TopTaskReturnPolicy.RevealFrame initial=TopTaskReturnPolicy.tabletPushFrame(
+                                upper.view.getX(),upper.view.getY(),bounds[2]-bounds[0],bounds[3]-bounds[1],
+                                h.layout.mainOffsetX,h.layout.mainOffsetY,h.layout.mainScale,h.screenW,h.screenH);
+                        if(!h.topCtrl.startLiveMainRevealTransition(handback,initial))handback.run();
                     },MiStepHost::log);
             h.sideDismiss=run[0];h.sideDismissSlot=upper;
             MiStepClipboard.get(h.ctx).close();MiStepScanner.closeImmediately();
@@ -506,7 +514,7 @@ final class HostTopTaskController {
         topSelectionPending=manual; prepareLiveTopRoll(); topRoll.show(true);
     }
 
-    private void topRollSettled(boolean taskFace) {
+    void topRollSettled(boolean taskFace) {
         if(h.root==null || h.scene!=MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked)return;
         if(h.layout.tabletLandscape) {
             topFace=true;topSelectionPending=false;
@@ -688,20 +696,41 @@ final class HostTopTaskController {
         releaseTopTask(front,dismissed,after,false);
     }
 
-    private void releaseTopTask(boolean front, boolean dismissed, Runnable after,
+    void releaseTopTask(boolean front, boolean dismissed, Runnable after,
             boolean liveMainReveal) {
+        if (front && topTransition != null) return;
         final Slot upper=h.slots[MiStepHost.SLOT_TOP];
         final long binding=upper.taskEpoch;
         final int taskId=upper.taskId;
         final Object token=upper.taskToken;
-        // A two-finger return already has the roll animation; only explicit main transfer collapses.
-        if(front && topTransition==null && topReady() && h.slots[MiStepHost.SLOT_TOP].occupied
+        java.util.function.BooleanSupplier stillBound = () -> upper.taskEpoch == binding
+                && upper.taskId == taskId && java.util.Objects.equals(upper.taskToken, token);
+        // Explicit returns roll the real TOP and control faces before changing the task's mode.
+        if(front && topReady() && h.slots[MiStepHost.SLOT_TOP].occupied
                 && !h.slots[MiStepHost.SLOT_TOP].promoting && !h.suspendRequested
                 && startLiveMainRevealTransition(()->{
-                    if(upper.taskEpoch!=binding || upper.taskId!=taskId || !java.util.Objects.equals(upper.taskToken,token)) {
-                        cancelTopTaskTransition();return;
+                    if (!stillBound.getAsBoolean()) {
+                        cancelTopTaskTransition();
+                        return;
                     }
-                    releaseTopTaskNow(front,dismissed,after,true);
+                    final MiStepTopTaskTransition bridge = topTransition;
+                    Runnable handBack = () -> {
+                        if (topTransition != bridge) {
+                            if (topTransition == null && topReady() && topFace)
+                                topRoll.reset(true);
+                            return;
+                        }
+                        if (!stillBound.getAsBoolean()) {
+                            cancelTopTaskTransition();
+                            if (topReady() && topFace) topRoll.reset(true);
+                            return;
+                        }
+                        releaseTopTaskNow(front, dismissed, after, true);
+                    };
+                    if (topFace && !h.layout.tabletLandscape) {
+                        prepareLiveTopRoll();
+                        topRoll.show(false, handBack);
+                    } else handBack.run();
                 }))return;
         releaseTopTaskNow(front,dismissed,after,liveMainReveal);
     }
@@ -746,6 +775,8 @@ final class HostTopTaskController {
             MiStepHost.log("upper task returned alive="+task.id+" front="+bringingFront+" dismissed="+dismissed);
         },error->{
             cancelTopTaskTransition();
+            if (front && liveMainReveal && topFace && topRoll != null && !h.layout.tabletLandscape)
+                topRoll.reset(true);
             topTaskPane.message("收回未确认，保留原任务："+error);
             if(!topFace) {topFace=true;h.topBar.setVisibility(View.INVISIBLE);topTaskPane.setVisibility(View.VISIBLE);}
             h.updateHint(upper);h.root.requestLayout();MiStepHost.log("upper return stopped: "+error);h.finishPendingSuspend();

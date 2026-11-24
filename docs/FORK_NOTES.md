@@ -220,3 +220,41 @@ git diff 32555b4...upstream/main --stat    # 上游改动面
 
 ### 真机回归结果（2026-11-17，操作者实测「试了没啥问题」）
 1.4.0 签名包（dist/MiStep-1.4.0.apk，SHA256 be561fae…）实机验证通过。祖先对齐 merge（1949b28）随之落库：`git merge upstream/main` 全部冲突按 ours 解决 + 还原 test.ps1 自动合并混入的平台改动，**合并树 == 合并前树（9e3c031e）逐字节一致**，仅使上游 48e96f4 成为 main 祖先——GitHub fork「behind JIUSIS:main」横幅清零。**未来同步的标准姿势 = §12/§14 语义移植 + 收尾祖先对齐 merge**（内容永远只走语义移植提交；merge 提交本身必须是零内容变更）。
+## 15. v1.0.4 上游移植（2026-11-24，移植基线 48e96f4 → 7e6131c，fork 1.4.1）
+
+**移植方式**：语义移植（§11 手册）。上游 3 个提交（56b3145/ebaca05 Release 1.0.4 + 7e6131c docs），86 文件 +6185/−719；上游 11-20 还原地更新过包（内部版本 1000257），git 最终态即移植源。
+
+### 特性清单
+「无限小窗」（手机侧栏上下滚动/平板顶部左右滚动 + 惯性 fling + 视口外行裁剪不可获焦 + 桌面点开滚动行自动滚入）、普通退出保留副窗与滚动位置（retainedOnExit，再次进入 confirmRetainedResume 淡入）、手机竖屏 TOP 本地视口旋转（MiStepTopRotation/MiStepRotationAnimation/TaskLaunchIdentity 三新类 + 共享旋转租约生命周期）、模块设置页捐赠致谢在线名单（DonorFeed，唯一网络外联：jiusis.github.io，仅设置页打开时读，空 donor_feed_url 禁用）、快捷应用栏惯性滚动、微信小程序/公众号、平板横竖屏等一批修复。
+
+### 整取（77 个文件）
+fork 自 48e96f4 未碰过的全部上游改动：4 个新 Java 类 + 19 个修改 Java（MiStepLayout/MiStepTopRoll/MiStepTopBar/ShellCompat/WorkspaceOptions 等）+ donors.xml + docs（发行/安全/验证说明 1.0.4）+ tests（TaskRotationLifecycleTest 等 10 个）+ tools 新套件（workspace-retention/phone-workspace 等）。
+
+### 语义合并（7 文件 + 2 个新 controller）
+- **HostSideScrollController（新，691 行）**：侧栏滚动整簇（上游 MiStepHost 内 ~620 行）原样搬出；Slot 持有同一 TaskView，sideOrder 逻辑行 ↔ slots[] 物理下标仅在滚动停稳时重映射（mapSideSlots）；固定显示坐标视口容器层挂 TaskView 容器表面。
+- **HostEntryTopRotation（新，483 行，全静态）**：手机 TOP 本地视口旋转簇（上游 HostEntry 内 ~580 行）；共享旋转租约（sTaskRotationTransforms 弱引用放回 HostEntry 供 JVM 回归反射驱动）、closingTopRotations 过渡对账、MiStepRotationAnimation 可选加速（失败不影响配置/清理）。
+- **HostLifecycle**：suspendSession 记录 pendingSuspendReason + canRetainBoundTasks→finishRetainedSuspend（退出保留，不清槽不归还）；resume 侧 releaseForegroundRetainedTasks（桌面点开的任务还主区）+ confirmRetainedResume（表面就绪后淡入）；setWorkspaceAlpha 视口整组隐形；cellPresentationVisible 纳入 sidePrepared。
+- **HostAdoption**：returnToSystem 增加 nativeAlreadyFullscreen 手回（finishNativeReturnWhenIdle runOnIdle 清覆盖）与 applyRetainedDesktopReturn（等窗口绘制提交再确认）；releaseRetainedTaskToMain/finishExternalTopLaunch；preannounce 支持 retainedRoute 与滚动行 reveal；sideTaskMatchesEntry 按入口组件匹配（修微信小程序误切）。
+- **HostPromotion**：fullscreenExitTransaction 拆出 appendTaskViewExitOverrides；handoff 用 revealTransition.initialRevealFrame()（平板推回从松手位置横向拉开）；交接后恢复主区不透明度等提交回调。**fork 分歧保留：显式 FULLSCREEN=1（BUG-1），上游为 0。**
+- **HostTaskEvent**：createNext/onTaskViewCreated 改为按 Slot 传递（支持追加行）、SurfaceView TRANSLUCENT、sideRow 行初始 INVISIBLE、onTaskInfo 的 collected-row mode1 回声防抖 + retainedOnExit 分支 + finishExternalTopLaunch。
+- **HostSwap**：onSlotTapped 先过 prepareSideRowTap；平板滚动行滑回方向改为向上；startLiveHome 枚举全部 presented side roots（SideRoot）。
+- **HostWindow**：slotAtPoint 视口门 + 隐藏行不可点；scaleFor 滚动行按裁剪矩形；updateTouchRegion 视口裁剪；appendSlotViewport（leash 裁剪在未旋转的 SurfaceView 本地像素，动画之外）。
+- **HostCellLayout/Chrome/Geometry/State/Launch/Surface/TopTask**：compactCells 让位滚动行补位；applyRect sideRow 分支 + 固定行显式 crop；updateHint presentsSlot 门 + 补位行隐藏；refreshEmptyHintBackdrop 增量换底；refreshDisplayGeometry 平板 SUSPENDING 停扫描 + 滚动行重映射 + 退平板恢复 topFace；desktop-icon 广播带 component；trackRetainedSurfaces 记录 CHANGE start 事务 + isBorrowingPeer 保护；releaseTopTask 先翻面再交接（topRoll.show(false, handBack)）；beginTopDismiss 平板推回起始帧。
+- **HostEntry 族**：MiType 自动浮动限平板（手机恢复原生瞬态浮窗）；adjustMetrics 变体；ActivityRecord shouldRelaunch/relaunch/startFreezing/prepareSurfaces 五钩（TOP 重建布局保留真 Window）；WindowToken finishFixedRotationTransform 保留钩；dispatchProposedRotation → queueWorkspaceRotationRefresh；armZoomBridge 租约刷新重跑旋转策略；Transition finishTransition/abort/getLeashSurface 三钩（本地动画收尾交接）；desktop icon 广播带 component。
+- **AndroidManifest**：+INTERNET（捐赠名单）；SettingsActivity +configChanges（横竖屏/多窗不重建）；minSdk 保持 34；**fork 4 作用域保留**。version.json 1.4.1/1004001，marker build=1.4.1 release ×3。
+
+### 验证（§9 豁免延续：编译 + 静态，未真机）
+- build.ps1 全链路过（javac 251 文件 / clang / aapt2 / d8 / 打包）；签名包 dist/MiStep-1.4.1.apk SHA256=af08af8e…（含实机调试修复）。
+- tests/*.java 策略测试全过；rotation-jvm **205+24+69+8 全过——含上游新增 TaskRotationLifecycle 24 项旋转生命周期回归（驱动真实 releaseTaskRotationLocked/retain 语义，直证旋转簇移植正确）**。
+- tools/*-jvm 57 过 / 44 "失败"：与 v1.4.0 基线逐一对照，**零回归**；多出的 3 个 = rotation-jvm（无 run.py 的统计误报，run.ps1 全过）+ workspace-retention/phone-workspace（上游新增抽取式套件，与既有 42 个同类结构限制）。
+- 行数（如实）：MiStepHost 1184、HostEntryRotation 1119、HostEntrySupport 1279 三文件本轮超 1000（旋转族/侧栏族接入 shim 所致，与既有超标的 HostEntrySupport 同类，拆分列入待办）；HostEntry 702、HostSideScrollController 691、HostEntryTopRotation 483 达标。
+
+### 有意分歧（延续）
+① 4 作用域；② 显式 FULLSCREEN=1（BUG-1）；③ 看门狗/force-abandon/R1-R3 闸门；④ 简洁 marker；⑤ 捐赠名单保留上游 endpoint（INTERNET 权限新加，见 manifest 注释）。
+
+### 实机调试发现的移植缺口（2026-11-25，部署后当即修复）
+首版部署后「侧栏竖滑无响应」实机定位出 **9 个漏网 hunk**（逐 hunk 走查时被"无显式特性标记"的行掩盖）：①root dispatchTouchEvent 接入 trackSideScroll（致命——侧栏滚动手势唯一入口）；②root addOnAttachStateChangeListener→observeSideViewportRoot；③createSubViews 创建 sideInputViewport（致命——TaskView 全部 fallback 挂 root，视口容器层从未存在）；④TaskView surfaceCreated 钩（回收任务提前裁剪+挂视口）；⑤leaveExternalChangeToNative 保留退出分支；⑥isActive 接受滚动行（slots 数组可变长后按快照判定）；⑦canRender 要求 sidePrepared；⑧setTaskCellsCovered 遍历全部滚动行；⑨launch 重复入口按组件匹配（微信小程序）+ debugLeashAnim ShellCompat。修复后实机复测：`side arm maxOffset=1 → settled row=1`（空档滚入视口），收纳链路打通。
+**教训**：语义移植的逐 hunk 对账必须包含"无日志标记的行为接线"（listener/钩子/字段声明类 hunk）；JVM 回归（rotation 24 项）只覆盖 HostEntry 族，MiStepHost 手势/滚动族无 JVM 覆盖，实机调试日志（side arm/compact rows）是有效补位手段。
+
+### 真机回归欠账（部署后冒烟 + 新特性专项）
+① 全链路 + logcat 零 FATAL；② 无限小窗：连续收 4+ 应用、上下滚动、惯性、点视口外行自动滚入、桌面点开滚动行；③ 退出重进：副窗与滚动位置保留、淡入恢复；④ 微信小程序/公众号两修复场景；⑤ 设置页捐赠名单在线加载（验证 INTERNET 权限实际放行）。

@@ -50,6 +50,9 @@ final class HostTaskEventController {
     HostTaskEventController(MiStepHost host) { h = host; }
 
     void createSubViews() {
+        h.sideScroll.sideInputViewport = h.sideScroll.createSideInputViewport();
+        h.root.addView(h.sideScroll.sideInputViewport, new FrameLayout.LayoutParams(-1, -1));
+        h.updateSideInputViewportBounds();
         createNext(1);
     }
 
@@ -57,21 +60,18 @@ final class HostTaskEventController {
         if (index >= MiStepHost.SLOT_COUNT) {
             h.topCtrl.configureTabletTools();
             MiStepHost.log("TaskViews ready cells="+h.layout.cellCount+" interactive=1; system main has no TaskView");
+            h.requestCompaction();
             return;
         }
-        Consumer<Object> onCreated = new Consumer<Object>() {
-            @Override
-            public void accept(Object taskViewObj) {
-                MiStepHost.log("TaskView created slot=" + index + " -> " + taskViewObj);
-                h.main.post(() -> onTaskViewCreated(index, taskViewObj));
-            }
-        };
-        ShellCompat.createTaskView(h.factory, h.ctx, h.executor, onCreated);
+        Slot owner = h.slots[index];
+        ShellCompat.createTaskView(h.factory, h.ctx, h.executor, taskView ->
+                h.main.post(() -> onTaskViewCreated(owner, taskView, true)));
     }
 
-    void onTaskViewCreated(int index, Object taskViewObj) {
+    boolean onTaskViewCreated(Slot slot, Object taskViewObj, boolean next) {
+        final int index = slot.index;
+        boolean attached = false;
         try {
-            Slot slot = h.slots[index];
             View view = (View) taskViewObj;
             slot.view = view;
             slot.controller = ShellCompat.taskViewController(view);
@@ -83,15 +83,20 @@ final class HostTaskEventController {
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     slot.rect[2] - slot.rect[0], slot.rect[3] - slot.rect[1]);
             if (!MiStepHost.boundsHooksReady) throw new IllegalStateException("logical bounds hooks unavailable");
+            // ViewGroup clipping does not constrain separately composed task surfaces.
+            XposedHelpers.callMethod(view,"setEnableSurfaceClipping",true);
+            if (index != MiStepHost.SLOT_TOP && view instanceof android.view.SurfaceView) {
+                // TaskView renders task leashes as children, not in its opaque buffer.
+                // Do not expose SurfaceView's opaque resize colour between real frames.
+                ((android.view.SurfaceView) view).getHolder().setFormat(PixelFormat.TRANSLUCENT);
+            }
+            if (slot.sideRow >= 0 && index >= h.CELL_SLOT_COUNT) view.setVisibility(View.INVISIBLE);
             if(index==MiStepHost.SLOT_TOP) {
-                // SurfaceView clipping must be enabled explicitly; ViewGroup clipping alone
-                // does not crop the separately composed, continuously drawing application.
-                XposedHelpers.callMethod(view,"setEnableSurfaceClipping",true);
                 // Compose the original TOP surface above the host instead of punching a hole
                 // through the other live face. Set before attach; keep the native task parent.
                 XposedHelpers.callMethod(view,"setZOrderOnTop",true);
                 (h.layout.tabletLandscape?h.root:h.topLiveClip).addView(view,lp);
-            } else h.root.addView(view, lp);
+            } else (h.sideScroll.sideInputViewport == null ? h.root : h.sideScroll.sideInputViewport).addView(view, lp);
             h.applyRect(slot);
             h.ensureCellBackground(slot);
 
@@ -99,11 +104,12 @@ final class HostTaskEventController {
                 h.createTopTaskControls();
                 h.updateHint(slot); h.updateTouchRegion(slot);
                 MiStepHost.log("upper landscape TaskView ready");
-                createNext(index+1); return;
+                createNext(index+1);
+                return true;
             }
             slot.hint = h.makeEmptyHint();
             slot.hint.setOnClickListener(v -> { if (!h.taskCellsCovered) h.onSlotTapped(slot.index); });
-            h.root.addView(slot.hint, h.hintParams(slot));
+            (h.sideScroll.sideInputViewport == null ? h.root : h.sideScroll.sideInputViewport).addView(slot.hint, h.hintParams(slot));
             // 修：hint 在 applyRect 之后才创建，之前一直停在 (0,0)（屏幕上左上角那个多余的加号）。
             h.applyRect(slot);
             h.updateHint(slot);
@@ -114,11 +120,13 @@ final class HostTaskEventController {
             view.setOnTouchListener((v, e) -> canRender(slot) && h.scene == MiStepHost.ACTIVE && h.onSlotTouch(slot.index, e));
             h.updateTouchRegion(slot);
             MiStepHost.log("slot " + index + " attached rect=" + java.util.Arrays.toString(slot.rect));
+            attached = true;
         } catch (Throwable t) {
             MiStepHost.log("onTaskViewCreated slot=" + index + " FAILED: " + t);
             XposedBridge.log(t);
         }
-        createNext(index + 1);
+        if (next) createNext(index + 1);
+        return attached;
     }
 
     void resetMainTaskLeash(int taskId) {
@@ -202,12 +210,14 @@ final class HostTaskEventController {
     }
 
     boolean isActive(Slot slot) {
+        Slot[] current = h.slots;
         return h.root != null && MiStepHost.sInstance == h && slot.index > 0
-                && slot.index < MiStepHost.SLOT_COUNT && h.slots[slot.index] == slot;
+                && slot.index < current.length && current[slot.index] == slot
+                && (slot.index == MiStepHost.SLOT_TOP || slot.index < h.CELL_SLOT_COUNT || slot.sideRow >= 0);
     }
 
     boolean canRender(Slot slot) {
-        return isActive(slot) && !slot.parked && h.screenOn
+        return isActive(slot) && (slot.sideRow < 0 || slot.sidePrepared) && !slot.parked && h.screenOn
                 && (h.scene == MiStepHost.ACTIVE || h.scene == MiStepHost.RESUMING)
                 && h.root.getVisibility() == View.VISIBLE;
     }
@@ -375,13 +385,27 @@ final class HostTaskEventController {
         try {
             int taskId = XposedHelpers.getIntField(info, "taskId");
             if (slot.promoting || slot.parked || slot.retiredTaskId == taskId) return;
+            Object token = XposedHelpers.getObjectField(info, "token");
+            if (slot.sideRow >= 0 && taskId == slot.taskId && token != null
+                    && token.equals(slot.taskToken) && MiStepHost.windowModeOf(info) == 1) {
+                // A fullscreen callback can still be queued when the collect transaction
+                // has already given the same task back to this TaskView.
+                Object current = currentOrganizedTaskInfo(slot, taskId, token);
+                if (MiStepHost.windowModeOf(current) == 6) info = current;
+            }
             boolean visible = XposedHelpers.getBooleanField(info, "isVisible");
             boolean running = XposedHelpers.getBooleanField(info, "isRunning");
-            Object token = XposedHelpers.getObjectField(info, "token");
             int mode = MiStepHost.windowModeOf(info);
+            if (h.retainedOnExit && (h.scene == MiStepHost.SUSPENDING || h.scene == MiStepHost.SUSPENDED) && running && mode == 1
+                    && slot.occupied && taskId == slot.taskId && token != null
+                    && token.equals(slot.taskToken)) {
+                if (h.scene == MiStepHost.SUSPENDED) h.releaseRetainedTaskToMain(slot, true);
+                return;
+            }
             if(slotIndex==MiStepHost.SLOT_TOP && mode==1 && slot.occupied && taskId==slot.taskId
                     && token!=null && token.equals(slot.taskToken)) {
-                h.topCtrl.releaseTopTask(true,false,null);return;
+                if (running && visible) h.finishExternalTopLaunch(slot);
+                return;
             }
             if (slotIndex > MiStepHost.SLOT_MAIN && mode == 5 && slot.occupied
                     && taskId == slot.taskId && token != null && token.equals(slot.taskToken)) {
@@ -542,6 +566,12 @@ final class HostTaskEventController {
     }
 
     void scheduleSideVisibilityRepair(Slot slot) {
+        scheduleSideVisibilityRepair(slot, false);
+    }
+
+    /** warming=true：滚动行尚未进入视口就先解冻/准备表面（入场前 48ms 预热，绕过 presentsSlot 门）。 */
+    void scheduleSideVisibilityRepair(Slot slot, boolean warming) {
+        if (!warming && !h.presentsSlot(slot)) return;
         if (!canRender(slot) || h.scene != MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked
                 || slot.promoting || slot.launching
                 || slot.frozen || !slot.occupied || slot.taskVisible || slot.reassertPending) return;
@@ -551,11 +581,11 @@ final class HostTaskEventController {
         slot.reassertPending = true;
         h.main.postDelayed(() -> {
             slot.reassertPending = false;
-            if (!visibilityRepairCurrent(slot, epoch, binding, taskId, token)) return;
+            if (!visibilityRepairCurrent(slot, epoch, binding, taskId, token, warming)) return;
             for (Slot side : h.slots) if (side.promoting || side.launching || side.frozen) return;
             h.executeOnShell(() -> {
                 try {
-                    if (!visibilityRepairCurrent(slot, epoch, binding, taskId, token)
+                    if (!visibilityRepairCurrent(slot, epoch, binding, taskId, token, warming)
                             || !controllerOwns(slot, taskId, token)) return;
                     Object foreground = null;
                     java.util.List<?> roots = h.rootInfos();
@@ -573,7 +603,8 @@ final class HostTaskEventController {
                             .getDeclaredConstructor().newInstance();
                     int count = 0;
                     for (Slot side : h.slots) {
-                        if (!canRender(side) || side.promoting || side.launching || side.frozen
+                        if ((!h.presentsSlot(side) && (!warming || side != slot))
+                                || !canRender(side) || side.promoting || side.launching || side.frozen
                                 || !side.occupied || !controllerOwns(side, side.taskId, side.taskToken)) continue;
                         Object core = null;
                         for (Object info : roots) if (new LiveTask(side).matches(info)) { core = info; break; }
@@ -581,15 +612,18 @@ final class HostTaskEventController {
                         XposedHelpers.callMethod(wct, "setHidden", side.taskToken, false);
                         XposedHelpers.callMethod(wct, "setForceTranslucent", side.taskToken, true);
                         XposedHelpers.callMethod(wct, "setAlwaysOnTop", side.taskToken, true);
-                        XposedHelpers.callMethod(wct, "setFocusable", side.taskToken, true);
+                        // 视口外的行不可获焦，防止被裁剪的 Activity 或其弹窗抢焦点。
+                        XposedHelpers.callMethod(wct, "setFocusable", side.taskToken,
+                                side.sideRow < 0 || side.sideShown);
                         XposedHelpers.callMethod(wct, "reorder", side.taskToken, true);
                         count++;
                     }
-                    if (count == 0 || !visibilityRepairCurrent(slot, epoch, binding, taskId, token)) return;
+                    if (count == 0 || !visibilityRepairCurrent(slot, epoch, binding, taskId, token, warming)) return;
                     boolean applied = h.applyWct("retain-side-order", wct);
                     if (applied) {
                         for (Slot side : h.slots) {
-                            if (canRender(side) && side.occupied && !side.promoting && !side.frozen
+                            if ((h.presentsSlot(side) || (warming && side == slot))
+                                    && canRender(side) && side.occupied && !side.promoting && !side.frozen
                                     && controllerOwns(side, side.taskId, side.taskToken))
                                 XposedHelpers.callMethod(h.transitions, "setTaskViewVisible", side.controller, true);
                         }
@@ -600,7 +634,7 @@ final class HostTaskEventController {
                     MiStepHost.log("side order repair stopped; retain original task: " + error);
                 }
             });
-        }, 160L);
+        }, warming ? 48L : 160L);
     }
 
     void reassertSideTaskViews(String reason) {
@@ -611,7 +645,7 @@ final class HostTaskEventController {
             int count = 0;
             java.util.List<RenderBinding> frames = new java.util.ArrayList<>();
             for (Slot side : h.slots) {
-                if (side.index <= MiStepHost.SLOT_MAIN || !canRender(side) || !side.occupied
+                if (side.index <= MiStepHost.SLOT_MAIN || !h.presentsSlot(side) || !canRender(side) || !side.occupied
                         || (side.index==MiStepHost.SLOT_TOP && !h.topCtrl.topFace) || side.parked || side.promoting || side.launching || side.frozen
                         || side.controller == null
                         || !controllerOwns(side, side.taskId, side.taskToken)) continue;
@@ -651,10 +685,26 @@ final class HostTaskEventController {
         })) MiStepHost.log("side TaskView reassert skipped reason=" + reason + ": no Shell queue");
     }
 
-    boolean visibilityRepairCurrent(Slot slot, long epoch, long binding, int id, Object token) {
-        return canRender(slot) && h.scene == MiStepHost.ACTIVE && !slot.promoting && !slot.launching && !slot.frozen
+    boolean visibilityRepairCurrent(Slot slot, long epoch, long binding, int id, Object token,
+            boolean warming) {
+        return (warming || h.presentsSlot(slot)) && canRender(slot) && h.scene == MiStepHost.ACTIVE
+                && !slot.promoting && !slot.launching && !slot.frozen
                 && h.sceneEpoch == epoch && slot.taskEpoch == binding && slot.taskId == id
                 && token != null && token.equals(slot.taskToken);
+    }
+
+    Object currentOrganizedTaskInfo(Slot slot, int taskId, Object token) {
+        try {
+            Object organizer = XposedHelpers.getObjectField(slot.controller, "mTaskOrganizer");
+            synchronized (XposedHelpers.getObjectField(organizer, "mLock")) {
+                Object tasks = XposedHelpers.getObjectField(organizer, "mTasks");
+                Object appeared = XposedHelpers.callMethod(tasks, "get", taskId);
+                Object info = appeared == null ? null : XposedHelpers.callMethod(appeared, "getTaskInfo");
+                if (info != null && XposedHelpers.getIntField(info, "taskId") == taskId
+                        && token.equals(XposedHelpers.getObjectField(info, "token"))) return info;
+            }
+        } catch (Throwable unavailable) { /* Ignore stale or unsupported organizer state. */ }
+        return null;
     }
 
 }

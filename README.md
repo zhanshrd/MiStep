@@ -1,7 +1,7 @@
 # Mi Step · zhanshrd 维护分支
 
 > 状态栏**双角横滑**唤出的多任务工作区：1 个主区 + 3 个副任务 + **1 个顶部横屏任务**，主区整屏缩放、副格独立运行。
-> 基于 [JIUSIS/MiStep](https://github.com/JIUSIS/MiStep)（九思ing，锤子科技 One Step 开源项目的复刻）**v1.0.1 语义移植 + v1.0.2/v1.0.3 语义移植**，叠加本分支的 **HyperOS 4 / Android 17 实机适配、bug 修复与工程化重构**。当前版本 **1.4.0**。
+> 基于 [JIUSIS/MiStep](https://github.com/JIUSIS/MiStep)（九思ing，锤子科技 One Step 开源项目的复刻）**v1.0.1 / v1.0.2 / v1.0.3 / v1.0.4 语义移植**，叠加本分支的 **HyperOS 4 / Android 17 实机适配、bug 修复与工程化重构**。当前版本 **1.4.1**。
 
 - 上游项目：https://github.com/JIUSIS/MiStep （酷安发布帖作者：九思ing）
 - 本分支实测环境：**Xiaomi 17 Max (byron) · HyperOS 4.0.3.0.XAFCNXM · Android 17 (SDK 37) · Magisk 30.7 + Zygisk Next 1.5.2 + LSPosed v2.2.0**
@@ -14,7 +14,7 @@
 - **已完整同步上游 v1.0.1**（移植基线 `55172b5`，逐行对账核对）：顶部横屏任务与双指翻面、应用分身支持、快捷应用自定义（毛玻璃选择框）、全屏防误触入口规则、歌词译文排列、剪贴板修复、控制中心原生图标、剪贴板样式统一等。
 - **有意分歧**（详见 [`docs/FORK_NOTES.md`](docs/FORK_NOTES.md)）：
   - 推荐作用域**保留 4 项**：本机实测 LSPosed 写入 `android` 值会被静默忽略，系统框架须以 `system` 勾选（BUG-3）；上游 1.0.1 起收窄为 2 项，本分支不跟随。
-  - fork 版本线独立（`1.4.0` / `1004000`），不采用上游的特性串 marker。
+  - fork 版本线独立（`1.4.1` / `1004001`），不采用上游的特性串 marker。
   - 保留本分支全部修复与看门狗（见下）。
 
 ## 本分支的修复（相对上游）

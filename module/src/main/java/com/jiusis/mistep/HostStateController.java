@@ -129,7 +129,9 @@ final class HostStateController {
     }
 
     boolean leaveExternalChangeToNative(Object change) {
-        if (change == null || h.scene != MiStepHost.ACTIVE || !h.screenOn || h.keyguardLocked || h.transferBusy) return false;
+        if (change == null || (h.scene != MiStepHost.ACTIVE
+                && !(h.retainedOnExit && (h.scene == MiStepHost.SUSPENDING || h.scene == MiStepHost.SUSPENDED)))
+                || !h.screenOn || h.keyguardLocked || h.transferBusy) return false;
         try {
             int mode = (Integer) XposedHelpers.callMethod(change, "getMode");
             if (mode != 6 && mode != 3) return false;
@@ -334,7 +336,9 @@ final class HostStateController {
                         return;
                     }
                     String pkg = intent == null ? null : intent.getStringExtra("package");
-                    h.promoteSideTaskForDesktopLaunch(pkg, intent == null ? -1 : intent.getIntExtra("userId", -1));
+                    h.promoteSideTaskForDesktopLaunch(pkg,
+                            intent == null ? -1 : intent.getIntExtra("userId", -1),
+                            intent == null ? null : intent.getParcelableExtra("component", ComponentName.class));
                 }
             };
             IntentFilter filter = new IntentFilter(MiStepHost.DESKTOP_ICON_LAUNCH_ACTION);

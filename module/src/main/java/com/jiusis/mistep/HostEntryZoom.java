@@ -215,6 +215,10 @@ final class HostEntryZoom {
                             try {
                                 if (HostEntry.sZoomed) synchronized (XposedHelpers.getObjectField(service, "mGlobalLock")) {
                                     MiStepTopInsets.refresh(HostEntry.sDisplayContent, MiStepDesktopLaunchBridge::ownsTopTask);
+                                    HostEntry.ZoomTarget rTarget = HostEntry.sZoomTarget;
+                                    if (HostEntry.sFullscreenRotationActive && rTarget != null
+                                            && rTarget.display == HostEntry.sDisplayContent)
+                                        HostEntryRotation.INSTANCE.refreshMiStepTaskRotationLocked(HostEntry.sDisplayContent);
                                     XposedHelpers.callMethod(service, "updateFocusedWindowLocked", 0, true);
                                 }
                             } catch (Throwable unavailable) {HostEntry.log("workspace lease focus refresh skipped: "+unavailable);}
@@ -617,6 +621,29 @@ final class HostEntryZoom {
                             }
                         }
                     });
+                }
+            });
+            XC_MethodHook topRotationEnd = new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if (!p.hasThrowable()) HostEntryTopRotation.onTopRotationTransitionEnd();
+                }
+            };
+            XposedBridge.hookAllMethods(transition, "finishTransition", topRotationEnd);
+            XposedBridge.hookAllMethods(transition, "abort", topRotationEnd);
+            XposedBridge.hookAllMethods(transition, "getLeashSurface", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if (p.args.length != 2 || p.args[0] == null) return;
+                    Object page = p.args[0];
+                    if (!MiStepRotationAnimation.owns(page) || !HostEntryTopRotation.sTopRotationBounds.containsKey(page))
+                        return;
+                    try {
+                        if (!HostEntryTopRotation.ownsTaskRotationTransform(page)
+                                || !HostEntry.isUpperLandscapeTask(XposedHelpers.callMethod(page, "getTask"))
+                                || !MiStepRotationAnimation.inTransition(page)) return;
+                        // Give the native transition the fixed carrier before it builds its reparent.
+                        HostEntryTopRotation.topRotationHandoffs.add(page);
+                        MiStepRotationAnimation.cancel(page);
+                    } catch (Throwable error) { HostEntry.log("TOP native surface handoff unavailable: " + error); }
                 }
             });
             HostEntry.log("Transition#buildFinishTransaction magnification replay hooked");
